@@ -84,7 +84,6 @@ export const navigationMenus = [
     icon: ShoppingCart,
     children: [
       { key: "procurement-workspace", label: "采购工作台", route: "/procurement/workspace" },
-      { key: "procurement-workspace-legacy", label: "登记采购", route: "/procurement/workspace", badge: "旧" },
       { key: "purchase-cost-center", label: "成本管理", route: "/purchase-cost-center" },
       { key: "procurement-reconciliation", label: "采购核对", route: "/procurement/platform-orders" },
       { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }

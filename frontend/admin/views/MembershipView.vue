@@ -8,6 +8,7 @@ import { membershipDisplay } from "../utils/account-membership";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { canAccessPage } from "../../../src/shared/permissions.js";
 import AiCreditsPanel from "../components/AiCreditsPanel.vue";
+import TenantPluginBindingPanel from "../components/TenantPluginBindingPanel.vue";
 import MembershipActivationForm from "../components/MembershipActivationForm.vue";
 
 const props = defineProps({ embedded: { type: Boolean, default: false } });
@@ -89,11 +90,13 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
       </el-card>
     </div>
     <el-collapse v-if="tenant && canAccessPage(auth.user, '/ai-credits')"><el-collapse-item title="AI积分 · 余额与使用记录" name="credits"><AiCreditsPanel /></el-collapse-item></el-collapse>
+    <TenantPluginBindingPanel v-if="tenant" :enabled="status.active" />
     <el-card shadow="never" class="membership-start">
-      <template #header><strong>首次使用，按这三步开始</strong></template>
+      <template #header><strong>首次使用，按这四步开始</strong></template>
       <ol><li><strong>开通试用或会员</strong><p>向服务人员领取会员激活码，在上方兑换。套餐期限和店铺额度以实际开通结果为准，注册不会自动收费。</p></li>
         <li><strong>绑定自己的店铺</strong><p>在企业店铺中填写你自己的 Ozon Client ID 和 API Key；不要在聊天中发送密钥。</p><el-button v-if="status.active && canAccessPage(auth.user, '/tenant-shops')" @click="router.push('/tenant-shops')">配置企业店铺</el-button></li>
-        <li><strong>验证第一条业务流程</strong><p>先拉取新订单，再上传产品图试用工作流。AI 技能库开放后再进行生成，产出需人工检查；AI 积分与会员时长分别管理。</p><el-button v-if="status.active && canAccessPage(auth.user, '/orders')" @click="router.push('/orders')">打开订单</el-button><el-button v-if="status.active && canAccessPage(auth.user, '/product-workflows')" @click="router.push('/product-workflows')">打开产品工作流</el-button></li></ol>
+        <li><strong>绑定采集插件</strong><p>在上方“插件绑定”中生成或复制本企业专属密钥，粘贴到插件的“企业专属密钥”，点击“保存密钥”。采集内容先进入本企业采集箱。</p></li>
+        <li><strong>验证第一条业务流程</strong><p>先拉取新订单，再上传产品图试用工作流。图片按成功张数扣积分、文本免费，产出需人工检查；AI 积分与会员时长分别管理。</p><el-button v-if="status.active && canAccessPage(auth.user, '/orders')" @click="router.push('/orders')">打开订单</el-button><el-button v-if="status.active && canAccessPage(auth.user, '/product-workflows')" @click="router.push('/product-workflows')">打开产品工作流</el-button></li></ol>
     </el-card>
     <el-card v-if="!props.embedded" shadow="never" class="membership-tools">
       <template #header><strong>基础工具</strong></template>

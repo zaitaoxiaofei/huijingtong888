@@ -25,7 +25,14 @@ export function createAiCreditRuntime({ query = mysqlQuery, transaction = withMy
   const ledger = createAiCreditLedger({ transaction });
   let privateStore = resultStore;
   return {
-    mode: session => readAiCreditMode(session, query),
+    async mode(session) {
+      try { if (session) await ledger.provision(session); }
+      catch (error) {
+        if (error.code === "ER_NO_SUCH_TABLE") throw fail("企业 AI 积分账本尚未安装，请联系平台管理员", "AI_CREDIT_STORAGE_UNAVAILABLE", 503);
+        throw error;
+      }
+      return readAiCreditMode(session, query);
+    },
     async existingProvider(session, idempotencyKey) {
       const found = await query(`SELECT a.provider, a.model FROM ai_credit_tasks t
         JOIN ai_credit_attempts a ON a.task_id = t.id

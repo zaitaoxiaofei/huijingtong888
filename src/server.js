@@ -742,6 +742,8 @@ const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.ba
 const OZON_ACTION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const scheduledJobDefinitions = [
+  { key: "ai_credit_monthly_benefits", name: "企业 AI 自然月积分赠送", category: "operations", priority: "normal",
+    intervalMinutes: 60, initialDelaySeconds: 120, catchupEnabled: true, maxCatchupRuns: 1 },
   ORDER_PROFIT_DAILY_FX_JOB,
   {
     key: "operational_notifications",
@@ -1144,6 +1146,10 @@ const runAiMediaRetentionCleanup = createAiMediaRetentionSweep({
 });
 
 const scheduledJobHandlers = {
+  ai_credit_monthly_benefits: withForegroundApiDeferral("ai_credit_monthly_benefits", async () => {
+    const { runAiCreditMonthlyBenefits } = await import("./services/ai-credit-monthly-benefits.js");
+    return runAiCreditMonthlyBenefits();
+  }),
   sku_traffic_daily_dispatch: withForegroundApiDeferral("sku_traffic_daily_dispatch", () => services.skuTrafficDailySchedule()),
   ozon_credential_health: withForegroundApiDeferral("ozon_credential_health", () => runTenantScheduledWork(tenantId => checkTenantOzonHealth(tenantId))),
   order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {

@@ -60,21 +60,17 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
     await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(1,7,'member',JSON_ARRAY('operations')),(2,7,'member',JSON_ARRAY('operations')),(3,7,'member',JSON_ARRAY('operations'))");
     await fixture.query("INSERT INTO platform_grants(person_id,role,active,reason) VALUES(9,'super_admin',1,'Offline fixture')");
     await configure();
-    await t.test("default internal mode remains legacy; opt-in is explicit and durable", async () => {
+    await t.test("every enterprise uses credits and default receives its precise opening balance", async () => {
       await assert.rejects(readAiCreditMode(actor), { code: "AI_CREDIT_ACCOUNT_NOT_CONFIGURED" });
-      await assert.rejects(readAiCreditMode({ ...actor, tenant: { id: 2, slug: "default" } }), { code: "AI_CREDIT_ACCOUNT_NOT_CONFIGURED" });
-      await assert.rejects(withAiTenantSession({ ...actor, tenant: { id: 3, slug: "customer-b" } }, () => chatWithAiProvider({ prompt: "unconfigured" })), { code: "AI_CREDIT_ACCOUNT_NOT_CONFIGURED" });
-      assert.equal((await tasks()).length, 0);
       const internal = { ...actor, tenant: { id: 1, slug: "default" } };
-      const legacy = await generate(null, {}, internal);
-      assert.equal(legacy.generatedImages.length, 1);
-      assert.equal((await tasks()).length, 0);
-      assert.equal(Number((await fixture.query("SELECT request_count FROM tenant_ai_usage WHERE tenant_id=1"))[0].request_count), 1);
+      const image = await generate("default-credited", {}, internal);
+      assert.equal(image.generatedImages.length, 1);
+      assert.equal((await ledger.wallet(internal)).available_points, "9999999999999990");
+      assert.equal((await ledger.audit(internal)).consistent, true);
+      assert.equal((await readAiCreditMode(internal)).mode, "credits");
       submissions = 0; calls.length = 0;
-      await ledger.configureAccount(admin, { tenantId: 2, status: "active" });
+      await ledger.wallet(actor);
       assert.equal((await readAiCreditMode(actor)).mode, "credits");
-      await assert.rejects(generate("unpriced"), { code: "AI_CREDIT_PRICE_UNAVAILABLE" });
-      await ledger.createPrice(admin, { priceKey: "image.generate", version: 1, pointsPerResult: 10 });
       await ledger.recharge(admin, { tenantId: 2, reference: "fixture-recharge", points: 200, reason: "Offline fixture only" });
     });
     await t.test("concurrent replay submits once, validates pixels, bills once and reuses saved result", async () => {
@@ -90,7 +86,7 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
       assert.match(result.generatedImages[0].contentSha256, /^[a-f0-9]{64}$/);
       const replay = await generate("stable-worker-1");
       assert.equal(replay.taskId, result.taskId); assert.equal(submissions, 1);
-      assert.equal(Number((await ledger.wallet(actor)).available_points), 190);
+      assert.equal(Number((await ledger.wallet(actor)).available_points), 290);
       assert.equal((await ledger.audit(actor)).consistent, true);
       await assert.rejects(generate("stable-worker-1", { finalPrompt: "Different request" }), { code: "AI_CREDIT_CONFLICT" });
       await assert.rejects(withAiTenantSession({ ...actor, tenant: { id: 3, slug: "customer-b" } }, () => getAiTaskFile(result.taskId, "generated", result.generatedImages[0].filename)), { status: 404 });
@@ -175,17 +171,12 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
       assert.equal(submissions, before);
       await fixture.query("UPDATE tenant_members SET active=1 WHERE tenant_id=2");
     });
-    await t.test("active accounts cannot bypass via low-level image, saved poll, text, vision, stream or test config", async () => {
+    await t.test("active accounts cannot bypass billing via low-level image or saved poll", async () => {
       const before = submissions + polls;
       const [runtime] = await aiImageRuntimePoolConfig();
       for (const operation of [
-        () => reserveTenantAiRequest("text"),
         () => generateOpenAiImages({ taskId: randomUUID(), finalPrompt: "bypass", runtimeConfig: runtime, providerJob: { jobId: "saved" } }),
         () => editOpenAiImage({ imageBuffer: png, prompt: "bypass", runtimeConfig: runtime }),
-        () => chatWithAiProvider({ prompt: "bypass" }),
-        () => visionWithAiProvider({ messages: [{ role: "user", content: "bypass" }] }),
-        () => streamAiProviderResponse({ prompt: "bypass" }),
-        () => testAiProviderConfig({ provider: "custom", baseUrl: runtime.baseUrl, apiKey: "override", textModel: "fixture" })
       ]) await assert.rejects(withAiTenantSession(actor, operation), { code: "AI_CREDIT_CAPABILITY_DISABLED" });
       const diagnostics = await withAiTenantSession(actor, () => testOpenAiImageProvider({ runtimeConfig: runtime }));
       assert.equal(diagnostics.ok, false);
@@ -194,10 +185,10 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
     await t.test("disabled account, missing wallet, missing price, insufficient balance and absent key fail closed", async () => {
       const before = submissions;
       await assert.rejects(generate(null), { code: "AI_CREDIT_IDEMPOTENCY_REQUIRED" });
-      await assert.rejects(generate("multi", { imageCount: 2 }), { code: "AI_CREDIT_CAPABILITY_DISABLED" });
+      await assert.rejects(generate("invalid-count", { imageCount: 4 }), { code: "AI_CREDIT_INPUT_INVALID" });
       await ledger.configureAccount(admin, { tenantId: 2, status: "disabled" });
       await assert.rejects(generate("disabled"), { code: "AI_CREDIT_ACCOUNT_DISABLED" });
-      await assert.rejects(withAiTenantSession(actor, () => chatWithAiProvider({ prompt: "bypass" })), { code: "AI_CREDIT_ACCOUNT_DISABLED" });
+      assert.equal((await withAiTenantSession(actor, () => reserveTenantAiRequest("text"))).mode, "free");
       await ledger.configureAccount(admin, { tenantId: 2, status: "active" });
       await fixture.query("RENAME TABLE ai_credit_accounts TO fixture_accounts_saved");
       try { await assert.rejects(generate("table-missing"), { code: "AI_CREDIT_STORAGE_UNAVAILABLE" }); }

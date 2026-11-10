@@ -13,10 +13,11 @@ import { createAiCreditLedger } from "../src/services/ai-credit-ledger.js";
 import { createAiCreditExecutor } from "../src/services/ai-credit-execution.js";
 import { tryGenerateCreditedImage } from "../src/services/ai-credit-image-adapter.js";
 
-test("text is free even without a wallet; the customer skill pause still applies first", async () => {
+test("text is free for every valid enterprise even without a wallet", async () => {
   const query = async () => { throw new Error("Free text must not read the money ledger"); };
   assert.equal((await checkAiCreditProviderBoundary({ tenant: { id: 7, slug: "default" } }, "text", query)).mode, "free");
-  await assert.rejects(checkAiCreditProviderBoundary({ tenant: { id: 7, slug: "customer" } }, "text", query), { code: "AI_SKILLS_DISABLED" });
+  assert.equal((await checkAiCreditProviderBoundary({ tenant: { id: 7, slug: "customer" } }, "text", query)).mode, "free");
+  await assert.rejects(checkAiCreditProviderBoundary({ tenant: null }, "text", query), { code: "AI_SKILLS_DISABLED" });
   assert.deepEqual(aiImageCharge(3), { successfulImages: 3, points: 30, amountCents: 30 });
   assert.throws(() => aiImageCharge(0.5));
 });

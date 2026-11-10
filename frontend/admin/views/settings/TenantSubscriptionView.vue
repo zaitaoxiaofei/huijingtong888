@@ -604,7 +604,7 @@ onMounted(load);
         </section>
       </el-tab-pane>
       <el-tab-pane label="AI积分" name="credits" lazy>
-        <el-select v-model="creditTenantId" filterable clearable placeholder="请选择要管理积分的企业" style="width: 320px; margin-bottom: 16px"><el-option v-for="tenant in currentRows" :key="tenant.id" :value="Number(tenant.id)" :label="tenant.slug === 'default' ? `${tenant.name}（内部空间沿用现有AI配置）` : tenant.name" :disabled="tenant.slug === 'default'" /></el-select>
+        <el-select v-model="creditTenantId" filterable clearable placeholder="请选择要管理积分的企业" style="width: 320px; margin-bottom: 16px"><el-option v-for="tenant in currentRows" :key="tenant.id" :value="Number(tenant.id)" :label="tenant.name" /></el-select>
         <AiCreditsPanel v-if="creditTenantId" :key="creditTenantId" platform :tenant-id="creditTenantId" :tenant-name="rows.find(row => Number(row.id) === creditTenantId)?.name || ''" />
         <el-empty v-else description="选择企业后查看积分及登记手工充值" />
       </el-tab-pane>

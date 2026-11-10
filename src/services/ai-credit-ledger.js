@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { aiCreditPoints, aiCreditPointsValue, DEFAULT_AI_CREDIT_POINTS, MONTHLY_AI_CREDIT_POINTS } from "../shared/ai-credit-points.js";
+import { shanghaiDateKey } from "../shanghai-time.js";
 import { AI_IMAGE_POINTS, AI_IMAGE_PRICE_KEY, AI_IMAGE_PRICE_VERSION } from "../shared/ai-image-pricing.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
 
@@ -24,12 +26,16 @@ function hash(value) {
   return value;
 }
 const rows = async (connection, sql, params = []) => (await connection.execute(sql, params))[0];
+const walletView = row => ({ ...row, available_points: aiCreditPointsValue(row.available_points), frozen_points: aiCreditPointsValue(row.frozen_points) });
+const walletFields = "tenant_id, account_key, status, CAST(available_points AS CHAR) AS available_points, CAST(frozen_points AS CHAR) AS frozen_points, updated_at";
+const entryFields = "id, entry_key, task_id, kind, CAST(available_delta AS CHAR) AS available_delta, CAST(frozen_delta AS CHAR) AS frozen_delta, CAST(available_after AS CHAR) AS available_after, CAST(frozen_after AS CHAR) AS frozen_after, reason, created_at";
+const entryView = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, ["available_delta", "frozen_delta", "available_after", "frozen_after"].includes(key) ? aiCreditPointsValue(value) : value]));
 const taskView = row => ({ ...row, requested_results: Number(row.requested_results), successful_results: Number(row.successful_results),
   points_per_result: Number(row.points_per_result), reserved_points: Number(row.reserved_points), charged_points: Number(row.charged_points) });
 
 // No table creation on the money path. An explicit migration installs the schema.
 // This boundary is server-only: browsers cannot report supplier outcomes or settle.
-export function createAiCreditLedger({ transaction }) {
+export function createAiCreditLedger({ transaction, clock = () => new Date() }) {
   if (typeof transaction !== "function") throw new Error("AI credits require transactional storage");
   async function platform(session, connection) {
     if (session?.platform_role !== "super_admin") throw error("仅平台超级管理员可以管理积分", "AI_CREDIT_FORBIDDEN", 403);
@@ -48,18 +54,54 @@ export function createAiCreditLedger({ transaction }) {
     if (!(await rows(connection, "SELECT id FROM tenants WHERE id = ? FOR UPDATE", [id])).length) throw error("企业不存在", "AI_CREDIT_NOT_FOUND", 404);
   }
   async function account(connection, id, active = false) {
-    const found = await rows(connection, "SELECT * FROM ai_credit_accounts WHERE tenant_id = ? FOR UPDATE", [id]);
+    const found = await rows(connection, `SELECT ${walletFields} FROM ai_credit_accounts WHERE tenant_id = ? FOR UPDATE`, [id]);
     if (!found.length || active && found[0].status !== "active") throw error("企业 AI 积分账户尚未开通", "AI_CREDIT_ACCOUNT_DISABLED", 409);
-    return found[0];
+    return walletView(found[0]);
   }
   async function entry(connection, wallet, { key, taskId = null, kind, availableDelta, frozenDelta, actor, reason }) {
-    const available = integer(Number(wallet.available_points) + availableDelta, "可用积分");
-    const frozen = integer(Number(wallet.frozen_points) + frozenDelta, "冻结积分");
+    const available = aiCreditPoints(aiCreditPoints(wallet.available_points) + aiCreditPoints(availableDelta));
+    const frozen = aiCreditPoints(aiCreditPoints(wallet.frozen_points) + aiCreditPoints(frozenDelta));
+    if (available < 0n || frozen < 0n) throw error("可用或冻结积分不足", "AI_CREDIT_INSUFFICIENT", 402);
     await rows(connection, `INSERT INTO ai_credit_entries
       (tenant_id, entry_key, task_id, kind, available_delta, frozen_delta, available_after, frozen_after, created_by_person_id, reason)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [wallet.tenant_id, key, taskId, kind, availableDelta, frozenDelta, available, frozen, actor, reason]);
-    await rows(connection, "UPDATE ai_credit_accounts SET available_points = ?, frozen_points = ? WHERE tenant_id = ?", [available, frozen, wallet.tenant_id]);
-    wallet.available_points = available; wallet.frozen_points = frozen;
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [wallet.tenant_id, key, taskId, kind, String(availableDelta), String(frozenDelta), String(available), String(frozen), actor, reason]);
+    await rows(connection, "UPDATE ai_credit_accounts SET available_points = ?, frozen_points = ? WHERE tenant_id = ?", [String(available), String(frozen), wallet.tenant_id]);
+    wallet.available_points = aiCreditPointsValue(available); wallet.frozen_points = aiCreditPointsValue(frozen);
+  }
+  async function ensureBenefits(connection, session) {
+    const id = tenantId(session);
+    const existing = await rows(connection, `SELECT ${walletFields} FROM ai_credit_accounts WHERE tenant_id = ? FOR UPDATE`, [id]);
+    if (!existing.length) {
+      const [tenant] = await rows(connection, "SELECT feature_flags_json FROM tenants WHERE id = ?", [id]);
+      let flags = tenant.feature_flags_json || {};
+      try { if (typeof flags === "string") flags = JSON.parse(flags); }
+      catch { throw error("企业积分配置损坏，请联系平台核查", "AI_CREDIT_STORAGE_UNAVAILABLE", 503); }
+      if (!flags || typeof flags !== "object" || Array.isArray(flags)) throw error("企业积分配置损坏，请联系平台核查", "AI_CREDIT_STORAGE_UNAVAILABLE", 503);
+      if (flags.ai_credits_opted_in === true
+        || (await rows(connection, "SELECT id FROM ai_credit_entries WHERE tenant_id = ? LIMIT 1", [id])).length
+        || (await rows(connection, "SELECT id FROM ai_credit_tasks WHERE tenant_id = ? LIMIT 1", [id])).length) {
+        throw error("企业已有积分记录但账户缺失，请联系平台核查；不会重新开户覆盖余额", "AI_CREDIT_STORAGE_UNAVAILABLE", 503);
+      }
+      await rows(connection, "INSERT INTO ai_credit_accounts (tenant_id, account_key, status) VALUES (?, ?, 'active')", [id, randomUUID()]);
+    }
+    const wallet = existing.length ? walletView(existing[0]) : await account(connection, id);
+    if (wallet.status !== "active") return wallet;
+    await rows(connection, `INSERT INTO ai_credit_prices (id, price_key, version, points_per_result, created_by_person_id)
+      VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = id`,
+    [randomUUID(), AI_IMAGE_PRICE_KEY, AI_IMAGE_PRICE_VERSION, AI_IMAGE_POINTS, session.personId]);
+    const month = shanghaiDateKey(clock()).slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(month)) throw error("积分赠送时间无效", "AI_CREDIT_INVALID", 400);
+    const grant = async (key, amount, kind, reason) => {
+      if ((await rows(connection, "SELECT id FROM ai_credit_entries WHERE tenant_id = ? AND entry_key = ?", [id, key])).length) return;
+      await entry(connection, wallet, { key, kind, availableDelta: amount, frozenDelta: 0, actor: session.personId, reason });
+    };
+    await grant(`monthly:${month}`, MONTHLY_AI_CREDIT_POINTS, "monthly_grant", `${month} 企业自然月赠送 100 积分（北京时间），未用完可累计`);
+    if (session.tenant.slug === "default") {
+      const total = aiCreditPoints(wallet.available_points) + aiCreditPoints(wallet.frozen_points);
+      await grant("default-opening:20261110", total < DEFAULT_AI_CREDIT_POINTS ? DEFAULT_AI_CREDIT_POINTS - total : 0n,
+        "initial_grant", "默认企业初始积分，总额补足至 10000000000000000 积分；后续按相同规则扣费");
+    }
+    return wallet;
   }
   async function ownedTask(connection, session, id) {
     const tenant = tenantId(session);
@@ -81,6 +123,13 @@ export function createAiCreditLedger({ transaction }) {
     return taskView({ ...task, status: count ? "succeeded" : "failed", successful_results: count, charged_points: charged,
       result_reference: resultReference, result_sha256: resultHash });
   }
+  async function provision(session) {
+    return transaction(async connection => {
+      const id = tenantId(session); await lockTenant(connection, id);
+      const current = await member(session, connection);
+      return ensureBenefits(connection, current);
+    });
+  }
   return {
     async platformAccount(session, input) {
       const id = integer(input.tenantId, "企业", { min: 1, max: Number.MAX_SAFE_INTEGER });
@@ -90,10 +139,10 @@ export function createAiCreditLedger({ transaction }) {
         await platform(session, connection);
         const tenant = await rows(connection, "SELECT id FROM tenants WHERE id = ?", [id]);
         if (!tenant.length) throw error("企业不存在", "AI_CREDIT_NOT_FOUND", 404);
-        const wallets = await rows(connection, "SELECT tenant_id, status, available_points, frozen_points, updated_at FROM ai_credit_accounts WHERE tenant_id = ?", [id]);
-        const entries = await rows(connection, `SELECT id, entry_key, task_id, kind, available_delta, frozen_delta, available_after, frozen_after, reason, created_at
+        const wallets = await rows(connection, `SELECT ${walletFields} FROM ai_credit_accounts WHERE tenant_id = ?`, [id]);
+        const entries = await rows(connection, `SELECT ${entryFields}
           FROM ai_credit_entries WHERE tenant_id = ? AND id < ? ORDER BY id DESC LIMIT ${size}`, [id, before]);
-        return { wallet: wallets[0] || { tenant_id: id, status: "disabled", available_points: 0, frozen_points: 0 }, entries };
+        return { wallet: wallets[0] ? walletView(wallets[0]) : { tenant_id: id, status: "disabled", available_points: 0, frozen_points: 0 }, entries: entries.map(entryView) };
       });
     },
     async configureAccount(session, input) {
@@ -143,26 +192,23 @@ export function createAiCreditLedger({ transaction }) {
         return { ...wallet, replayed: false };
       });
     },
-    async wallet(session) {
-      return transaction(async connection => {
-        await member(session, connection);
-        const found = await rows(connection, "SELECT tenant_id, account_key, status, available_points, frozen_points, updated_at FROM ai_credit_accounts WHERE tenant_id = ?", [tenantId(session)]);
-        return found[0] || { tenant_id: tenantId(session), status: "disabled", available_points: 0, frozen_points: 0 };
-      });
-    },
+    provision,
+    wallet: provision,
     async entries(session, { before = Number.MAX_SAFE_INTEGER, limit = 30 } = {}) {
       return transaction(async connection => {
         await member(session, connection);
         const size = integer(limit, "分页大小", { min: 1, max: 100 });
-        return rows(connection, `SELECT id, task_id, kind, available_delta, frozen_delta, available_after, frozen_after, reason, created_at
+        const found = await rows(connection, `SELECT ${entryFields}
           FROM ai_credit_entries WHERE tenant_id = ? AND id < ? ORDER BY id DESC LIMIT ${size}`, [tenantId(session), integer(before, "分页游标", { min: 1, max: Number.MAX_SAFE_INTEGER })]);
+        return found.map(entryView);
       });
     },
     async reserve(session, input) {
       const key = token(input.idempotencyKey, "任务去重标识"), priceKey = token(input.priceKey, "价格标识", 80);
       const digest = hash(input.inputSha256), quantity = integer(input.results ?? 1, "结果数量", { min: 1, max: 100 });
       return transaction(async connection => {
-        const id = tenantId(session); await lockTenant(connection, id); await member(session, connection, true);
+        const id = tenantId(session); await lockTenant(connection, id); const current = await member(session, connection, true);
+        await ensureBenefits(connection, current);
         const existing = await rows(connection, "SELECT * FROM ai_credit_tasks WHERE tenant_id = ? AND idempotency_key = ? FOR UPDATE", [id, key]);
         if (existing.length) {
           const task = existing[0];
@@ -175,7 +221,7 @@ export function createAiCreditLedger({ transaction }) {
         const price = prices[0];
         if (priceKey === AI_IMAGE_PRICE_KEY && Number(price.points_per_result) !== AI_IMAGE_POINTS) throw error("图片积分价格与每张 10 积分不一致，请平台管理员核查价格配置", "AI_CREDIT_PRICE_UNAVAILABLE");
         const required = integer(Number(price.points_per_result) * quantity, "预占积分");
-        if (Number(wallet.available_points) < required) throw error("AI 积分不足，请联系企业负责人充值", "AI_CREDIT_INSUFFICIENT", 402);
+        if (aiCreditPoints(wallet.available_points) < BigInt(required)) throw error("AI 积分不足，请联系企业负责人充值", "AI_CREDIT_INSUFFICIENT", 402);
         const taskId = randomUUID();
         await rows(connection, `INSERT INTO ai_credit_tasks (id, tenant_id, created_by_person_id, idempotency_key, input_sha256,
           price_id, price_key, price_version, points_per_result, requested_results, reserved_points) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -311,8 +357,8 @@ export function createAiCreditLedger({ transaction }) {
         const wallet = await account(connection, tenantId(session));
         const [sum] = await rows(connection, `SELECT COALESCE(SUM(available_delta), 0) AS available_points,
           COALESCE(SUM(frozen_delta), 0) AS frozen_points FROM ai_credit_entries WHERE tenant_id = ?`, [tenantId(session)]);
-        return { tenant_id: tenantId(session), consistent: Number(wallet.available_points) === Number(sum.available_points)
-          && Number(wallet.frozen_points) === Number(sum.frozen_points), available_points: Number(wallet.available_points), frozen_points: Number(wallet.frozen_points) };
+        return { tenant_id: tenantId(session), consistent: aiCreditPoints(wallet.available_points) === aiCreditPoints(sum.available_points)
+          && aiCreditPoints(wallet.frozen_points) === aiCreditPoints(sum.frozen_points), available_points: aiCreditPointsValue(wallet.available_points), frozen_points: aiCreditPointsValue(wallet.frozen_points) };
       });
     }
   };

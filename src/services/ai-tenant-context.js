@@ -1,12 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
-import { shanghaiDateKey } from "../shanghai-time.js";
+import { mysqlQuery } from "../mysql-pool.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey } from "./business-task-tenant.js";
-import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "./ai-tenant-schema.js";
 import { checkAiCreditProviderBoundary } from "./ai-credit-provider-context.js";
 
 const context = new AsyncLocalStorage();
-let usageSchema;
 
 export function currentAiTenantSession() { return context.getStore()?.session || null; }
 export function needsAiTenantSession(session, permission = "operations") {
@@ -50,45 +47,18 @@ export async function assertCurrentAiTenantPermission({ connection = null, lock 
   const options = connection ? { connection, lock } : {};
   // Resource locks can themselves wait. Take them before the final current
   // authorization read, whose shared locks remain held through the write.
-  if (connection && lock) await context.getStore().beforeRequest?.(options);
+  await context.getStore().beforeRequest?.(options);
   const query = connection ? async (sql, params) => (await connection.execute(lock ? `${sql.trim()} FOR SHARE` : sql, params))[0] : undefined;
   const authorized = await authorizeBusinessTaskSession(session, query);
   assertBusinessTaskPermission(authorized, context.getStore().permission || "operations");
-  if (!connection || !lock) await context.getStore().beforeRequest?.(options);
   return authorized;
 }
 
-export async function reserveTenantAiRequest(kind = "text", count = 1) {
+export async function reserveTenantAiRequest(kind = "text") {
   const session = await assertCurrentAiTenantPermission();
   if (!session) return null;
   const billing = await checkAiCreditProviderBoundary(session, kind, mysqlQuery);
-  // Prepaid attempts are accounted by the durable wallet executor. Do not also
-  // block a funded customer with the legacy monthly-request default of zero.
-  if (billing.mode === "credits") return { tenant_id: Number(session.tenant.id), mode: "credits" };
-  if (!usageSchema) usageSchema = (async () => {
-    await mysqlExecute(TENANT_AI_LIMITS_SCHEMA);
-    await mysqlExecute(TENANT_AI_USAGE_SCHEMA);
-  })().catch(error => { usageSchema = null; throw error; });
-  await usageSchema;
-  const quantity = Number(count);
-  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 100) throw new Error("AI 请求数量无效");
-  const tenantId = Number(session.tenant.id);
-  const period = shanghaiDateKey(new Date()).slice(0, 7);
-  return withMysqlTransaction(async connection => {
-    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [tenantId]);
-    // The quota mutex can wait behind another request. Resolve current access
-    // after acquiring it, through this transaction rather than another pool slot.
-    await assertCurrentAiTenantPermission({connection,lock:true});
-    const [limits] = await connection.execute("SELECT monthly_request_limit FROM tenant_ai_limits WHERE tenant_id = ?", [tenantId]);
-    const [usage] = await connection.execute("SELECT request_count FROM tenant_ai_usage WHERE tenant_id = ? AND period_key = ?", [tenantId, period]);
-    const limit = limits.length ? limits[0].monthly_request_limit : session.tenant.slug === "default" ? null : 0;
-    if (limit !== null && limit !== undefined && Number(usage[0]?.request_count || 0) + quantity > Number(limit)) {
-      throw Object.assign(new Error("当前企业 AI 请求额度未开通或本月已用完，请联系平台管理员设置企业 AI 月度额度"), { status: 409, statusCode: 409, code: "TENANT_AI_QUOTA_EXCEEDED" });
-    }
-    await connection.execute(`INSERT INTO tenant_ai_usage (tenant_id, period_key, request_count, text_count, image_count)
-      VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count),
-      text_count = text_count + VALUES(text_count), image_count = image_count + VALUES(image_count)`,
-    [tenantId, period, quantity, kind === "image" ? 0 : quantity, kind === "image" ? quantity : 0]);
-    return { tenant_id: tenantId, period_key: period, quantity };
-  });
+  // Every enterprise uses the wallet for images; text is free. The old request
+  // quota cannot authorize a paid image or block a free text request.
+  return { tenant_id: Number(session.tenant.id), mode: billing.mode };
 }

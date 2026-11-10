@@ -1,4 +1,4 @@
-export const AI_SKILLS_DISABLED_MESSAGE = "当前企业暂未开放 AI 技能库，开放时间请联系平台管理员";
+export const AI_SKILLS_DISABLED_MESSAGE = "请先选择有效企业空间后使用 AI 技能库";
 const pages = [
   "/ai-variant-lab", "/ai-variant-cases", "/ai-product-material-optimizer",
   "/ai-ecommerce-suite", "/workflow-materials", "/product-workflows", "/ai-material-optimization-records",
@@ -7,7 +7,7 @@ const pages = [
 const resources = new Set(["ai", "ai-generation", "ai-variant-lab", "ai-material-optimization", "ai-variant-draft-save", "asset-variant-engine", "product-workflows"]);
 
 export function aiSkillsAvailable(subject) {
-  return Number.isSafeInteger(Number(subject?.tenant?.id)) && Number(subject.tenant.id) > 0 && subject.tenant.slug === "default";
+  return Number.isSafeInteger(Number(subject?.tenant?.id)) && Number(subject.tenant.id) > 0 && Boolean(String(subject.tenant.slug || "").trim());
 }
 export function isAiSkillsPage(path = "") {
   const pathname = String(path).split(/[?#]/)[0];
