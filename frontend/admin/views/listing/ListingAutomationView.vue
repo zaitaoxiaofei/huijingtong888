@@ -5114,6 +5114,25 @@ async function publishTemplateToOzon() {
   publishingToOzon.value = true;
   try {
     applyOzonAttributeMappings();
+    if (isBatchDraftEdit.value) {
+      await saveBatchListingDrafts();
+      const result = await apiClient.post("/api/listing/drafts/batch-publish", {
+        draft_ids: templateEditor.variants.map((row) => Number(row._draft_id)),
+        shop_ids: draftForm.shop_ids,
+        text_variant_policy: {
+          enabled: Boolean(textVariantPolicy.enabled && draftForm.shop_ids.length > 1),
+          base_shop_id: textVariantPolicy.baseShopId || draftForm.shop_ids[0] || "",
+          style: textVariantPolicy.style,
+          shop_styles: textVariantPolicy.shopStyles,
+          fields: textVariantPolicy.fields,
+          failure_mode: "keep_original"
+        }
+      });
+      if (!result.ok || !result.task?.id) throw new Error("批量上架任务未创建成功，编辑内容已保存，请稍后重试");
+      ElMessage.success(`已创建 ${result.summary?.queued || 0} 条上架任务，每个商品关联自己的原草稿`);
+      await router.push({ name: "listing-publish-records", query: { tab: "tasks", taskId: String(result.task.id) } });
+      return;
+    }
     const template = buildTemplatePayload();
     template.include_category_health = true;
     const result = await apiClient.post("/api/listing/templates/publish-to-ozon", {
@@ -5340,7 +5359,7 @@ function buildBatchDraftUpdateItems() {
   const expectedIds = routeDraftIds.value;
   const rows = templateEditor.variants || [];
   const actualIds = rows.map((row) => Number(row._draft_id || 0));
-  if (rows.length !== expectedIds.length || actualIds.some((id) => !expectedIds.includes(id))) {
+  if (rows.length !== expectedIds.length || new Set(actualIds).size !== expectedIds.length || actualIds.some((id) => !expectedIds.includes(id))) {
     throw new Error("批量编辑行与原草稿已不一致，请刷新后重试");
   }
   const commonTemplate = buildTemplatePayload();
