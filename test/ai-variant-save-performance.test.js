@@ -68,7 +68,7 @@ test("backend restores the current draft snapshot when compact AI lab requests o
   const seen = [];
   const stop = new Error("snapshot verified");
   const current = { editable_payload: { title: "Current saved draft", images: ["/current.jpg"] } };
-  const create = new Function("aiVariantSaveTraceId", "logAiVariantSavePerf", "ensureListingAutomationSchema", "findDuplicateAiMaterialOptimizerDraft", "row", "parseJson", "normalizeTemplateRow", "normalizeAiVariantSourceTemplateSnapshot", "mergeAiVariantTemplateSnapshot", "ensureAiVariantDraftVideoMedia", "objectValue", `${extract(service, "createAiVariantListingDraftLightweight")}; return createAiVariantListingDraftLightweight;`)(() => "trace", () => {}, async () => {}, async () => null, async (sql) => sql.includes("listing_drafts") ? { template_payload_json: JSON.stringify(current), template_id: 1 } : { id: 1 }, (v, fallback) => v ? JSON.parse(v) : fallback, () => ({ editable_payload: { title: "Old category template" } }), (body) => { seen.push(body.template_payload); return body.template_payload; }, (base, snapshot) => ({ ...base, ...snapshot }), async () => { throw stop; }, (v) => v || {});
+  const create = new Function("aiVariantSaveTraceId", "logAiVariantSavePerf", "ensureListingAutomationSchema", "findDuplicateAiMaterialOptimizerDraft", "row", "parseJson", "normalizeTemplateRow", "normalizeAiVariantSourceTemplateSnapshot", "mergeAiVariantTemplateSnapshot", "ensureAiVariantDraftVideoMedia", "objectValue", "listingTenantId", "assembleListingDraftStoredRow", "mysqlQuery", `${extract(service, "createAuthorizedAiVariantListingDraftLightweight")}; return createAuthorizedAiVariantListingDraftLightweight;`)(() => "trace", () => {}, async () => {}, async () => null, async (sql) => sql.includes("listing_drafts") ? { template_payload_json: JSON.stringify(current), template_id: 1 } : { id: 1 }, (v, fallback) => v ? JSON.parse(v) : fallback, () => ({ editable_payload: { title: "Old category template" } }), (body) => { seen.push(body.template_payload); return body.template_payload; }, (base, snapshot) => ({ ...base, ...snapshot }), async () => { throw stop; }, (v) => v || {}, () => "admin", async (_query, { row }) => row, async () => []);
   await assert.rejects(create({ source_draft_id: 9, template_id: 1, template_payload: null, ai_optimization: { source: "ai_variant_lab" } }), (error) => error === stop);
   assert.deepEqual(seen, [current, current]);
 });
@@ -117,11 +117,12 @@ test("failed watermark tasks are removed from the batch cache so retries can suc
 });
 
 test("background save returns IDs without hydrating the full draft editor response", async () => {
-  const creator = extract(service, "createAiVariantListingDraftLightweight");
+  const creator = extract(service, "createAuthorizedAiVariantListingDraftLightweight");
   const tail = creator.slice(creator.lastIndexOf("  stageStarted = Date.now();"), -1);
   let reads = 0;
   const complete = new Function("options", "listingDraft", `return (async () => {
     let stageStarted;
+    const assertAiVariantLightweightReferences = async () => {}, body = {};
     const logAiVariantSavePerf = () => {}, traceId = "trace", totalStarted = Date.now();
     const draftId = 12, templateId = 3, payload = { template_id: 4 }, shopCopies = [{ id: 1 }, { id: 2 }], shopCopyError = "", session = {};
     ${tail}

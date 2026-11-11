@@ -204,16 +204,17 @@ test("AI variant lightweight draft save inherits shop copies from selected or so
   assert.match(serviceSource, /body\.source_draft_id \|\| body\.sourceDraftId/);
   assert.match(serviceSource, /FROM listing_shop_copies/);
   assert.match(lightweightSource, /await resolveAiVariantDraftShopIds\(body, session\)/);
-  assert.match(lightweightSource, /await generateListingShopCopies\(draftId, \{ shop_ids: shopIds \}, session, options\)/);
+  assert.match(lightweightSource, /await generateListingShopCopies\(draftId,\{shop_ids:shopIds\},session,\{\.\.\.options,beforePersist:async connection=>/);
   assert.match(lightweightSource, /detail\.shop_copy_count = shopCopies\.length/);
   assert.match(lightweightSource, /detail\.shop_copy_error = shopCopyError/);
 });
 
-test("AI variant drafts prefer current draft snapshots and merge SKU facts", () => {
+test("AI variant drafts prefer the complete current SKU list over historical template rows", () => {
   assert.match(serviceSource, /function mergeAiVariantAttributeSources/);
   assert.match(serviceSource, /snapshotVariants\.flatMap\(\(variant\) => collectVariantDynamicAttributeEntries\(variant\)\)/);
   assert.match(serviceSource, /function mergeAiVariantSnapshotVariants/);
-  assert.match(serviceSource, /\.\.\.objectValue\(snapshotVariant\.dynamic_attributes/);
+  assert.match(serviceSource, /mergeAiVariantSnapshotVariants\(baseEditable\.variants, snapshotEditable\.variants\)/);
+  assert.match(serviceSource, /Array\.isArray\(snapshotVariants\) \? snapshotVariants : normalizeArray\(baseVariants\)/);
   assert.match(serviceSource, /function resolveAiVariantInheritedQuantity/);
   assert.match(serviceSource, /dynamic\["7202"\]\?\.value/);
   assert.match(serviceSource, /\[7202, 23249\]\.includes\(attrId\)/);
