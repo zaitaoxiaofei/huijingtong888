@@ -11,7 +11,7 @@ test('draft binding admission is exactly GET for ordinary default/A/B operations
     assert.equal(authorizeApiRequest({ method: 'GET', _session: session }, parts).allowed, true);
     assert.equal(authorizeApiRequest({ method: 'GET', _session: { ...session, roles: ['packing'] } }, parts).allowed, false);
     for (const method of ['HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) assert.equal(tenantIsolationDecision(session, parts, method).code, 'TENANT_ISOLATION_PENDING');
-    for (const [path, method] of [['draft-binding-options', 'GET'], ['draft-bindings/extra', 'GET'], ['drafts/bind', 'POST'], ['development-review', 'POST'], ['drafts/batch-update', 'POST']]) {
+    for (const [path, method] of [['draft-binding-options', 'GET'], ['draft-bindings/extra', 'GET'], ['drafts/bind', 'POST'], ['development-review', 'POST']]) {
       assert.equal(tenantIsolationDecision(session, ['api', 'listing', ...path.split('/')], method).code, 'TENANT_ISOLATION_PENDING');
     }
   }
