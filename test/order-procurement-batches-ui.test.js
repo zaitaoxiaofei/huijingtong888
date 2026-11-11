@@ -52,7 +52,7 @@ test('receipt dialog supports direct batch registration and wide table review', 
 });
 
 test('both receipt entry points remain available without stacked dialogs', () => {
-  assert.match(tableSource, /label="采购信息"[\s\S]*?v-if="hasProcurementIncoming\(row\)"[\s\S]*?@click="emit\('confirm-procurement-inbound', row\)"/);
+  assert.match(tableSource, /label="采购信息"[\s\S]*?v-if="[^"\n]*hasProcurementIncoming\(row\)[^"\n]*canReceiveInventory[^"\n]*"[\s\S]*?@click="emit\('confirm-procurement-inbound', row\)"/);
   assert.match(source, /const openedFromProcurementDetail = Number\(selectedInboundRecordId\) > 0;/);
   assert.match(source, /ElMessageBox\.close\(\);\s+await nextTick\(\);/);
   assert.match(source, /catch \(action\) \{\s+if \(action !== "close"\) throw action;/);

@@ -491,11 +491,12 @@ export function createProcurementLedgerService(hooks) {
       const checkActor = async (lock = false) => {
         if(access === 'receipt' && body.action_type === 'receive_and_count') {
           const current=await restoreBusinessTaskSession(scope.isDefault?'admin':scope.id,actor,(sql,params)=>run(lock?`${sql} FOR SHARE`:sql,params));
-          if(!hasPermission(current,'packing')&&!hasPermission(current,'procurement'))throw Object.assign(new Error('登记入库需要本企业仓库打包或采购权限'),{statusCode:403});
+          if(!hasPermission(current,'packing'))throw Object.assign(new Error('验收入库需要本企业仓库打包权限'),{statusCode:403});
           return;
         }
         const permissions = access === 'inventory' ? ['inventory.write'] : ['procurement'];
         if (['convert', 'substitute', 'damage', 'loss', 'stocktake', 'set_priority', 'receive_and_count'].includes(body.action_type)) permissions.push('inventory.write');
+        if(['receive','receive_and_count'].includes(body.action_type)||(body.action_type==='record_purchase'&&body.inventory_effect==='missing_inbound'))permissions.push('packing');
         if (hooks.assertCurrentActor) return hooks.assertCurrentActor(scope, actor, run, permissions, lock);
         const current = await restoreBusinessTaskSession(scope.isDefault ? 'admin' : scope.id, actor,
           (sql, params) => run(lock ? `${sql} FOR SHARE` : sql, params));

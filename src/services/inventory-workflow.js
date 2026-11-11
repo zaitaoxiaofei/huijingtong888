@@ -180,7 +180,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   }
   async function receiptSession(session,connection){
     const current=await authorizeBusinessTaskSession(session,connection?async(sql,args)=>(await connection.query(sql+' FOR SHARE',args))[0]:undefined);
-    if(!hasPermission(current,'packing')&&!hasPermission(current,'procurement'))throw fail('登记入库需要本企业仓库打包或采购权限',403);
+    if(!hasPermission(current,'packing'))throw fail('验收入库需要本企业仓库打包权限；采购人员可以提醒或确认实物到货',403);
     return current;
   }
   async function receipts(productId,session){

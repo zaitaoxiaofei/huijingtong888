@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
+import { isPurchaseReceiptWrite } from '../src/services/purchase-receipt-access.js';
 
 const source = await readFile(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 const block = source.slice(source.indexOf('export async function batchUpdateInboundRecordsMysql('), source.indexOf('export async function previewInboundReceiptImpactMysql(')).replace('export async function', 'async function');
@@ -13,6 +14,7 @@ function receiver(quantity, note = '') {
     ensurePurchaseCostVersionSchemaMysql: async () => {},
     resolveInventoryTenantScope: async () => ({ id: 1, isDefault: true }),
     assertInventoryMember: async () => {}, assertInventoryRecord: async () => {},
+    isPurchaseReceiptWrite, assertWarehouseReceiptActor: async () => {},
     withMysqlTransaction: async callback => callback({}),
     mysqlConnectionQueryOne: async () => ({ quantity, note }),
     applyInboundRecordUpdateMysql: async (_connection, _id, payload) => { updates.push(payload); },

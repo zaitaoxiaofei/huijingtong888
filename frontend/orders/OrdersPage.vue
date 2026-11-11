@@ -46,6 +46,7 @@ const InventoryStructuredSearch = defineAsyncComponent(() => import("../admin/co
 const route = useRoute();
 const inventoryAuth = useAuthStore();
 const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inventory.write"));
+const canReceiveInventory = computed(() => hasPermission(inventoryAuth.user, "packing"));
 const canRemindProcurement = computed(() => canUpdateInventory.value || hasPermission(inventoryAuth.user, "packing"));
 const canManageOrderNotes = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
 const canEditProcurementNotes = computed(() => ['packing','procurement','inventory.write'].some(permission => hasPermission(inventoryAuth.user, permission)));
@@ -1147,6 +1148,7 @@ async function confirmShippedReceipts() {
 }
 
 async function handleConfirmProcurementInbound(row, selectedInboundRecordId = 0) {
+  if (!canReceiveInventory.value && !row.procurement_coverage?.entered_transport) return;
   const openedFromProcurementDetail = Number(selectedInboundRecordId) > 0;
   if (openedFromProcurementDetail) {
     ElMessageBox.close();
@@ -2899,6 +2901,7 @@ onBeforeUnmount(() => {
     <div class="orders-table-section">
       <OrdersTable
         :can-update-inventory="canUpdateInventory"
+        :can-receive-inventory="canReceiveInventory"
         :can-remind-procurement="canRemindProcurement"
         :can-manage-order-notes="canManageOrderNotes"
         :can-edit-procurement-notes="canEditProcurementNotes"

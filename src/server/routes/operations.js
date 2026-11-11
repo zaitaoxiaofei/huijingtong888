@@ -204,7 +204,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/procurement/refresh-demand": (req) => services.refreshProcurementDemand(tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req), req._session?.personId, null, tenantIdFromRequest(req)),
     "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-    "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
+    "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req), tenantIdFromRequest(req), req._session?.personId) || { ok: true },
     "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
     "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req), req._session?.personId, tenantIdFromRequest(req), req._session),
     "POST /api/inbound-records/shipped-receipts/preview": async (req) => services.previewShippedProcurementReceipts(await readJson(req), tenantIdFromRequest(req)),

@@ -23,7 +23,7 @@ test('keyed new-arrival receipts recover lost responses without reposting stock 
  try{
   await q("INSERT INTO tenants(id,slug,name) VALUES(1,'default','Default'),(2,'a','A'),(3,'b','B')");
   await q("INSERT INTO people(id,name,role) VALUES(1,'A buyer','procurement'),(2,'B buyer','procurement'),(3,'A warehouse','packing'),(4,'A other warehouse','packing')");
-  await q("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json,active) VALUES(2,1,'member',JSON_ARRAY('procurement'),1),(3,2,'member',JSON_ARRAY('procurement'),1),(2,3,'member',JSON_ARRAY('packing'),1),(2,4,'member',JSON_ARRAY('packing'),1)");
+  await q("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json,active) VALUES(2,1,'member',JSON_ARRAY('procurement'),1),(3,2,'member',JSON_ARRAY('procurement','packing'),1),(2,3,'member',JSON_ARRAY('packing'),1),(2,4,'member',JSON_ARRAY('packing'),1)");
   await api.prepareInventoryFlowMysql();
   await q('CREATE TABLE IF NOT EXISTS inventory_order_priorities(product_id BIGINT,order_item_id BIGINT,priority INT) ENGINE=InnoDB');
   await api.procurementRequestsMysql({grouped:'1',paged:'1',compact:'1'},2);
@@ -34,6 +34,7 @@ test('keyed new-arrival receipts recover lost responses without reposting stock 
    await q("INSERT INTO purchase_order_items(id,tenant_id,purchase_order_id,product_id,actual_quantity,requested_quantity,amount,status) VALUES(?,?,?,?,?,?,?,'purchased')",[id,tenant,id,id,quantity,quantity,quantity]);
    await q("INSERT INTO inbound_records(id,tenant_id,product_id,person_id,quantity,amount,unit_cost,purchase_order_id,purchase_order_item_id,status,received_at) VALUES(?,?,?,?,?,?,1,?,?,'pending_arrival',UTC_TIMESTAMP())",[id,tenant,id,person,quantity,quantity,id,id]);
   }
+  await q('UPDATE inbound_records SET received_at=NULL WHERE id=200');
   await q("INSERT INTO tenant_private_files(tenant_id,storage_name,original_name,purpose,content_type,byte_size,uploaded_by) VALUES(2,'receipt-a.jpg','A','team','image/jpeg',1,1),(3,'receipt-b.jpg','B','team','image/jpeg',1,2)");
   let partial;
   await t.test('partial success with a discarded response replays the same receipt, photos and remaining 520 exactly once',async()=>{
@@ -89,7 +90,7 @@ test('keyed new-arrival receipts recover lost responses without reposting stock 
    const input=await body(208,4,4),state=await api.procurementLedgerMysql({product_id:208,include_fbp:false},2);
    const results=await Promise.allSettled([
     api.applyProcurementLedgerMysql({action_type:'stocktake',product_id:208,counted_quantity:0,reason_code:'other',reason_note:'isolated concurrency verification',revision:state.revision,request_key:randomUUID()},1,2),
-    service.receive(input,{personId:1,tenant:{id:2,slug:'a'}})
+    service.receive(input,warehouse)
    ]);
    const received=results[1].status==='fulfilled';
    if(results[0].status==='rejected')assert.match(results[0].reason.message,/已变化/);

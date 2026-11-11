@@ -90,7 +90,10 @@ test("menus and direct route access follow the same combined permissions", () =>
     assert.equal(allowed(["technical"], "GET", path), true);
     assert.equal(allowed(["packing"], "POST", path), false);
   }
-  assert.equal(canAccessPage(businessUser(["packing"]), "/procurement/workspace"), false);
+  assert.equal(canAccessPage(businessUser(["packing"]), "/procurement/workspace"), true);
+  assert.equal(canAccessPage(businessUser(["packing"]), "/mobile/procurement"), true);
+  assert.equal(canAccessPage(businessUser(["packing"]), "/procurement/purchase-history"), false);
+  assert.equal(canAccessPage(businessUser(["operations"]), "/procurement/workspace"), false);
   assert.equal(canAccessPage(businessUser(["packing", "procurement"]), "/procurement/workspace"), true);
   assert.equal(canAccessPage(businessUser(["technical"]), "/settings/system-monitoring"), false);
   assert.equal(canAccessPage(businessUser(["technical"]), "/settings"), false);
@@ -104,6 +107,19 @@ test("menus and direct route access follow the same combined permissions", () =>
   const paths = menus.flatMap(menu => menu.children ? menu.children.map(child => child.route) : [menu.route]);
   assert.ok(!paths.includes("/settings/system-monitoring")); assert.ok(!paths.includes("/settings")); assert.ok(!paths.includes("/orders"));
   assert.ok(context.navigationMenusForRole({ platform_role: "super_admin", roles: [], tenant: null }).some(menu => menu.children?.some(child => child.route === "/settings/system-monitoring")));
+});
+
+test("shared receiving separates arrival confirmation from warehouse stock receipt", () => {
+  for (const roles of [["packing"], ["procurement"], ["packing", "procurement"]]) {
+    assert.equal(allowed(roles, "GET", "/api/inventory-workflow/purchase-arrivals"), true);
+    assert.equal(allowed(roles, "POST", "/api/inventory-workflow/purchase-arrivals"), true);
+  }
+  for (const [method, path] of [["GET", "/api/inventory-workflow/receipts"], ["GET", "/api/inventory-workflow/receipts/context"], ["POST", "/api/inventory-workflow/receipts/preview"], ["POST", "/api/inventory-workflow/receipts"]]) {
+    assert.equal(allowed(["procurement"], method, path), false, path);
+    assert.equal(allowed(["packing"], method, path), true, path);
+    assert.equal(allowed(["procurement", "packing"], method, path), true, path);
+  }
+  assert.equal(allowed(["procurement"], "POST", "/api/inventory/movements"), true, "existing inventory adjustment access is unchanged");
 });
 
 test("existing session reads current enterprise roles instead of stale session or global person roles", async () => {

@@ -10,12 +10,12 @@ test('one user gets module defaults, can switch FBP back, retires procurement re
  const script=`const task=await taskSpace('module-supply-20261101');console.log({space:task.spaceId});const page=task.page('p1');
  await page.goto('http://localhost:8788/admin.html#/orders?mode=inventory');await page.waitForSelector('.inventory-batch-queue');
  const read=()=>page.evaluate(()=>({keys:[...document.querySelectorAll('[data-task]')].map(n=>n.dataset.task),active:document.querySelector('[data-task].is-active')?.dataset.task}));
- let state=await read();if(state.active!=='receiving'||state.keys.join(',')!=='receiving,fbp-stocking,fbp-receipts,incoming,required,advisory')throw Error(JSON.stringify(state));
+ let state=await read();if(state.active!=='receiving'||state.keys.join(',')!=='receiving,fbp-stocking,fbp-receipts,required,advisory')throw Error(JSON.stringify(state));
  console.log(await page.snapshot());await page.click('[data-task="fbp-receipts"]');await page.waitForSelector('[data-task="fbp-receipts"].is-active');await page.click('[data-task="receiving"]');await page.waitForSelector('.inventory-batch-queue');
- await page.evaluate(()=>window.layoutRouter.push('/procurement/workspace'));await page.waitForSelector('[data-task="required"].is-active');state=await read();if(state.keys.join(',')!=='required,advisory,incoming,receiving,fbp-stocking,fbp-receipts')throw Error(JSON.stringify(state));
+ await page.evaluate(()=>window.layoutRouter.push('/procurement/workspace'));await page.waitForSelector('[data-task="required"].is-active');state=await read();if(state.keys.join(',')!=='required,advisory,receiving,fbp-stocking,fbp-receipts')throw Error(JSON.stringify(state));
  await page.evaluate(()=>window.layoutRouter.push('/procurement/workspace?mode=purchase&product_id=101'));await page.waitForSelector('[data-task="required"].is-active');
  await page.evaluate(()=>{if(document.body.innerText.includes('旧版登记采购'))throw Error('Retired procurement workbench visible');});
- await page.evaluate(()=>window.layoutRouter.push('/procurement/workspace?mode=arrivals'));await page.waitForSelector('[data-task="incoming"].is-active');
+ await page.evaluate(()=>window.layoutRouter.push('/procurement/workspace?mode=arrivals'));await page.waitForSelector('[data-task="receiving"].is-active');
  await page.evaluate(()=>window.layoutRouter.push('/purchase-list'));await page.waitForSelector('[data-task="receiving"].is-active');console.log(await page.snapshot());
  await page.click('text="旧版收货管理"');await page.waitForSelector('.procurement-list-page');await page.click('text="返回收货工作平台"');await page.waitForSelector('[data-task="receiving"].is-active');
  await page.evaluate(()=>window.layoutRouter.push('/purchase-list?orderId=123&productId=101'));await page.waitForSelector('.procurement-list-page');

@@ -12,9 +12,9 @@ import {hasPermission} from '../shared/permissions.js';
 import {invalidateOrderProcurementCoverage} from './mysql-order-procurement-coverage.js';
 import {procurementDayRange} from './procurement-daily-report.js';
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
-export const procurementArrivalState=r=>r.status==='approved'?'received':r.status==='cancelled'?'cancelled':r.received_at?'arrived':'open';
+export const procurementArrivalState=r=>r.status==='approved'?'received':r.status==='cancelled'?'cancelled':r.received_at?'arrived':r.arrival_reminder||r.reminder_id?'reminded':'open';
 const purchaseTime='COALESCE(po.purchased_at,ir.created_at)';
-const emptySummary=()=>({open:0,arrived:0,open_quantity:0,arrived_quantity:0,open_unknown_batches:0,arrived_unknown_batches:0});
+const emptySummary=()=>({pending:0,open:0,reminded:0,arrived:0,pending_quantity:0,open_quantity:0,reminded_quantity:0,arrived_quantity:0,pending_unknown_batches:0,open_unknown_batches:0,reminded_unknown_batches:0,arrived_unknown_batches:0});
 
 export function procurementArrivalDateFilters(params={}){
  const mode=String(params.day_mode||''),day=String(params.purchase_day||''),start=String(params.start_date||''),end=String(params.end_date||'');
@@ -28,11 +28,18 @@ export function procurementArrivalDateFilters(params={}){
 }
 
 export function createProcurementArrivals({query=mysqlQuery,transaction=withMysqlTransaction}={}){
+ async function arrivalTransaction(operation){
+  for(let attempt=0;;attempt++){
+   try{return await transaction(operation);}
+   catch(error){if(attempt>=2||!(error.code==='ER_LOCK_DEADLOCK'||Number(error.errno)===1213))throw error;}
+  }
+ }
  async function list(params,session){
   const current=await authorizeBusinessTaskSession(session,query);if(!hasPermission(current,'inventory.read'))throw fail('请由本企业库存或采购人员查看到货情况',403);
   const dateFilters=procurementArrivalDateFilters(params);
   const scope=await resolveInventoryTenantScope(current.tenant.id,query),where=[inventoryTenantSql(scope,'ir'),inventoryTenantSql(scope,'p'),"(po.purchased_at IS NOT NULL OR pr.status='purchased')"],args=[];
-  const status=params.status||'open';if(status==='open')where.push("ir.status='pending_arrival' AND ir.received_at IS NULL");else if(status==='arrived')where.push("ir.status='pending_arrival' AND ir.received_at IS NOT NULL");else if(status==='inspection')where.push("ir.status='pending_arrival' AND (ir.received_at IS NOT NULL OR po.purchased_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 72 HOUR))");else if(status==='received')where.push("ir.status='approved'");else if(status!=='all')throw fail('请选择未到货、已到货待验收、已入库或全部记录');
+  const status=params.status||'open',statusFilters={pending:"ir.status='pending_arrival'",open:"ir.status='pending_arrival' AND ir.received_at IS NULL",reminded:"ir.status='pending_arrival' AND ir.received_at IS NULL AND reminder.id IS NOT NULL",arrived:"ir.status='pending_arrival' AND ir.received_at IS NOT NULL",inspection:"ir.status='pending_arrival' AND (ir.received_at IS NOT NULL OR po.purchased_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 72 HOUR))",received:"ir.status='approved'"};
+  const stateFilter=statusFilters[status];if(stateFilter)where.push(stateFilter);else if(status!=='all')throw fail('请选择全部待处理、待到货、已提醒、待验收、已入库或全部记录');
   const graph=await loadInventoryComposition(query,scope);
   const search=inventoryProductSearch(params,scope),productWhere=[inventoryTenantSql(scope,'p')],productArgs=[];
   if(search.sql){productWhere.push(search.sql);productArgs.push(...search.params);}
@@ -75,7 +82,8 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   }
   const financial=hasPermission(current,'procurement');
   const project=(row,details=true)=>{
-   const {amount,shipping_amount,purchase_note,...safe}=row;
+   const {amount,shipping_amount,purchase_note,reminder_id,reminder_person_id,reminder_person_name,reminder_created_at,reminder_note,...safe}=row;
+   safe.arrival_reminder=reminder_id?{id:Number(reminder_id),person_id:Number(reminder_person_id),person_name:reminder_person_name||null,created_at:reminder_created_at,note:reminder_note||''}:null;
    if(financial)Object.assign(safe,{amount,shipping_amount,purchase_note});
    try{
     const components=graph.components(Number(row.product_id)).map(part=>({...part,quantity:Number(row.quantity)*Number(part.per_set_quantity)}));
@@ -90,11 +98,16 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
     LEFT JOIN procurement_requests pr ON pr.id=ir.procurement_request_id AND ${inventoryTenantSql(scope,'pr')}
     LEFT JOIN purchase_order_items poi ON poi.id=ir.purchase_order_item_id AND poi.product_id=ir.product_id AND poi.purchase_order_id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'poi')}
     LEFT JOIN people buyer ON buyer.id=ir.person_id AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=buyer.id AND tm.active=1)
+    LEFT JOIN (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id')) AS UNSIGNED) AS inbound_id,MAX(id) AS id
+      FROM inventory_flow_events WHERE tenant_id=${scope.id} AND action='purchase_arrival_reminder'
+      GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id')) AS UNSIGNED)) reminders ON reminders.inbound_id=ir.id
+    LEFT JOIN inventory_flow_events reminder ON reminder.id=reminders.id AND reminder.tenant_id=${scope.id} AND reminder.product_id=ir.product_id
+    LEFT JOIN people reminder_person ON reminder_person.id=reminder.person_id AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=reminder_person.id AND tm.active=1)
     WHERE ${where.map(w=>'('+w+')').join(' AND ')}`;
   let page=Math.max(1,Math.min(1000000,Math.trunc(Number(params.page)||1)));const pageSize=Math.min(100,Math.max(1,Math.trunc(Number(params.pageSize)||20)));
-  const summaryFilter=[...where.filter(w=>!w.startsWith("ir.status=")),"ir.status='pending_arrival'"];
+  const summaryFilter=[...where.filter(w=>w!==stateFilter),"ir.status='pending_arrival'"];
   const summaryJoins=joins.slice(0,joins.indexOf('WHERE '+where.map(w=>'('+w+')').join(' AND ')))+'WHERE '+summaryFilter.map(w=>'('+w+')').join(' AND ');
-  const summaryRows=await query(`SELECT ir.id,ir.product_id,ir.quantity,ir.amount,ir.shipping_amount,ir.status,ir.received_at,
+  const summaryRows=await query(`SELECT ir.id,ir.product_id,ir.quantity,ir.amount,ir.shipping_amount,ir.status,ir.received_at,reminder.id AS reminder_id,
     DATE_FORMAT(CONVERT_TZ(${purchaseTime},'+00:00','+08:00'),'%Y-%m-%d') AS purchase_day ${summaryJoins}`,args);
   const summary=emptySummary(),byDay=new Map();
   for(const raw of summaryRows){
@@ -102,11 +115,11 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
    const date=String(row.purchase_day||'');
    if(!byDay.has(date))byDay.set(date,{date,...emptySummary(),total:0});
    const day=byDay.get(date);day.total++;
-   for(const target of [summary,day]){target[key]++;if(row.physical_quantity==null)target[key+'_unknown_batches']++;else target[key+'_quantity']+=row.physical_quantity;}
+   for(const target of [summary,day])for(const bucket of ['pending',key,...(!row.received_at&&row.arrival_reminder?['reminded']:[])]){target[bucket]++;if(row.physical_quantity==null)target[bucket+'_unknown_batches']++;else target[bucket+'_quantity']+=row.physical_quantity;}
   }
   const days=[...byDay.values()].sort((a,b)=>dateFilters.grouped?a.date.localeCompare(b.date):b.date.localeCompare(a.date));
-  const pending=day=>status==='open'?day.open>0:status==='arrived'?day.arrived>0:day.total>0;
-  const completedDay=dateFilters.grouped&&['open','arrived'].includes(status)&&dateFilters.day&&dateFilters.day!=='all'&&!pending(byDay.get(dateFilters.day)||emptySummary());
+  const pending=day=>['pending','open','reminded','arrived'].includes(status)?day[status]>0:day.total>0;
+  const completedDay=dateFilters.grouped&&['pending','open','reminded','arrived'].includes(status)&&dateFilters.day&&dateFilters.day!=='all'&&!pending(byDay.get(dateFilters.day)||emptySummary());
   const selectedDay=completedDay?days.find(pending)?.date||'':dateFilters.day||(dateFilters.grouped?days.find(pending)?.date||'':'all');
   if(completedDay)page=1;
   const daySummary=selectedDay&&selectedDay!=='all'?byDay.get(selectedDay)||emptySummary():summary;
@@ -116,8 +129,17 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const selectedRange=selectedDay&&selectedDay!=='all'?procurementDayRange(selectedDay):null;
   const order=dateFilters.grouped?'ASC':'DESC';
   if(selectedRange){detailJoins+=` AND ${purchaseTime}>=? AND ${purchaseTime}<?`;detailArgs.push(...selectedRange);}
-  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${detailJoins}`,detailArgs),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,${purchaseTime} AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${detailJoins} ORDER BY ${purchaseTime} ${order},ir.id ${order} LIMIT ? OFFSET ?`,[...detailArgs,pageSize,(page-1)*pageSize])]);
-  return{rows:rows.map(r=>({...project(r),arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize,summary,...dateResult};
+  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${detailJoins}`,detailArgs),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,${purchaseTime} AS purchased_at,poi.id AS purchase_order_item_id,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name,reminder.id AS reminder_id,reminder.person_id AS reminder_person_id,reminder_person.name AS reminder_person_name,reminder.created_at AS reminder_created_at,JSON_UNQUOTE(JSON_EXTRACT(reminder.detail_json,'$.note')) AS reminder_note ${detailJoins} ORDER BY ${purchaseTime} ${order},ir.id ${order} LIMIT ? OFFSET ?`,[...detailArgs,pageSize,(page-1)*pageSize])]);
+  const itemIds=[...new Set(rows.map(row=>Number(row.purchase_order_item_id)).filter(id=>Number.isSafeInteger(id)&&id>0))];
+  const progressRows=itemIds.length?await query(`SELECT ir.purchase_order_item_id,ir.product_id,poi.actual_quantity AS ordered_quantity,
+    SUM(CASE WHEN ir.status='pending_arrival' AND ir.received_at IS NULL THEN ir.quantity ELSE 0 END) AS unarrived_quantity,
+    SUM(CASE WHEN ir.status='pending_arrival' AND ir.received_at IS NOT NULL THEN ir.quantity ELSE 0 END) AS arrived_quantity,
+    SUM(CASE WHEN ir.status='approved' THEN ir.quantity ELSE 0 END) AS received_quantity
+    FROM inbound_records ir JOIN purchase_order_items poi ON poi.id=ir.purchase_order_item_id AND poi.product_id=ir.product_id AND poi.purchase_order_id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'poi')}
+    WHERE ir.purchase_order_item_id IN (${itemIds.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'ir')}
+    GROUP BY ir.purchase_order_item_id,ir.product_id,poi.actual_quantity`,itemIds):[];
+  const progress=new Map(progressRows.map(row=>[`${row.purchase_order_item_id}:${row.product_id}`,Object.fromEntries(['ordered_quantity','unarrived_quantity','arrived_quantity','received_quantity'].map(key=>[key,Number(row[key])]))]));
+  return{rows:rows.map(r=>{const row=project(r);return{...row,arrival_state:procurementArrivalState(row),purchase_progress:progress.get(`${row.purchase_order_item_id}:${row.product_id}`)||null};}),total:Number(counts[0]?.n)||0,page,pageSize,summary,...dateResult};
  }
  async function logistics(body,session){
   const id=Number(body.id),courier=String(body.courier_company||'').trim(),tracking=String(body.tracking_number||'').trim();
@@ -140,19 +162,49 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
    return{ok:true};
   });
  }
+ async function remind(body,session){
+  const id=Number(body.id),quantity=Number(body.expected_quantity),note=String(body.note||'').trim(),key=String(body.request_key||'');
+  if(!Number.isSafeInteger(id)||id<=0||!Number.isSafeInteger(quantity)||quantity<1||!body.expected_updated_at||note.length>500||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key))throw fail('请读取最新采购批次后提醒到货；备注可选，最多500字');
+  const stamp=v=>new Date(typeof v==='string'&&!/[TZ]/.test(v)?v.replace(' ','T')+'Z':v).getTime();
+  const hash=createHash('sha256').update(JSON.stringify({id,quantity,note,updated_at:stamp(body.expected_updated_at)})).digest('hex');
+  return arrivalTransaction(async c=>{
+   const q=async(sql,args=[])=>(await c.query(sql,args))[0],initial=await authorizeBusinessTaskSession(session,q);
+   const scope=await resolveInventoryTenantScope(initial.tenant.id,q),before=await assertInventoryRecord(scope,'inbound',id,q);
+   await assertInventoryRecord(scope,'product',Number(before.product_id),q,{lock:true});
+   const current=await authorizeBusinessTaskSession(session,(sql,args)=>q(sql+' FOR UPDATE',args));
+   if(!hasPermission(current,'procurement'))throw fail('提醒到货需要本企业采购权限',403);
+   const row=await assertInventoryRecord(scope,'inbound',id,q,{lock:true});
+   if(Number(row.product_id)!==Number(before.product_id))throw fail('批次库存归属已变化，请刷新核对',409);
+   const [prior]=await q("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_arrival_reminder' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1 FOR UPDATE",[scope.id,key]);
+   if(prior){const saved=typeof prior.detail_json==='string'?JSON.parse(prior.detail_json):prior.detail_json;if(saved.hash!==hash)throw fail('此提醒标识已提交，不能修改批次或内容；请刷新后重试',409);return{...saved.result,duplicate:true};}
+   if(row.status!=='pending_arrival'||row.received_at)throw fail('此批次已到货或关闭，无需再次提醒；请刷新记录',409);
+   if(stamp(row.updated_at)!==stamp(body.expected_updated_at)||Number(row.quantity)!==quantity)throw fail('采购批次已变化，请刷新后重新提醒到货',409);
+   const [purchase]=await q(`SELECT id FROM purchase_orders po WHERE id=? AND purchased_at IS NOT NULL AND status NOT IN('cancelled','pending_purchase') AND ${inventoryTenantSql(scope,'po')} FOR UPDATE`,[row.purchase_order_id||0]);
+   const [legacy]=purchase?[]:await q(`SELECT id FROM procurement_requests pr WHERE id=? AND product_id=? AND status='purchased' AND ${inventoryTenantSql(scope,'pr')} FOR UPDATE`,[row.procurement_request_id||0,row.product_id]);
+   if(!purchase&&!legacy)throw fail('此批次尚未登记真实采购，不能提醒到货',409);
+   const [existing]=await q("SELECT id FROM inventory_flow_events WHERE tenant_id=? AND product_id=? AND action='purchase_arrival_reminder' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id'))=? ORDER BY id DESC LIMIT 1",[scope.id,row.product_id,String(id)]);
+   if(existing)return{ok:true,duplicate:true,inbound_id:id};
+   const result={ok:true,duplicate:false,inbound_id:id};
+   await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,row.product_id,current.personId,'purchase_arrival_reminder',JSON.stringify({inbound_id:id,note,request_key:key,hash,result})]);
+   await c.execute(`UPDATE inbound_records SET updated_at=UTC_TIMESTAMP() WHERE id=? AND ${inventoryTenantSql(scope)}`,[id]);
+   return result;
+  });
+ }
  async function confirm(body,session){
   if(body.operation==='logistics')return logistics(body,session);
+  if(body.operation==='remind')return remind(body,session);
   const id=Number(body.id),note=String(body.note||'').trim(),key=String(body.request_key||'');
   if(!Number.isSafeInteger(id)||id<=0||note.length>500||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key)||!body.expected_updated_at)throw fail('请选择采购批次并读取最新记录后确认；到货说明可选，最多500字');
   const quantity=body.quantity==null?null:Number(body.quantity),expected=body.expected_quantity==null?null:Number(body.expected_quantity);
   if(quantity!==null&&(!Number.isSafeInteger(quantity)||quantity<1||!Number.isSafeInteger(expected)||expected<1))throw fail('请填写本次实际到货件数（quantity）和原待到货件数（expected_quantity），均须为正整数；采购总数录错请先编辑采购批次');
   const stamp=v=>new Date(typeof v==='string'&&!/[TZ]/.test(v)?v.replace(' ','T')+'Z':v).getTime();
   const hash=createHash('sha256').update(JSON.stringify({id,note,quantity,expected,updated_at:stamp(body.expected_updated_at)})).digest('hex');
-  const result=await transaction(async c=>{
-   const q=async(sql,args=[])=>(await c.query(sql,args))[0],current=await authorizeBusinessTaskSession(session,(sql,args)=>q(sql+' FOR UPDATE',args));
-   if(!hasPermission(current,'procurement'))throw fail('只有本企业采购岗位可以确认采购到货；仓库请使用验货入库',403);
-   const scope=await resolveInventoryTenantScope(current.tenant.id,q),before=await assertInventoryRecord(scope,'inbound',id,q);
+  const result=await arrivalTransaction(async c=>{
+   const q=async(sql,args=[])=>(await c.query(sql,args))[0],initial=await authorizeBusinessTaskSession(session,q);
+   const scope=await resolveInventoryTenantScope(initial.tenant.id,q),before=await assertInventoryRecord(scope,'inbound',id,q);
    await assertInventoryRecord(scope,'product',Number(before.product_id),q,{lock:true});
+   const current=await authorizeBusinessTaskSession(session,(sql,args)=>q(sql+' FOR UPDATE',args));
+   if(!hasPermission(current,'procurement')&&!hasPermission(current,'packing'))throw fail('确认实物到货需要本企业采购或仓库打包权限',403);
    const row=await assertInventoryRecord(scope,'inbound',id,q,{lock:true});if(Number(row.product_id)!==Number(before.product_id))throw fail('批次库存归属已变化，请刷新核对',409);
    const [prior]=await q("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_arrival' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1 FOR UPDATE",[scope.id,key]);
    if(prior){const saved=typeof prior.detail_json==='string'?JSON.parse(prior.detail_json):prior.detail_json;if(saved.hash?saved.hash!==hash:Number(saved.inbound_id)!==id||quantity!==null&&quantity!==Number(saved.quantity))throw fail('此到货登记已提交，不能用相同标识修改数量或内容；请刷新批次后重新登记',409);return{...(saved.result||{ok:true}),duplicate:true};}

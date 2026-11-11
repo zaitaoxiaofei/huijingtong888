@@ -76,7 +76,7 @@ Automatic refresh may cancel and recreate unconfirmed `suggested` real-order req
 - Purchase confirmation must update both purchase order items and linked procurement requests in one transaction.
 - UI pages should refresh the smallest needed data set where possible. Use full `loadAll()` only when shared state changes broadly.
 - Keep purchase recording fast: there is no approval flow. Actual purchase requires a bound inventory product, quantity, amount, and purchaser; supplier and channel remain optional metadata.
-- The procurement workspace does not confirm inbound. Inbound confirmation belongs to the order module shortcut and the pending-inbound list.
+- Purchase-only operators cannot post inbound stock. Warehouse operators may receive purchases from the shared procurement receiving workspace, order shortcut, or pending-inbound list; every write must recheck warehouse permission on the backend.
 - The purchase order drawer must always close on explicit close and when switching pages.
 
 ## Pending purchase days on desktop and mobile (2026-11-06)
@@ -89,6 +89,16 @@ Automatic refresh may cancel and recreate unconfirmed `suggested` real-order req
 - Batch retries keep the same request key and payload. Successful groups are not submitted again; failed groups remain visible for retry or refresh. All writes continue through the existing enterprise, duty, stale-state, and idempotency checks.
 - New-arrival receipt UUID keys save the original result in a `purchase_receipt` event in the same transaction as inventory posting. The current tenant and actor must still have receipt permission to replay that result. Identical retries after a lost response return the saved result; changing inventory, records, quantities, reasons, evidence, or observed revision with the same key conflicts. Legacy unkeyed and historical receipt paths remain compatible.
 
+
+## Shared purchase receiving on desktop and mobile (2026-11-11)
+
+- The shared `采购收货` queue defaults to all unfinished purchased batches (`status=pending`). Warehouse staff can see a batch immediately after purchase registration; purchaser arrival marking is never a prerequisite for warehouse visibility or receipt. Existing incoming/receiving entry links remain compatible.
+- The same table offers all unfinished, unarrived, arrival-reminded and arrived-pending-acceptance filters. These filters do not create or duplicate purchase facts. Preserve Beijing purchase-day grouping, oldest unfinished priority, pending badges, within-day pagination, batch selection, inventory editing and inventory history. A date disappears only when no work remains in the selected filter; another filter can still contain work for that date.
+- `提醒到货` records the purchaser's reminder, actor, time and optional note. It does not claim physical delivery, set `received_at`, alter purchased quantities or post stock. Reminder retries are idempotent and stale or closed batches cannot be reminded as new work.
+- `确认实物到货` records actual physically arrived quantity, without increasing stock. Procurement and warehouse duties may perform it. A smaller quantity preserves the unarrived remainder and original purchase date, source links, total amounts and freight.
+- `验收入库` requires warehouse (`packing`) permission; a purchase-only role cannot call normal receipt writers through another UI or legacy API. Operators with both duties may perform both actions. Tenant administrators retain their established administrative permissions. Inventory editing, stocktakes and historical source reconciliation keep their existing separate permission boundaries.
+- Warehouse receipt can start from an unarrived batch and atomically record physical arrival and accepted stock. If 80 of an unarrived 600 are accepted, 520 remain unarrived. If 80 were already physically marked arrived and only 70 are accepted, the remaining 10 retain their physical-arrival fact and await acceptance. Only accepted quantity increases stock; purchase totals never change through arrival/receipt.
+- Reminder, physical arrival and receipt must honor current tenant and duty checks, consistent product/batch locking, observed quantity/revision checks, and immutable request-key replay. Concurrent operations cannot duplicate a split, re-open a closed batch or post stock twice. Generic arrival reminders remain separate from per-order human collaboration notes.
 
 ## Historical source reconciliation and inventory corrections
 
