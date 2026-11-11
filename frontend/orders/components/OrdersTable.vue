@@ -13,6 +13,7 @@ const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/c
 const props = defineProps({
   canRemindProcurement: { type: Boolean, default: false },
   canUpdateInventory: { type: Boolean, default: false },
+  canReceiveInventory: { type: Boolean, default: false },
   canManageOrderNotes: { type: Boolean, default: false },
   bindingIgnoreBusy: { type: String, default: "" },
   canEditProcurementNotes: { type: Boolean, default: false },
@@ -727,7 +728,7 @@ function canEditCollaborationNote(row) {
           <div v-if="!row.inventory_refresh_pending && !isFbpOrder(row)" class="orders-procurement-inline-actions">
             <el-button v-if="canRemindProcurement" size="small" plain @click="openStockTopup(row)">提醒采购</el-button>
             <el-button v-if="row.procurementState?.latestPurchaseAt" size="small" plain @click="emit('view-procurement-details', row)">查看明细</el-button>
-            <el-button v-if="row.procurementState?.latestPurchaseAt && hasProcurementIncoming(row)" size="small" plain :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记入库' }}</el-button>
+            <el-button v-if="row.procurementState?.latestPurchaseAt && hasProcurementIncoming(row) && (canReceiveInventory || row.procurement_coverage?.entered_transport)" size="small" plain :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记入库' }}</el-button>
           </div>
           </div>
         </template>

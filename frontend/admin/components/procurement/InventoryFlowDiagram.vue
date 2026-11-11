@@ -7,11 +7,15 @@ import {procurementArrivalStage} from '../../../../src/shared/inventory-procurem
 import { inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import { useRouter } from 'vue-router';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
+import { useAuthStore } from '../../stores/auth.js';
+import { hasPermission } from '../../../../src/shared/permissions.js';
+import { getActivePinia } from 'pinia';
 
 const InventoryFbpReceiptReview=defineAsyncComponent(()=>import('../inventory/InventoryFbpReceiptReview.vue'));
 const props = defineProps({ ledger: { type: Object, required: true }, workflow: Object, inventoryMode: Boolean, fbpLoading: Boolean, fbpSyncing: Boolean, canSyncFbp: Boolean, fbpError: { type: String, default: '' } });
 const emit = defineEmits(['select-tab', 'navigate', 'retry-fbp', 'sync-fbp','workflow-action','stocktake','saved']);
 const router = useRouter();
+const auth = getActivePinia() ? useAuthStore() : {user:null}, canReceive = computed(() => hasPermission(auth.user, 'packing'));
 const selected = ref('');
 const detail = ref(null);
 const detailId = `inventory-flow-detail-${useId()}`;
@@ -242,7 +246,7 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
       <div class="flow-action-buttons">
         <el-button v-if="['requests','orders','safety','application','free'].includes(selected)" type="primary" plain @click="emit('workflow-action','request',({orders:'real_order',safety:'local_safety',application:'fbp_stock'})[selected]||'')">提交采购申请</el-button>
         <el-button v-if="['requests','incoming','purchase-confirm'].includes(selected)" @click="emit('workflow-action','purchase')">登记实际采购</el-button>
-        <el-button v-if="['incoming','receiving'].includes(selected)" @click="emit('workflow-action','receive')">登记入库</el-button>
+        <el-button v-if="canReceive&&['incoming','receiving'].includes(selected)" @click="emit('workflow-action','receive')">登记入库</el-button>
         <el-button v-if="selected==='physical' && canSyncFbp" @click="emit('stocktake')">更新本地库存</el-button>
         <el-button v-if="['application','fbp-physical','fbp-safety','free'].includes(selected)" @click="emit('workflow-action','fbp')">创建FBP备货申请</el-button>
       </div>

@@ -17,7 +17,7 @@ const auth=getActivePinia()?useAuthStore():{user:null};
 const fbpProjection=ref(null),showDemands=ref(false);
 const state=ref(null), loading=ref(false), error=ref(''), dialog=ref(''), busy=ref(false), purchaseVisible=ref(false);
 const canPurchase=computed(()=>hasPermission(auth.user,'procurement'));
-const canReceive=computed(()=>canPurchase.value||hasPermission(auth.user,'packing'));
+const canReceive=computed(()=>hasPermission(auth.user,'packing'));
 const canFeedback=computed(()=>canReceive.value||hasPermission(auth.user,'inventory.write'));
 const canFbp=computed(()=>hasPermission(auth.user,'inventory.write'));
 const productId=computed(()=>Number(props.ledger.product?.id));
@@ -34,6 +34,7 @@ async function reload(fresh=false,full=false){
  finally{if(token===version)loading.value=false;}
 }
 async function open(action,type=''){
+ if(action==='receive'&&!canReceive.value)return;
  if(action==='forecast'){if(canFbp.value)forecastVisible.value=true;return;}
  const actionToken=++actionVersion,id=productId.value,scope=currentApiCacheScope();
  const active=()=>!disposed&&actionToken===actionVersion&&id===productId.value&&scope===currentApiCacheScope()&&dialog.value===action;

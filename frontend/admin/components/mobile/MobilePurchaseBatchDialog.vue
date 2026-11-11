@@ -10,8 +10,8 @@ import {runPurchaseBatchGroups} from '../../utils/purchase-batch-workers.js';
 
 const props=defineProps({modelValue:Boolean,status:String,rows:{type:Array,default:()=>[]}}),emit=defineEmits(['update:modelValue','changed']);
 const auth=useAuthStore(),entries=ref([]),groups=ref([]),busy=ref(false),error=ref(''),previewed=ref(false),attempted=ref(false),note=ref('');
-const visible=computed({get:()=>props.modelValue,set:value=>emit('update:modelValue',value)}),arriving=computed(()=>props.status==='open');
-const allowed=computed(()=>hasPermission(auth.user,'procurement')||!arriving.value&&hasPermission(auth.user,'packing'));
+const visible=computed({get:()=>props.modelValue,set:value=>emit('update:modelValue',value)}),arriving=computed(()=>props.status==='open'),reminding=computed(()=>props.status==='remind'),receiving=computed(()=>!arriving.value&&!reminding.value);
+const allowed=computed(()=>reminding.value?hasPermission(auth.user,'procurement'):arriving.value?(hasPermission(auth.user,'procurement')||hasPermission(auth.user,'packing')):hasPermission(auth.user,'packing'));
 const photosReady=computed(()=>entries.value.every(row=>row.photoState.ready&&!row.photoState.busy));
 const done=computed(()=>groups.value.filter(group=>group.state==='done').length),finished=computed(()=>groups.value.length>0&&done.value===groups.value.length);
 let version=0,disposed=false,scope='';
@@ -25,23 +25,24 @@ function load(){
  entries.value=props.rows.map(row=>({...row,actual:Number(row.quantity),reason:'',difference_kind:arriving.value?'partial':'',photos:[],photoState:{busy:false,ready:true}}));
  groups.value=[];
  if(!allowed.value){error.value='当前岗位无权处理这些采购批次';return;}
- if(!entries.value.length||entries.value.some(row=>row.review_required||row.composition_error||!Number(row.id)||!Number(row.product_id)||!arriving.value&&!row.received_at)){error.value='请选择已核对采购内容的有效批次；入库前须先确认到货';return;}
+ if(!entries.value.length||entries.value.some(row=>row.review_required||row.composition_error||!Number(row.id)||!Number(row.product_id)||row.status==='approved'||row.status==='cancelled'||!receiving.value&&!!row.received_at)){error.value='请选择尚未完成且已核对采购内容的有效批次；已到货批次可直接验收入库';return;}
  const indexed=new Map();
- for(const row of entries.value){const id=Number(row.product_id),index=arriving.value?Number(row.id):id;if(!indexed.has(index))indexed.set(index,{product_id:id,key:crypto.randomUUID(),name:arriving.value?(row.order_no||`采购批次 #${row.id}`):row.product_name,rows:[],state:'pending',error:'',body:null,preview:null,result:null});indexed.get(index).rows.push(row);}
+ for(const row of entries.value){const id=Number(row.product_id),index=receiving.value?id:Number(row.id);if(!indexed.has(index))indexed.set(index,{product_id:id,key:crypto.randomUUID(),name:receiving.value?row.product_name:(row.order_no||`采购批次 #${row.id}`),rows:[],state:'pending',error:'',body:null,preview:null,result:null});indexed.get(index).rows.push(row);}
  groups.value=[...indexed.values()];
 }
 function validate(){
  if(!allowed.value){error.value='当前岗位无权处理这些采购批次';return false;}
  if(entries.value.some(row=>!Number.isSafeInteger(row.actual)||row.actual<1||row.actual>Number(row.quantity))){error.value='本次数量须为正整数且不超过待处理数量；采购总数录错请先联系采购更正原记录';return false;}
- if(!arriving.value){
+ if(reminding.value){if(note.value.trim().length>500){error.value='提醒说明不能超过500字';return false;}return true;}
+ if(receiving.value){
   if(!photosReady.value){error.value='请等待照片上传完成，失败的照片请重试或移除';return false;}
-  if(entries.value.some(row=>row.actual!==Number(row.quantity)&&row.difference_kind!=='partial')){error.value='部分入库请选择分批到货保留余量；采购总数录错请先更正原记录';return false;}
+  if(entries.value.some(row=>row.actual!==Number(row.quantity)&&row.difference_kind!=='partial')){error.value='部分入库请选择保留余量继续处理；采购总数录错请先更正原记录';return false;}
   if(entries.value.some(row=>row.actual!==Number(row.quantity)&&!row.reason.trim())){error.value='部分入库请填写未收部分的原因';return false;}
  }else if(entries.value.some(row=>arrivalNote(row).length>500)){error.value='到货说明合计不能超过500字，请简写后重试';return false;}
  return true;
 }
 async function preview(){
- if(busy.value||attempted.value||!validate())return;
+ if(busy.value||attempted.value||!receiving.value||!validate())return;
  const token=version;busy.value=true;error.value='';
  try{
   await runPurchaseBatchGroups(groups.value,async group=>{
@@ -53,12 +54,12 @@ async function preview(){
 }
 async function submit(){
  if(busy.value||finished.value||!allowed.value||!groups.value.length)return;
- if(!attempted.value&&!validate()||!arriving.value&&!previewed.value)return;
+ if(!attempted.value&&!validate()||receiving.value&&!previewed.value)return;
  const token=version;busy.value=true;error.value='';attempted.value=true;let changed=false;
  try{await runPurchaseBatchGroups(groups.value.filter(group=>group.state!=='done'),async group=>{
   group.state='running';group.error='';
-  try{const row=group.rows[0];group.body||={id:Number(row.id),quantity:row.actual,expected_quantity:Number(row.quantity),expected_updated_at:row.updated_at,note:arrivalNote(row),request_key:group.key};
-   const result=await apiClient.post(arriving.value?'/api/inventory-workflow/purchase-arrivals':'/api/inventory-workflow/receipts',group.body);if(!current(token))return;group.result=result;group.state='done';changed=true;
+  try{const row=group.rows[0];group.body||={...(reminding.value?{operation:'remind'}:{quantity:row.actual}),id:Number(row.id),expected_quantity:Number(row.quantity),expected_updated_at:row.updated_at,note:reminding.value?note.value.trim():arrivalNote(row),request_key:group.key};
+   const result=await apiClient.post(receiving.value?'/api/inventory-workflow/receipts':'/api/inventory-workflow/purchase-arrivals',group.body);if(!current(token))return;group.result=result;group.state='done';changed=true;
   }catch(e){if(current(token)){group.state='error';group.error=e.message;}}
  },{isCurrent:()=>current(token)});}finally{if(current(token)&&changed)emit('changed');if(token===version)busy.value=false;}
 }
@@ -68,30 +69,30 @@ window.addEventListener('erp:auth-scope-changed',scopeChanged);
 onBeforeUnmount(()=>{disposed=true;++version;window.removeEventListener('erp:auth-scope-changed',scopeChanged);});
 </script>
 <template>
- <MobileDialog v-model="visible" :title="arriving?'确认采购到货':'批量验收入库'" :show-close="!busy" :close-on-press-escape="!busy" :before-close="done=>{if(!busy)done();}">
+ <MobileDialog v-model="visible" :title="reminding?'提醒仓库到货':arriving?'确认实物到货':'批量验收入库'" :show-close="!busy" :close-on-press-escape="!busy" :before-close="done=>{if(!busy)done();}">
   <section class="mobile-batch-form mobile-form">
-   <p class="mobile-muted">{{arriving?'默认全部到货；填少时余量继续待到货，仅通知仓库，不增加本地实物。到货说明选填。':'仅合格实收计入库存。部分入库须选择分批到货并说明原因，未收余量继续采购待到货。'}}</p>
+   <p class="mobile-muted">{{reminding?'物流显示送达时提醒仓库查收，不代表已拿到实物，不改变到货数量和库存。提醒说明选填。':arriving?'确认已经拿到实物。默认全部到货；填少时余量继续待到货，不增加本地库存。到货说明选填。':'仅合格实收计入库存，未标到货也可直接验收。部分入库须保留余量并说明原因；已到货的余量继续待验收，未到货的余量继续待到货。'}}</p>
    <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
    <template v-if="!previewed&&!attempted">
     <article v-for="row in entries" :key="row.id" class="mobile-record">
      <h3>{{row.product_name}}</h3><small>{{row.order_no||'采购批次'}} · #{{row.id}} · 待处理 {{row.quantity}} {{unit(row)}}</small>
-     <label>{{arriving?'本次到货':'本次合格实收'}}<el-input-number v-model="row.actual" :min="1" :max="Number(row.quantity)" :disabled="busy||!!error&&groups.length===0" :aria-label="`批次 ${row.id} ${arriving?'到货数量':'实收数量'}`" @change="error=''"/></label>
-     <PurchaseQuantityDifference v-if="arriving||row.actual!==Number(row.quantity)" :row="row" :arrival="arriving" :disabled="busy" :allow-correction="false" @change="error=''"/>
-     <MobileEvidencePicker v-if="!arriving" v-model="row.photos" :disabled="busy" :label="`批次 ${row.id} 入库照片`" @state="row.photoState=$event;error=''"/>
+     <label v-if="!reminding">{{arriving?'本次到货':'本次合格实收'}}<el-input-number v-model="row.actual" :min="1" :max="Number(row.quantity)" :disabled="busy||!!error&&groups.length===0" :aria-label="`批次 ${row.id} ${arriving?'到货数量':'实收数量'}`" @change="error=''"/></label>
+     <PurchaseQuantityDifference v-if="!reminding&&(arriving||row.actual!==Number(row.quantity))" :row="row" :arrival="arriving" :disabled="busy" :allow-correction="false" @change="error=''"/>
+     <MobileEvidencePicker v-if="receiving" v-model="row.photos" :disabled="busy" :label="`批次 ${row.id} 入库照片`" @state="row.photoState=$event;error=''"/>
     </article>
-    <el-input v-if="arriving" v-model="note" type="textarea" maxlength="500" placeholder="到货位置或签收说明（选填）" :disabled="busy" @input="error=''"/>
+    <el-input v-if="!receiving" v-model="note" type="textarea" maxlength="500" :placeholder="reminding?'物流送达位置或查收说明（选填）':'到货位置或签收说明（选填）'" :disabled="busy" @input="error=''"/>
    </template>
    <template v-else>
     <p role="status">{{attempted?`已完成 ${done} / ${groups.length} 项；失败项保留，重试不重复提交已完成项。`:'请核对本次入库影响后确认。'}}</p>
     <article v-for="group in groups" :key="group.key" class="mobile-record">
-     <h3>{{group.name}}</h3><small v-for="row in group.rows" :key="row.id">批次 #{{row.id}} · 本次 {{row.actual}} {{unit(row)}}</small>
-     <p v-if="!arriving">账面库存 {{group.preview?.physical_before}} → {{group.preview?.physical_after}} · 本次合格实收 {{group.preview?.quantity}} 件</p>
-     <template v-if="group.state==='done'"><strong>{{arriving?'已到货待验收':'已验收入库'}} {{received(group)}} 件</strong><small>剩余 {{remaining(group)}} 件{{remaining(group)?'继续采购待到货':'，本批次已处理完成'}}</small></template>
+     <h3>{{group.name}}</h3><small v-for="row in group.rows" :key="row.id">批次 #{{row.id}}<template v-if="!reminding"> · 本次 {{row.actual}} {{unit(row)}}</template></small>
+     <p v-if="receiving">账面库存 {{group.preview?.physical_before}} → {{group.preview?.physical_after}} · 本次合格实收 {{group.preview?.quantity}} 件</p>
+     <template v-if="group.state==='done'"><strong>{{reminding?'已提醒仓库查收':`${arriving?'已到货待验收':'已验收入库'} ${received(group)} 件`}}</strong><small v-if="!reminding">剩余 {{remaining(group)}} 件{{remaining(group)?'继续待处理，可在采购收货查看':'，本批次已处理完成'}}</small></template>
      <el-tag :type="group.state==='done'?'success':group.state==='error'?'danger':'info'">{{group.state==='done'?'已完成':group.state==='error'?'未完成':group.state==='running'?'处理中':'待确认'}}</el-tag><p v-if="group.error" role="alert">{{group.error}}；批次已变化时请关闭后刷新核对。</p>
     </article>
    </template>
   </section>
-  <template #footer><el-button :disabled="busy" @click="visible=false">{{attempted?'关闭':'取消'}}</el-button><el-button v-if="previewed&&!attempted" :disabled="busy" @click="previewed=false;error=''">返回修改</el-button><el-button v-if="!finished" type="primary" :loading="busy" :disabled="!groups.length||!allowed||(!arriving&&!photosReady)" @click="arriving||previewed?submit():preview()">{{attempted?'重试未完成项':arriving?'确认到货':previewed?'确认入库':'核对数量，查看影响'}}</el-button></template>
+  <template #footer><el-button :disabled="busy" @click="visible=false">{{attempted?'关闭':'取消'}}</el-button><el-button v-if="previewed&&!attempted" :disabled="busy" @click="previewed=false;error=''">返回修改</el-button><el-button v-if="!finished" type="primary" :loading="busy" :disabled="!groups.length||!allowed||(receiving&&!photosReady)" @click="!receiving||previewed?submit():preview()">{{attempted?'重试未完成项':reminding?'提醒仓库':arriving?'确认实物到货':previewed?'确认入库':'核对数量，查看影响'}}</el-button></template>
  </MobileDialog>
 </template>
 <style scoped>

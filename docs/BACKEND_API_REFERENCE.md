@@ -3610,7 +3610,7 @@ Procurement manually reconciles one pending/arrived bundle purchase into minimum
 
 #### `GET /api/inventory-workflow/purchase-arrivals`
 
-Paged current-enterprise actual purchase arrival batches with minimum-unit component identities, related bundles and source lineage. source_bundle_batch may include the original purchase_order_id and order_no after database ownership and lineage validation; the row's actual purchase/action IDs stay unchanged. Unresolved legacy bundle totals are flagged rather than counted as known units. A bundle must be manually reconciled before arrival or receipt, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
+Shared current-enterprise purchased batches, visible to warehouse immediately after purchase without a purchaser arrival prerequisite. pending includes every unfinished batch; open includes unarrived batches, including reminded; reminded is an unarrived batch with an arrival reminder; arrived is physically arrived pending QC; received is approved. arrival_reminder is null or {id,person_id,person_name,created_at,note}. Arrival reminders are advisory and never prove physical receipt. Minimum-unit components, related bundles and source_bundle_batch lineage remain available; unresolved legacy bundles require reconciliation before physical arrival or receipt. Amounts and purchase_note are only exposed to procurement duty. purchase_progress is null for legacy batches without a formal item, otherwise {ordered_quantity,unarrived_quantity,arrived_quantity,received_quantity} aggregated for the same owned purchase item and product; only page-related item IDs are queried.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3626,12 +3626,12 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
   - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
-  - `status` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `product_id` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `page` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `pageSize` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `summary_only` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `recent` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `status` (`string`, optional): pending|open|reminded|arrived|inspection|received|all; legacy default open. inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; owned product; maximum100 rows; summary_only=1 omits row details
+  - `product_id` (`string`, optional): pending|open|reminded|arrived|inspection|received|all; legacy default open. inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; owned product; maximum100 rows; summary_only=1 omits row details
+  - `page` (`string`, optional): pending|open|reminded|arrived|inspection|received|all; legacy default open. inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; owned product; maximum100 rows; summary_only=1 omits row details
+  - `pageSize` (`string`, optional): pending|open|reminded|arrived|inspection|received|all; legacy default open. inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; owned product; maximum100 rows; summary_only=1 omits row details
+  - `summary_only` (`string`, optional): pending|open|reminded|arrived|inspection|received|all; legacy default open. inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; owned product; maximum100 rows; summary_only=1 omits row details
+  - `recent` (`string`, optional): pending|open|reminded|arrived|inspection|received|all; legacy default open. inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; owned product; maximum100 rows; summary_only=1 omits row details
   - `day_mode` (`string`, required): pending opts into purchase-day selection; absent preserves all-day legacy listing
   - `purchase_day` (`string`, required): YYYY-MM-DD in Beijing time or all; defaults to the oldest pending day matching status when day_mode=pending; a selected completed date falls back to the oldest remaining date and resets page to 1
   - `start_date` (`string`, required): Optional inclusive Beijing purchase start day YYYY-MM-DD
@@ -3642,7 +3642,7 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
 
 #### `POST /api/inventory-workflow/purchase-arrivals`
 
-Buyer confirms the actual arrived quantity in one owned purchased batch; omit quantity for compatible full arrival. Partial confirmation atomically splits arrived quantity from an unarrived remainder with preserved purchase/request links and conserved amounts/freight. Purchase header/item totals do not change and no stock is posted. Same-key replay returns the saved split; changed payload or stale timestamp/expected_quantity rejects. operation=logistics retains its existing courier/tracking-only behavior and observed logistics checks. Fresh procurement duty and owned purchased source are rechecked under locks.
+Procurement or packing staff confirm physical arrival, without posting stock. Omit quantity for compatible full arrival; partial arrival atomically splits an unarrived remainder while conserving purchased quantity, money and links. operation=remind requires fresh procurement duty, expected_quantity and a UUID: appends one arrival reminder with actor/time/note and updates the batch revision, without changing received_at, quantities, money or stock. A batch already reminded returns duplicate without refreshing its reminder time; changed same-key content conflicts. operation=logistics remains procurement-only and preserves its observed logistics checks. Fresh membership, source ownership, row quantity and timestamp are checked under product/authority/batch locks.
 
 - Auth: `authenticated`
 - Request body: required
@@ -3702,7 +3702,7 @@ Fresh membership and per-action duty checked inside transaction. arrived/transit
 
 #### `GET /api/inventory-workflow/receipts/context`
 
-Read pending purchased batches and independent local physical/available quantities for direct receipt entry. Fresh packing/procurement duty; tenant ownership; no prices or FBP calls.
+Read pending purchased batches and independent local physical/available quantities for direct receipt entry. Fresh packing duty; tenant ownership; no prices or FBP calls. Purchaser-only roles cannot accept inventory.
 
 - Auth: `authenticated`
 - Responses:
@@ -3723,7 +3723,7 @@ Validate selected quantities through the canonical receipt impact preview. Read-
 
 #### `GET /api/inventory-workflow/receipts`
 
-Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.
+Read owned-product pending purchased arrival batches without costs. Fresh packing duty required. Includes unmarked purchases immediately.
 
 - Auth: `authenticated`
 - Responses:
@@ -3731,7 +3731,7 @@ Read owned-product pending purchased arrival batches without costs. Fresh packin
 
 #### `POST /api/inventory-workflow/receipts`
 
-Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes and before replay. New-arrival requests with a UUID request_key atomically save a tenant-and-actor-scoped receipt result; identical retries recover lost responses without adding stock twice, while changed product, quantities, reason, evidence or revision under the same key conflict. Legacy requests without a key and historical receipts retain their existing paths. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
+Warehouse registers actual QC-passed quantity without requiring a purchaser's earlier arrival mark. Fresh packing duty is rechecked before writes and replay, including legacy normal receipt paths. Stock is posted once; an arrived batch's unaccepted remainder stays physically arrived, while an unmarked batch's undelivered remainder stays unarrived. UUID requests atomically save a tenant/actor-scoped receipt result; identical retries recover lost responses without duplicate stock, while changed product, quantities, evidence or revision conflict. Ordinary new arrivals do not require a whole-warehouse count; explicit historical receipt-and-count uses the existing canonical transaction. Unrelated stocktake permissions remain unchanged.
 
 - Auth: `authenticated`
 - Request body: required

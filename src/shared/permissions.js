@@ -4,8 +4,8 @@ import { aiSkillsAvailable, isAiSkillsPage } from "./ai-skills-access.js";
 export const ROLE_DEFINITIONS = [
   { value: "admin", label: "企业管理员（兼容）", description: "本企业业务权限；不包含平台授权或系统全局配置" },
   { value: "manager", label: "经理", description: "业务管理、建品审批、标准名称维护" },
-  { value: "packing", label: "打包", description: "订单查看、面单打印、打包发货和出库" },
-  { value: "procurement", label: "采购", description: "采购、供应商、收货入库和库存建品" },
+  { value: "packing", label: "打包", description: "订单查看、面单打印、打包发货、验收入库和出库" },
+  { value: "procurement", label: "采购", description: "采购、供应商、到货提醒和库存建品；验收入库需仓库打包权限" },
   { value: "operations", label: "运营", description: "采集选品、上架、客户消息和库存建品" },
   { value: "technical", label: "技术岗位（兼容）", description: "保留旧岗位标记；平台设置仍需要独立的超级管理员授权" },
   { value: "operator", label: "通用业务（兼容旧账号）", description: "保留原通用业务权限，不含审批、财务和系统管理；细分岗位不必同时勾选" }
@@ -106,6 +106,7 @@ export function canAccessPage(subject, path) {
   if (path === "/ai-credits") return Boolean(subject?.tenant?.id) && !needsMembershipActivation(subject);
   if (subject && typeof subject === "object" && !Array.isArray(subject) && !subject.tenant?.id) return false;
   if (needsMembershipActivation(subject) && !["/tools/pricing", "/tools/profit-calculator"].includes(path)) return false;
+  if (["/procurement/workspace", "/mobile/procurement"].includes(path)) return hasPermission(subject, "procurement") || hasPermission(subject, "packing");
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);
   if (permission === "finance") return isPlatformAdmin(subject) || (enterpriseFinancePages.has(path) && isEnterpriseAdmin(subject));
   if (["/online-products", "/batch-stock-update"].includes(path) && isEnterpriseAdmin(subject)) return true;

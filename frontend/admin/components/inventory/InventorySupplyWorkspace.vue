@@ -51,9 +51,11 @@ async function cancellationSaved(result){cancellation.visible=false;applyDetail(
 const emit=defineEmits(['clear-product','purchased']);
 const props=defineProps({entry:{type:String,default:'orders'},initialTask:{type:String,default:''},productId:{type:Number,default:0}});
 const auth=useAuthStore(),loading=ref(false),error=ref(''),rows=ref([]),total=ref(0),meta=ref({}),snapshot=ref({}),checkingProduct=ref(0);
-const filters=reactive({...inventorySearchDefaults(),query:'',scope:'all',task:props.initialTask|| (props.entry==='procurement'?'required':'receiving'),page:1,pageSize:50});
+const normalizeTask=task=>['incoming','receiving'].includes(task)?'receiving':task;
+const defaultTask=()=>props.entry==='procurement'&&hasPermission(auth.user,'procurement')?'required':'receiving';
+const filters=reactive({...inventorySearchDefaults(),query:'',scope:'all',task:normalizeTask(props.initialTask)||defaultTask(),page:1,pageSize:50});
 const canCount=computed(()=>hasPermission(auth.user,'inventory.write'));
-const canReceive=computed(()=>hasPermission(auth.user,'packing')||hasPermission(auth.user,'procurement'));
+const canReceive=computed(()=>hasPermission(auth.user,'packing'));
 const canPurchase=computed(()=>hasPermission(auth.user,'procurement'));
 const canFbp=computed(()=>hasPermission(auth.user,'inventory.write'));
 const canReport=computed(()=>canCount.value||canReceive.value);
@@ -77,8 +79,8 @@ function openDetail(row,tab){Object.assign(detail,{visible:true,productId:Number
 function applyDetail(state){clearPages();hasUpdates.value=true;if(state){rememberUpdates([state]);applyPage({rows:rows.value,total:total.value,meta:meta.value,snapshot:snapshot.value});}}
 async function purchased(){const id=Number(purchase.row.product_id);purchase.visible=false;await refreshPurchased([id]);emit('purchased',{productId:id});}
 async function forecastCreated(){const id=forecastDialog.id;forecastDialog.visible=false;await refreshPurchased([id]);}
-const taskDefinitions=[{key:'required',label:'必须采购',hint:'FBS订单／正式FBP申请',icon:Document},{key:'advisory',label:'保障补货',hint:'扣除现货及在途后需采购',icon:Warning},{key:'fbp-stocking',label:'FBP备货建议',hint:'预测备货 / 本地发仓建议',icon:Box},{key:'incoming',label:'采购待到货',hint:'采购确认签收',icon:Van},{key:'receiving',label:'到货待验收',hint:'仓库核对数量并入库',icon:Box},{key:'fbp-receipts',label:'FBP到货验收',hint:'发往FBP的SKU逐项核对',icon:Box}];
-const tasks=computed(()=>{const order=props.entry==='procurement'?['required','advisory','incoming','receiving','fbp-stocking','fbp-receipts']:['receiving','fbp-stocking','fbp-receipts','incoming','required','advisory'];return order.map(key=>taskDefinitions.find(task=>task.key===key));});
+const taskDefinitions=[{key:'required',label:'必须采购',hint:'FBS订单／正式FBP申请',icon:Document},{key:'advisory',label:'保障补货',hint:'扣除现货及在途后需采购',icon:Warning},{key:'fbp-stocking',label:'FBP备货建议',hint:'预测备货 / 本地发仓建议',icon:Box},{key:'receiving',label:'采购收货',hint:'采购与仓库共同处理未完成批次',icon:Van},{key:'fbp-receipts',label:'FBP到货验收',hint:'发往FBP的SKU逐项核对',icon:Box}];
+const tasks=computed(()=>{const order=props.entry==='procurement'?(canPurchase.value?['required','advisory','receiving','fbp-stocking','fbp-receipts']:['receiving']):['receiving','fbp-stocking','fbp-receipts','required','advisory'];return order.map(key=>taskDefinitions.find(task=>task.key===key));});
 let version=0,controller,disposed=false,active=true,snapshotTimer=null,snapshotAttempts=0;
 const liveUpdates=new Map();
 function stopSnapshotPoll(){clearTimeout(snapshotTimer);snapshotTimer=null;}
@@ -94,9 +96,9 @@ const plan=row=>row.workflow?.supply_plan||{};
 const demandLines=row=>inventorySupplyLines(row.workflow);
 const forecastPendingLabel=row=>row.workflow?.fbp?.sku_count===0?'未绑定可核算SKU':row.workflow?.fbp?.missing_stock_count>0?`${row.workflow.fbp.missing_stock_count} 个SKU库存未同步`:row.workflow?.fbp?.unknown_reason||'FBP预测待核实';
 const purchaseRequestIds=row=>(row?.workflow?.requests||[]).filter(r=>{const type=procurementDemandType(r),p=plan(row);return p.required_purchase>0?(type==='real_order'&&p.required_fbs>0)||(type==='fbp_stock'&&p.required_fbp>0):(type==='local_safety'&&p.optional_local>0)||(type==='fbp_forecast'&&p.optional_fbp>0);}).map(r=>r.id);
-function taskCount(key){if(key==='fbp-receipts')return fbpReceiptCount.value??'—';return key==='incoming'?batchCounts.value.open??'—':key==='receiving'?batchCounts.value.arrived??'—':meta.value[key]??'—';}
-function taskHint(task){if(task.key==='incoming')return `${batchCounts.value.open_quantity??'—'} 件待到货${batchCounts.value.open_unknown_batches?` · ${batchCounts.value.open_unknown_batches}批待核对`:''}`;if(task.key==='receiving')return `${batchCounts.value.arrived_quantity??'—'} 件待验收${batchCounts.value.arrived_unknown_batches?` · ${batchCounts.value.arrived_unknown_batches}批待核对`:''}`;return task.hint;}
-function switchTask(key){if(key==='fbp-receipts'){stopSnapshotPoll();++version;controller?.abort();loading.value=false;workspaceTab.value='fbp';void loadBatchCounts();return;}workspaceTab.value='stock';filters.task=key;selected.value=[];if(['incoming','receiving','fbp-stocking'].includes(key))filters.scope='all';void load(true);}
+function taskCount(key){if(key==='fbp-receipts')return fbpReceiptCount.value??'—';return key==='receiving'?batchCounts.value.pending??'—':meta.value[key]??'—';}
+function taskHint(task){if(task.key==='receiving')return `待到货 ${batchCounts.value.open??'—'} 批 · 待验收 ${batchCounts.value.arrived??'—'} 批${batchCounts.value.pending_unknown_batches?` · ${batchCounts.value.pending_unknown_batches}批待核对`:''}`;return task.hint;}
+function switchTask(key){key=normalizeTask(key);if(key==='fbp-receipts'){stopSnapshotPoll();++version;controller?.abort();loading.value=false;workspaceTab.value='fbp';void loadBatchCounts();return;}workspaceTab.value='stock';filters.task=key;selected.value=[];if(['receiving','fbp-stocking'].includes(key))filters.scope='all';void load(true);}
 async function startBatch(){
  freePurchase.value=false;
  if(checkingProduct.value)return;
@@ -126,7 +128,7 @@ async function loadBatchCounts(signal){
  if(key!==countsKey){batchCounts.value={};fbpReceiptCount.value=null;}
  const qs=new URLSearchParams({...criteria,...(props.productId?{product_id:props.productId}:{})});
  const requests=[
-  apiClient.get(`/api/inventory-workflow/purchase-arrivals?${qs}&status=open&summary_only=1`,{noCache:true,signal}).then(r=>{if(isCurrent())batchCounts.value=r.summary||{};}),
+  apiClient.get(`/api/inventory-workflow/purchase-arrivals?${qs}&status=pending&summary_only=1`,{noCache:true,signal}).then(r=>{if(isCurrent())batchCounts.value=r.summary||{};}),
   apiClient.get(`/api/inventory-workflow/details?${qs}&node=fbp-receipts&summary_only=1`,{noCache:true,signal}).then(r=>{if(isCurrent())fbpReceiptCount.value=r.total??null;})
  ];
  const results=await Promise.allSettled(requests);
@@ -162,7 +164,7 @@ async function load(reset=false,fresh=false,fromPage=false,background=false){
  finally{if(token===version)loading.value=false;}
 }
 
-function resetScope(){cancellation.visible=false;stopSnapshotPoll();liveUpdates.clear();++countsVersion;clearPages();countsKey='';countsAt=0;fbpReceiptCount.value=null;snapshot.value={};batchCounts.value={};readAt.value='';selected.value=[];batchVisible.value=false;forecastDialog.visible=false;checkingProduct.value=0;++version;controller?.abort();Object.assign(filters,inventorySearchDefaults());filters.query='';filters.scope='all';filters.task=props.initialTask||(props.entry==='procurement'?'required':'receiving');workspaceTab.value='stock';if(props.productId)emit('clear-product');rows.value=[];meta.value={};total.value=0;loading.value=false;detail.visible=false;ledger.visible=false;receiving.visible=false;ledger.productId=0;purchase.visible=false;purchase.row=null;feedback.visible=false;feedback.row=null;if(active)void load(true);}
+function resetScope(){cancellation.visible=false;stopSnapshotPoll();liveUpdates.clear();++countsVersion;clearPages();countsKey='';countsAt=0;fbpReceiptCount.value=null;snapshot.value={};batchCounts.value={};readAt.value='';selected.value=[];batchVisible.value=false;forecastDialog.visible=false;checkingProduct.value=0;++version;controller?.abort();Object.assign(filters,inventorySearchDefaults());filters.query='';filters.scope='all';filters.task=normalizeTask(props.initialTask)||defaultTask();workspaceTab.value='stock';if(props.productId)emit('clear-product');rows.value=[];meta.value={};total.value=0;loading.value=false;detail.visible=false;ledger.visible=false;receiving.visible=false;ledger.productId=0;purchase.visible=false;purchase.row=null;feedback.visible=false;feedback.row=null;if(active)void load(true);}
 function openLedger(row,action=''){if(action==='receive'){Object.assign(receiving,{visible:true,id:Number(row.product_id),name:row.product_name});return;}Object.assign(ledger,{visible:true,productId:Number(row.product_id),action});}
 let purchaseVersion=0,purchaseController;
 watch(()=>purchase.visible,value=>{if(!value){++purchaseVersion;purchaseController?.abort();checkingProduct.value=0;}});
@@ -198,7 +200,7 @@ onMounted(()=>{window.addEventListener('erp:auth-scope-changed',resetScope);wind
 onActivated(()=>{active=true;if(snapshot.value.refreshing||hasUpdates.value)void load();});
 onDeactivated(()=>{cancellation.visible=false;stopSnapshotPoll();++countsVersion;clearPages();active=false;detail.visible=false;ledger.visible=false;receiving.visible=false;purchase.visible=false;feedback.visible=false;batchVisible.value=false;forecastDialog.visible=false;++version;controller?.abort();loading.value=false;});
 onBeforeUnmount(()=>{stopSnapshotPoll();liveUpdates.clear();++countsVersion;clearPages();disposed=true;++version;controller?.abort();window.removeEventListener('erp:auth-scope-changed',resetScope);window.removeEventListener('erp:system-notification',queueRefresh);});
-watch(()=>props.initialTask,value=>switchTask(value||(props.entry==='procurement'?'required':'receiving')));
+watch(()=>props.initialTask,value=>switchTask(value||defaultTask()));
 watch(()=>props.productId,()=>load(true),{immediate:true});
 defineExpose({refresh:load});
 </script>
@@ -215,7 +217,7 @@ defineExpose({refresh:load});
 
 
   <el-alert v-if="!isBatch&&(snapshot.error||snapshot.refreshing||snapshot.available===false)" :type="snapshot.error?'warning':'info'" :closable="false" :title="snapshot.error|| (snapshot.available===false?'尚无成功核算结果，暂不能判断是否缺货':'后台正在核对最新需求，完成后自动更新；已保存的库存会先同步')"/>
-  <BatchQueue v-if="isBatch" :status="filters.task==='incoming'?'open':'arrived'" :filters="filters" :revision="batchRevision" :product-id="productId" @summary="value=>batchCounts=value" @changed="hasUpdates=true;countsAt=0;loadBatchCounts()"/>
+  <BatchQueue v-if="isBatch" status="pending" :filters="filters" :revision="batchRevision" :product-id="productId" @summary="value=>batchCounts=value" @changed="hasUpdates=true;countsAt=0;loadBatchCounts()"/>
   <template v-else>
   <p v-if="isFbpSuggestions" class="supply-policy-hint">这里展示尚未转成正式申请的FBP预测备货建议。先使用本地现货及采购在途，只有剩余货源缺口才需新增采购；确认后创建正式FBP备货申请。</p>
   <p v-else class="supply-policy-hint">必须采购与保障补货分开处理；现货和采购在途只抵扣一次。缺口是待补数量，采购建议是扣除可用货源后的净数量；FBP实物独立核对，不抵扣本地订单。同一预测转申请后不重复计算。</p>

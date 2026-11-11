@@ -46,7 +46,7 @@ async function corrected(){
 async function preview(){
  if(busy.value||correcting.value||error.value||correction.visible)return;
  if(entries.value.some(r=>!Number.isSafeInteger(r.actual)||r.actual<1||r.actual>Number(r.quantity))){error.value='实收数量须为正整数；超过原登记数时，请先点击该行“更正采购记录”，保存后继续入库';return;}
- if(entries.value.some(r=>r.actual!==Number(r.quantity)&&r.difference_kind!=='partial')){error.value='数量不一致时，请选择分批到货保留余量；采购总数录错请先更正采购记录';return;}
+ if(entries.value.some(r=>r.actual!==Number(r.quantity)&&r.difference_kind!=='partial')){error.value='数量不一致时，请选择保留余量继续待处理；采购总数录错请先更正采购记录';return;}
  if(entries.value.some(r=>r.actual!==Number(r.quantity)&&!r.reason.trim())){error.value='部分入库请填写未收部分的原因';return;}
  const token=version;busy.value=true;checked.value=0;
  try{await runPurchaseBatchGroups(groups.value,async group=>{const body={product_id:group.product_id,receipt_mode:'new_arrival',request_key:group.key,records:group.rows.map(row=>({id:row.id,quantity:row.actual,expected_quantity:Number(row.quantity),reason:row.reason}))};const result=await apiClient.post('/api/inventory-workflow/receipts/preview',body);if(!current(token))return;group.preview=result;group.body={...body,expected_revision:result.revision};checked.value++;},{isCurrent:()=>current(token)});if(current(token))previewed.value=true;}
@@ -73,9 +73,9 @@ watch(()=>props.modelValue,value=>{if(value)void load();},{immediate:true});wind
 onBeforeUnmount(()=>{disposed=true;++version;window.removeEventListener('erp:auth-scope-changed',scopeChanged);});
 </script>
 <template>
- <el-dialog v-model="visible" :title="arriving?'批量确认采购到货':'批量登记验收入库'" width="min(1080px,96vw)" append-to-body :show-close="!busy&&!correcting&&!correction.visible" :close-on-click-modal="false" :close-on-press-escape="!busy&&!correcting&&!correction.visible" :before-close="done=>{if(!busy&&!correcting&&!correction.visible)done();}">
+ <el-dialog v-model="visible" :title="arriving?'批量确认实物到货':'批量登记验收入库'" width="min(1080px,96vw)" append-to-body :show-close="!busy&&!correcting&&!correction.visible" :close-on-click-modal="false" :close-on-press-escape="!busy&&!correcting&&!correction.visible" :before-close="done=>{if(!busy&&!correcting&&!correction.visible)done();}">
   <section class="purchase-batch-action">
-   <el-alert :title="arriving?'默认本批次全部到货；填少时自动保留余量继续待到货，无需另选原因。仅本次到货数量进入待验收，本地库存暂不增加。':'只填写本次验收合格的实收数量，未收部分继续采购待到货；采购总数录错请先按凭证更正采购记录。'" type="info" :closable="false"/>
+   <el-alert :title="arriving?'确认已拿到实物后再登记。默认本批次全部到货；填少时自动保留余量继续待到货，无需另选原因。本地库存暂不增加。':'只填写本次验收合格的实收数量；余量保持原状态，已到货继续待验收、未到货继续待到货。采购总数录错请先按凭证更正采购记录。'" type="info" :closable="false"/>
    <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
    <div v-if="busy" role="status" aria-live="polite"><p>{{attempted?`已处理 ${processed} / ${groups.length} 项，成功 ${done} 项`:`正在核对入库影响 ${checked} / ${groups.length} 项`}}</p><el-progress :percentage="Math.round((attempted?processed:checked)/Math.max(1,groups.length)*100)"/></div>
    <template v-if="!previewed&&!attempted">

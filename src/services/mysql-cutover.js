@@ -31,6 +31,7 @@ import { inventoryLedgerView, inventoryStocktakeBody, inventoryStocktakePreviewV
 import { ensurePeopleRolesSchemaMysql, personRoleFields } from "./people-roles.js";
 import { getRoles, hasPermission, primaryRole } from "../shared/permissions.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { assertWarehouseReceiptActor, isPurchaseReceiptWrite } from './purchase-receipt-access.js';
 import { createTenantBackgroundTasks } from "./tenant-background-tasks.js";
 import { customerMessageShopSql, customerMessageTemplateSql, assertCustomerMessageAccess, runCustomerMessageTaskOperation } from './customer-message-tenant-scope.js';
 import { CUSTOMER_MESSAGE_TEMPLATES_SCHEMA } from './customer-message-template-schema.js';
@@ -2087,6 +2088,7 @@ function isSameMysqlTimestamp(left, right) {
 function throwStaleRecordError(message = "This record was modified by someone else. Please refresh before editing.") {
   const error = new Error(message);
   error.status = 409;
+  error.statusCode = 409;
   throw error;
 }
 
@@ -24859,6 +24861,7 @@ export async function directInboundProcurementRequestsMysql(body = {}, tenantId 
   invalidateOrderProcurementCoverage();
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
+  await assertWarehouseReceiptActor(scope, sessionPersonId);
   await assertInventoryReferences(scope, body);
   if (sessionPersonId) await assertInventoryMember(scope, sessionPersonId);
   await ensureProcurementRequestTimestampSchemaMysql();
@@ -24868,6 +24871,7 @@ export async function directInboundProcurementRequestsMysql(body = {}, tenantId 
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!ids.length) throw new Error("Please select procurement requests to inbound");
   const result = await withMysqlTransaction(async (connection) => {
+    await assertWarehouseReceiptActor(scope, sessionPersonId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
     for (const id of ids) await assertInventoryRecord(scope, 'request', id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
     const placeholders = ids.map(() => "?").join(",");
     const requests = await mysqlConnectionQuery(connection, `
@@ -25492,7 +25496,7 @@ export async function deletePurchaseOrderMysql(id, tenantId = "admin") {
   return result;
 }
 
-export async function createInboundRecordMysql(body = {}, tenantId = "admin") {
+export async function createInboundRecordMysql(body = {}, tenantId = "admin", sessionPersonId = null) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
   await ensurePurchaseCostVersionSchemaMysql();
@@ -25504,6 +25508,7 @@ export async function createInboundRecordMysql(body = {}, tenantId = "admin") {
     const shippingAmount = Number(body.shipping_amount || 0);
     const unitCost = quantity ? (amount + shippingAmount) / quantity : Number(body.unit_cost || 0);
     const status = body.status || "pending_arrival";
+    if(status==='approved')await assertWarehouseReceiptActor(scope, sessionPersonId, run, { lock: true });
     const personId = await assertInventoryMember(scope, body.person_id, run);
     const [result] = await connection.execute(`
       INSERT INTO inbound_records (tenant_id, product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note, approved_at)
@@ -25556,6 +25561,8 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   await assertInventoryReferences(scope, body, run);
   const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
   if (!existing) throw new Error("Inbound record not found");
+  const changesReceivedQuantity=existing.status==='approved'&&body.quantity!==undefined&&Number(body.quantity)!==Number(existing.quantity);
+  if(body.receive_quantity!==undefined||changesReceivedQuantity||existing.status!=='approved'&&isPurchaseReceiptWrite(body))await assertWarehouseReceiptActor(scope, options.sessionPersonId, run, { lock: true });
   assertFreshRecord(body, existing, "入库记录已被其他用户保存，请刷新后再继续编辑");
   if(existing.status==='pending_arrival'&&(body.status==='approved'||body.receive_quantity!==undefined))await assertWholeBundleReview(run,scope,existing);
   if (body.receive_quantity === undefined && existing.purchase_order_item_id && body.quantity !== undefined && Number(body.quantity) !== Number(existing.quantity)) {
@@ -25573,12 +25580,13 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
     if (receipt.remaining > 0) {
       await connection.execute(`INSERT INTO inbound_records
         (tenant_id, product_id, person_id, quantity, amount, unit_cost, shipping_amount, purchase_url, status, note,
-         purchase_order_id, purchase_order_item_id, procurement_request_id, qc_status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?, ?, 'pending', ?)`, [
+         purchase_order_id, purchase_order_item_id, procurement_request_id, qc_status, received_at, courier_company, tracking_number, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`, [
         scope.id, existing.product_id, existing.person_id, receipt.remaining, receipt.remainingAmount,
         (receipt.remainingAmount + receipt.remainingShipping) / receipt.remaining, receipt.remainingShipping,
         existing.purchase_url || '', `${existing.note || ''}；批次 #${inboundId} 部分收货后剩余`,
-        existing.purchase_order_id, existing.purchase_order_item_id, existing.procurement_request_id, existing.created_at
+        existing.purchase_order_id, existing.purchase_order_item_id, existing.procurement_request_id,
+        existing.received_at || null, existing.courier_company || null, existing.tracking_number || null, existing.created_at
       ]);
     }
     body = { ...body, product_id: existing.product_id, person_id: existing.person_id, status: 'approved', quantity: receipt.received, amount: receipt.amount,
@@ -26091,7 +26099,7 @@ export async function confirmShippedProcurementReceiptsMysql(body = {}, sessionP
 export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
-  const guard = async connection => { if (options.beforeWrite) await options.beforeWrite(connection); if (options.session) await assertProcurementTaskAccessMysql(options.session, scope, options.signal); };
+  const guard = async connection => { if (options.beforeWrite) await options.beforeWrite(connection); if (options.session) await assertProcurementTaskAccessMysql(options.session, scope, options.signal); if(isPurchaseReceiptWrite(body))await assertWarehouseReceiptActor(scope, sessionPersonId, connection?((sql,params)=>mysqlConnectionQuery(connection,sql,params)):undefined, {lock:Boolean(connection)}); };
   await guard();
   await assertInventoryMember(scope, sessionPersonId);
   await ensureInboundRecordTimestampSchemaMysql();
@@ -26207,6 +26215,7 @@ export async function startBatchUpdateInboundRecordsMysql(body = {}, sessionPers
   const current = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(current, 'procurement');
   const scope = await resolveInventoryTenantScope(current.tenant.id);
+  if(isPurchaseReceiptWrite(body))await assertWarehouseReceiptActor(scope, current.personId);
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
   for (const record of records) await assertInventoryRecord(scope, 'inbound', record.id ?? record.inbound_record_id);

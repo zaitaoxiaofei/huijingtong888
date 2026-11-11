@@ -53,7 +53,7 @@ test('purchase-day queues retain cross-day search, old pending work, partial lin
   assert.deepEqual(ranged.days.map(day=>day.date),['2026-11-04','2026-11-05']);assert.equal(ranged.total,4);
   const old=await service.list({...search,purchase_day:'2026-10-02'},buyer),row=old.rows[0];
   const body={id:row.id,quantity:80,expected_quantity:600,expected_updated_at:row.updated_at,request_key:randomUUID()};
-  await assert.rejects(service.confirm(body,warehouse),{statusCode:403});
+  await assert.rejects(service.confirm({...body,operation:'remind'},warehouse),{statusCode:403});
   const saved=await service.confirm(body,buyer);assert.equal(saved.remaining_quantity,520);assert.equal((await service.confirm({...body,note:'   '},buyer)).duplicate,true);
   await assert.rejects(service.confirm({...body,note:'changed'},buyer),{statusCode:409});
   const after=await service.list({...search,purchase_day:'2026-10-02'},buyer);assert.equal(after.rows[0].quantity,520);assert.equal(after.day_summary.open_quantity,520);assert.equal(after.day_summary.arrived_quantity,80);

@@ -133,14 +133,14 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "inventory-workflow") {
     if(read&&['inventory-workflow/demand-details','inventory-workflow/purchase-arrivals'].includes(path))return require('inventory.read');
     if(method==='POST'&&path==='inventory-workflow/local-safety')return require('inventory.write','procurement');
-    if(method==='POST'&&path==='inventory-workflow/purchase-arrivals')return require('procurement');
+    if(method==='POST'&&path==='inventory-workflow/purchase-arrivals')return require('procurement','packing');
     if(method==='POST'&&path==='inventory-workflow/cancel-demand')return require('procurement');
     if(method==='POST'&&path==='inventory-workflow/demand-request')return require('packing','inventory.write','procurement');
     if(method==='POST'&&path==='inventory-workflow/node-action')return require('packing','inventory.write','procurement','orders.manage');
     if(method==='POST'&&path==='inventory-workflow/feedback')return require('packing','inventory.write','procurement');
     if (method==='POST' && path==='inventory-workflow/fbp') return require('inventory.write');
-    if ((method==='GET'&&path==='inventory-workflow/receipts/context')||(method==='POST'&&path==='inventory-workflow/receipts/preview'))return require('packing','procurement');
-    if (path === 'inventory-workflow/receipts' && ['GET','POST'].includes(method)) return require('packing','procurement');
+    if ((method==='GET'&&path==='inventory-workflow/receipts/context')||(method==='POST'&&path==='inventory-workflow/receipts/preview'))return require('packing');
+    if (path === 'inventory-workflow/receipts' && ['GET','POST'].includes(method)) return require('packing');
     if (read && ['inventory-workflow','inventory-workflow/alerts','inventory-workflow/details'].includes(path)) return require('inventory.read');
     if (method === 'POST' && path === 'inventory-workflow/requests') return req._session?.tenant?.id ? {allowed:true} : deny('请先选择有效企业');
     return deny();

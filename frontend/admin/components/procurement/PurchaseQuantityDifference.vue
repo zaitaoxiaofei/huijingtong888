@@ -10,10 +10,10 @@ const emit=defineEmits(['correct','change']);
   </template>
   <template v-else>
   <el-select v-model="row.difference_kind" placeholder="请选择数量差异处理" :disabled="disabled" :aria-label="`批次 ${row.id} 数量差异处理`" @change="emit('change')">
-   <el-option label="分批到货，余量继续待到货" value="partial"/>
+   <el-option :label="row.received_at?'分批验收，余量继续待验收':'分批到货，余量继续待到货'" value="partial"/>
    <el-option label="原采购总数录错，先更正采购记录" value="correction"/>
   </el-select>
-  <template v-if="row.difference_kind==='partial'"><small>本次 {{row.actual}} 件，剩余 {{Number(row.quantity)-Number(row.actual)}} 件继续采购待到货；采购总数和金额不变。</small><el-input v-model="row.reason" maxlength="100" placeholder="如部分到货、验货不合格" :disabled="disabled" :aria-label="`批次 ${row.id} 数量差异原因`" @input="emit('change')"/></template>
+  <template v-if="row.difference_kind==='partial'"><small>本次 {{row.actual}} 件，剩余 {{Number(row.quantity)-Number(row.actual)}} 件{{row.received_at?'已到货，继续待验收':'继续采购待到货'}}；采购总数和金额不变。</small><el-input v-model="row.reason" maxlength="100" placeholder="如部分到货、验货不合格" :disabled="disabled" :aria-label="`批次 ${row.id} 数量差异原因`" @input="emit('change')"/></template>
   <template v-else-if="row.difference_kind==='correction'"><small>先按采购凭证核对总数和金额，并填写更正原因，再登记本次到货或入库。</small><el-button v-if="allowCorrection" type="warning" plain :disabled="disabled" @click="emit('correct',row)">核对并更正采购记录</el-button><small v-else>请联系采购人员更正，当前不提交此批次。</small></template>
   </template>
  </div>
