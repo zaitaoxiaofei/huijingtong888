@@ -1697,17 +1697,43 @@ function setVariantAttributeValue(row = {}, field = {}, value) {
 
 function variantAttributeSelectModelValue(row = {}, field = {}) {
   const value = getVariantAttributeValue(row, field);
-  return isColorAttributeField(field) ? normalizeColorValuesForField(value, field) : value;
+  if (isColorAttributeField(field)) return normalizeColorValuesForField(value, field);
+  const selectionField = variantAttributeSelectionField(row, field);
+  if (field.type !== "multiselect" && !field.is_collection && Array.isArray(selectionField.value)) {
+    selectionField.value = selectionField.value[0] ?? "";
+  }
+  return attributeEditorModelValue(selectionField);
+}
+
+function variantAttributeSelectionField(row = {}, field = {}) {
+  const entry = findVariantDynamicAttributeEntry(row, field) || {};
+  const ownSelected = selectedAttributeOptions(entry);
+  const selected = ownSelected.length ? ownSelected : selectedAttributeOptions({
+    ...field, value: entry.value ?? field.value, selected_values: [], selectedValues: [],
+    values: mergeAttributeOptions(selectedAttributeOptions(field), field.values || [])
+  });
+  const label = String(entry.display_value_zh || entry.label || "").trim();
+  const selectedValues = selected.map((option) => selected.length === 1 && label && !/^\d+$/.test(label)
+    ? { ...option, label, display_value_zh: label }
+    : option);
+  return {
+    ...field,
+    value: entry.value ?? field.value,
+    selected_values: selectedValues,
+    selectedValues: [],
+    values: selectedValues
+  };
 }
 
 function updateVariantAttributeSelectValue(row = {}, field = {}, value) {
   const normalizedValue = field.type === "multiselect" || field.is_collection
     ? Array.from(new Set(normalizeArray(value).map((item) => String(item ?? "").trim()).filter(Boolean)))
     : value;
+  const selectionField = variantAttributeSelectionField(row, field);
   const entry = variantAttributeEntry(row, field);
   entry.value = normalizeVariantAttributeValueForField(normalizedValue, field);
   const selectedOptions = normalizeArray(entry.value)
-    .map((item) => findAttributeOptionByValue(field, item))
+    .map((item) => findAttributeOptionByValue(selectionField, item) || findAttributeOptionByValue(field, item))
     .filter(Boolean);
   entry.selected_values = dedupeAttributeOptions(selectedOptions);
   delete entry.selectedValues;
@@ -1855,10 +1881,11 @@ function flatSkuAttributeOptions(row = {}, field = {}) {
     .filter(Boolean)
     .filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field))
     .filter((option) => !dictionaryOptions.includes(option));
-  const options = dedupeAttributeOptions([
+  const options = removeRawDictionaryAliases(dedupeAttributeOptions([
+    ...selectedAttributeOptions(variantAttributeSelectionField(row, field)),
     ...dictionaryOptions.filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field)),
     ...currentValues
-  ]);
+  ]));
   flatSkuAttributeOptionsCache.set(cacheKey, options);
   return options;
 }
@@ -1881,8 +1908,8 @@ function attributeCellKey(row = {}, field = {}) {
 }
 
 function inactiveAttributeCellOptions(row = {}, field = {}) {
-  const entry = findVariantDynamicAttributeEntry(row, field) || {};
-  const selected = normalizeArray(entry.selected_values || entry.selectedValues).filter((option) => option && typeof option === "object");
+  const selectionField = variantAttributeSelectionField(row, field);
+  const selected = selectedAttributeOptions(selectionField).filter((option) => option && typeof option === "object");
   if (selected.length) return dedupeAttributeOptions(selected);
   return normalizeArray(variantAttributeSelectModelValue(row, field))
     .map((value) => String(value ?? "").trim())
@@ -2846,12 +2873,18 @@ function attributeDisplayText(field = {}) {
 function flatSkuAttributeDisplayText(row = {}, field = {}) {
   const variantEntry = findVariantDynamicAttributeEntry(row, field);
   if (variantEntry) {
+    const label = variantEntry.display_value_zh || variantEntry.label;
+    if (label && !/^\d+$/.test(String(label))) return localizeAttributeDisplayText(label, field);
+    const selectionField = variantAttributeSelectionField(row, field);
+    const options = selectedAttributeOptions(selectionField);
+    if (options.length) return options.map((option) => displayAttributeOptionLabel(option, selectionField)).filter(Boolean).join(", ");
     const selected = normalizeArray(variantEntry.selected_values || variantEntry.selectedValues);
     if (selected.length) {
       const labels = selected.map((option) => formatFlatAttributeValue(option, field)).filter(Boolean);
       if (labels.length) return labels.join(", ");
     }
     const valueText = formatFlatAttributeValue(variantEntry.value, field);
+    if (valueText && Number(field.dictionary_id || variantEntry.dictionary_id || 0) && /^\d+(?:,\s*\d+)*$/.test(valueText)) return "待同步字典值";
     if (valueText) return valueText;
   }
   return attributeDisplayText(field);

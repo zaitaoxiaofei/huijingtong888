@@ -12919,7 +12919,7 @@ function mergeAiVariantTemplateSnapshot(baseTemplate = {}, snapshotTemplate = nu
   const snapshotVariantAttributes = snapshotVariants.flatMap((variant) => collectVariantDynamicAttributeEntries(variant));
   const attributes = mergeAiVariantAttributeSources(base.attributes, snapshot.attributes, snapshotVariantAttributes);
   const images = normalizeImages(snapshot.images.length ? snapshot.images : base.images);
-  const variants = mergeAiVariantSnapshotVariants(baseEditable.variants, snapshotVariants);
+  const variants = mergeAiVariantSnapshotVariants(baseEditable.variants, snapshotEditable.variants);
   const editable = {
     ...baseEditable,
     ...snapshotEditable,
@@ -12979,24 +12979,11 @@ function mergeAiVariantAttributeSources(...sources) {
   return [...byKey.values()];
 }
 
-function mergeAiVariantSnapshotVariants(baseVariants = [], snapshotVariants = []) {
-  const base = normalizeArray(baseVariants);
-  const snapshot = normalizeArray(snapshotVariants);
-  const length = Math.max(base.length, snapshot.length);
-  return Array.from({ length }, (_, index) => {
-    const baseVariant = objectValue(base[index]);
-    const snapshotVariant = objectValue(snapshot[index]);
-    if (!Object.keys(snapshotVariant).length) return baseVariant;
-    return {
-      ...baseVariant,
-      ...snapshotVariant,
-      attributes: mergeAiVariantAttributeSources(baseVariant.attributes, snapshotVariant.attributes),
-      dynamic_attributes: {
-        ...objectValue(baseVariant.dynamic_attributes || baseVariant.dynamicAttributes),
-        ...objectValue(snapshotVariant.dynamic_attributes || snapshotVariant.dynamicAttributes)
-      }
-    };
-  });
+function mergeAiVariantSnapshotVariants(baseVariants = [], snapshotVariants) {
+  // A current snapshot owns the entire SKU list, including row deletions and
+  // cleared SKU fields. Historical template rows are only a legacy fallback.
+  const variants = Array.isArray(snapshotVariants) ? snapshotVariants : normalizeArray(baseVariants);
+  return variants.map((variant) => ({ ...objectValue(variant) }));
 }
 
 function normalizeAiVariantDraftDimensions(editable = {}, template = {}) {
@@ -13286,7 +13273,7 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
     : null;
   const sourceDraftRow = cloneSourceDraft ? sourceDraftMediaRow : null;
   const useCurrentSourceSnapshot = String(body.ai_optimization?.source || body.aiOptimization?.source || "") === "ai_variant_lab"
-    && sourceDraftId > 0 && !body.template_payload && !body.templatePayload;
+    && sourceDraftId > 0;
   if (useCurrentSourceSnapshot && !sourceDraftMediaRow) {
     throw aiVariantLightweightSaveError("母草稿已不存在，无法继承上架信息。请从草稿箱重新导入母商品后保存。");
   }
@@ -15125,6 +15112,7 @@ async function repairAiVariantDraftTemplateReference(draft = {}, session = null)
   if (!baseTemplate) return false;
   const sourceImages = cleanListingImageUrls(draft.source_images || draft.manual_facts?.images || baseTemplate.images || []);
   const manualFacts = sanitizeDraftManualFactsMedia(objectValue(draft.manual_facts), sourceImages, { forceImages: true });
+  const currentEditable = objectValue(draft.template_payload?.editable_payload || draft.template_payload?.editablePayload);
   const baseAttributes = normalizeAttributes(baseTemplate.attributes || baseTemplate.editable_payload?.attributes || []);
   const manualAttributes = normalizeAttributes(manualFacts.attributes || []);
   const attributes = currentTemplateIncomplete && baseAttributes.length > manualAttributes.length
@@ -15137,6 +15125,7 @@ async function repairAiVariantDraftTemplateReference(draft = {}, session = null)
   const editable = {
     ...(baseTemplate.editable_payload || {}),
     ...manualFacts,
+    ...(Array.isArray(currentEditable.variants) ? { variants: mergeAiVariantSnapshotVariants([], currentEditable.variants) } : {}),
     title: draft.product_name || manualFacts.title || baseTemplate.title || "",
     description: manualFacts.description || baseTemplate.description || "",
     images: normalizeImages(sourceImages),

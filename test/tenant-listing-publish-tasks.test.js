@@ -9,11 +9,12 @@ const service = readFileSync(new URL("../src/services/listing-automation.js", im
 test("reviewed listing reads, publication, and task retry open only for exact business routes", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
-    ["POST", ["api", "listing", "drafts", "batch-update"]],
+    ["GET", ["api", "listing", "drafts", "batch-update"]],
     ["GET", ["api", "listing", "drafts", "batch-publish"]],
     ["POST", ["api", "listing", "drafts", "batch-publish", "extra"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
   for (const tenant of [{ id: 1, slug: "default" }, { id: 42, slug: "company-a" }, { id: 43, slug: "company-b" }]) {
+    assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "drafts", "batch-update"], "POST").allowed, true);
     assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "drafts", "batch-publish"], "POST").allowed, true);
     assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "media", "watermark"], "POST").allowed, true);
     const parts = ["api", "listing", "publish-tasks", "12", "retry"];
