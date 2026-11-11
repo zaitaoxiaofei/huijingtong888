@@ -79,3 +79,38 @@ test("unresolved dictionary selections have a neutral label while numeric non-di
   assert.equal(ctx.flatSkuAttributeDisplayText(row, field), "待同步字典值");
   assert.equal(ctx.flatSkuAttributeDisplayText({ dynamic_attributes: { "7202": { value: 2 } } }, { attribute_id: 7202, type: "number" }), "2");
 });
+
+test("editing a row-only dictionary selection preserves its ID without requiring the shared schema option", () => {
+  for (const multiselect of [false, true]) {
+    const ctx = context(), { fields } = fixture();
+    const field = { ...fields[0], type: multiselect ? "multiselect" : "select", is_collection: multiselect };
+    const selected = { dictionary_value_id: 90297, value: "Russia", label: "俄罗斯", display_value_zh: "俄罗斯" };
+    const row = { id: "second-draft", dynamic_attributes: { "4389": {
+      attribute_id: 4389, value: multiselect ? [90297] : 90297, selected_values: [selected]
+    } } };
+    const before = JSON.stringify(field);
+    const model = ctx.variantAttributeSelectModelValue(row, field);
+    assert.deepEqual(clone(model), multiselect ? ["Russia"] : "Russia");
+    ctx.updateVariantAttributeSelectValue(row, field, model);
+    const payload = clone(ctx.normalizeAttributeForPayload(row.dynamic_attributes[4389]));
+    assert.deepEqual(payload.values, [{ dictionary_value_id: 90297, value: "Russia" }]);
+    assert.equal(ctx.flatSkuAttributeDisplayText(row, field), "俄罗斯");
+    ctx.updateVariantAttributeSelectValue(row, field, multiselect ? ["China"] : "China");
+    assert.deepEqual(clone(ctx.normalizeAttributeForPayload(row.dynamic_attributes[4389])).values,
+      [{ dictionary_value_id: 90296, value: "China" }]);
+    assert.equal(JSON.stringify(field), before);
+  }
+});
+
+test("an opened row-only selection has one option per model and retains the full dictionary reference", () => {
+  const ctx = context(), { fields } = fixture(), field = fields[0];
+  const selected = { dictionary_value_id: 90297, value: "Russia", label: "俄罗斯", display_value_zh: "俄罗斯" };
+  const row = { id: "second-draft", dynamic_attributes: { "4389": {
+    attribute_id: 4389, value: 90297, selected_values: [selected]
+  } } };
+  const options = clone(ctx.flatSkuAttributeOptions(row, field));
+  const matches = options.filter(option => ctx.attributeOptionModelValue(option) === "Russia");
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].dictionary_value_id, 90297);
+  assert.equal(ctx.displayAttributeOptionLabel(matches[0], field), "俄罗斯");
+});

@@ -1729,10 +1729,11 @@ function updateVariantAttributeSelectValue(row = {}, field = {}, value) {
   const normalizedValue = field.type === "multiselect" || field.is_collection
     ? Array.from(new Set(normalizeArray(value).map((item) => String(item ?? "").trim()).filter(Boolean)))
     : value;
+  const selectionField = variantAttributeSelectionField(row, field);
   const entry = variantAttributeEntry(row, field);
   entry.value = normalizeVariantAttributeValueForField(normalizedValue, field);
   const selectedOptions = normalizeArray(entry.value)
-    .map((item) => findAttributeOptionByValue(field, item))
+    .map((item) => findAttributeOptionByValue(selectionField, item) || findAttributeOptionByValue(field, item))
     .filter(Boolean);
   entry.selected_values = dedupeAttributeOptions(selectedOptions);
   delete entry.selectedValues;
@@ -1880,11 +1881,11 @@ function flatSkuAttributeOptions(row = {}, field = {}) {
     .filter(Boolean)
     .filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field))
     .filter((option) => !dictionaryOptions.includes(option));
-  const options = dedupeAttributeOptions([
+  const options = removeRawDictionaryAliases(dedupeAttributeOptions([
     ...selectedAttributeOptions(variantAttributeSelectionField(row, field)),
     ...dictionaryOptions.filter((option) => !isColorAttributeField(field) || isUsableColorOption(option, field)),
     ...currentValues
-  ]);
+  ]));
   flatSkuAttributeOptionsCache.set(cacheKey, options);
   return options;
 }
