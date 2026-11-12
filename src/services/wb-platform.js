@@ -8,6 +8,8 @@ import { wbRequest } from './wb-client.js';
 import { wbOrderState } from '../shared/wb-order-state.js';
 import { assertTenantQuotaAvailable } from './tenant-quotas.js';
 
+const pricingCommissionCache = new Map();
+
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const positiveId = value => {
   const id = Number(value);
@@ -24,6 +26,27 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
     if (!rows[0]) throw fail('该 WB 店铺不存在、已停用或不属于当前企业，请在企业店铺中检查。', 404);
     if(!allowUnchecked && rows[0].environment==='production' && (!rows[0].checked_at||!rows[0].seller_id))throw fail('WB 授权尚未核对，请先在企业店铺点击“检查授权”，确认 Token 对应的卖家身份后再拉取数据。',409);
     return rows[0];
+  }
+  async function pricingCommissions(tenantId, body) {
+    const a = await account(tenantId, body.shop_id);
+    const key = `${a.tenant_id}:${a.shop_id}:${createHash('sha256').update(a.token).digest('hex')}`;
+    const cached = pricingCommissionCache.get(key);
+    if (cached && cached.expires > Date.now()) return cached.value;
+    const value = load();
+    if (pricingCommissionCache.size >= 100) pricingCommissionCache.delete(pricingCommissionCache.keys().next().value);
+    pricingCommissionCache.set(key, { value, expires: Date.now() + 12 * 60 * 1000 });
+    try { return await value; } catch (error) { pricingCommissionCache.delete(key); throw error; }
+    async function load() {
+      const data = await request(a, 'common', '/api/v1/tariffs/commission', { query: { locale: 'zh' } });
+      const rows = (Array.isArray(data.report) ? data.report : []).filter(row =>
+        Number.isSafeInteger(Number(row.subjectID)) && Number(row.subjectID) > 0
+        && row.kgvpChina !== '' && row.kgvpChina !== null && row.kgvpChina !== undefined && Number.isFinite(Number(row.kgvpChina))
+        && Number(row.kgvpChina) >= 0 && Number(row.kgvpChina) < 100).map(row => ({
+        id: row.subjectID, category: String(row.subjectName || ''), parent: String(row.parentName || ''), rate: Number(row.kgvpChina)
+      }));
+      if (!rows.length) throw fail('WB 未返回中国跨境类目佣金（kgvpChina），请在 WB 卖家后台核对类目费率后手动填写。', 502);
+      return { rows, source: 'WB 中国区官方类目佣金', fetched_at: new Date().toISOString() };
+    }
   }
   async function shops(tenantId) {
     return query(`SELECT s.id,s.name,s.platform,s.user_id,p.name AS user_name,s.legal_entity,s.status,
@@ -421,7 +444,7 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
   }
   const catalog=createWbCategoryCatalog({query,request,account});
   async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
-  return { ...catalog, listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  return { pricingCommissions, ...catalog, listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
