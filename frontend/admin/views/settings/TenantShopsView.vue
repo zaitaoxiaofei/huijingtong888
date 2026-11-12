@@ -185,7 +185,7 @@ onBeforeUnmount(() => window.removeEventListener('erp:auth-scope-changed', reset
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑企业店铺' : '新增企业店铺'" width="min(760px, 94vw)" destroy-on-close class="shop-edit-dialog">
       <el-form label-position="top" class="shop-edit-form">
         <section><h3>基本信息</h3><div class="shop-form-grid">
-          <el-form-item label="销售平台"><el-select v-model="form.platform" :disabled="editing"><el-option label="Ozon" value="ozon"/><el-option label="WB（中国主体）" value="wb"/></el-select></el-form-item>
+          <el-form-item label="销售平台"><el-select v-model="form.platform" :disabled="editing"><el-option label="Ozon" value="ozon"><MarketplaceBadge platform="ozon" :size="22" /> <span>Ozon</span></el-option><el-option label="WB（中国主体）" value="wb"><MarketplaceBadge platform="wb" :size="22" /> <span>WB（中国主体）</span></el-option></el-select></el-form-item>
           <el-form-item label="店铺名称" required><el-input v-model="form.name" maxlength="255" placeholder="填写便于识别的店铺名称" /></el-form-item>
           <el-form-item label="店铺负责人" required><el-select v-model="form.user_id" filterable placeholder="选择本企业成员" style="width:100%"><el-option v-for="member in activeMembers" :key="member.person_id" :label="`${member.name}（${member.username || '未设置登录名'}）`" :value="Number(member.person_id)" /></el-select><small>从本企业已有账号中选择，不会创建新账号。</small></el-form-item>
           <el-form-item label="公司主体名称（选填）"><el-input v-model="form.legal_entity" placeholder="店铺注册的公司或经营主体全称" /></el-form-item>

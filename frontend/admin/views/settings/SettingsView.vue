@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { isPlatformAdmin } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { apiClient } from "../../utils/api";
+import MarketplaceSwitcher from "../../components/MarketplaceSwitcher.vue";
 import WbLogisticsCatalog from "./WbLogisticsCatalog.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date";
@@ -338,7 +339,7 @@ function resetCancellationFilters() {
     <el-tab-pane :label="`已归类 ${reasonReview.classified.length}`"><el-table :data="reasonReview.classified" max-height="320" border empty-text="暂无人工归类"><el-table-column prop="original" label="Ozon 原始原因" min-width="300" /><el-table-column prop="classification.reason_label" label="已核对类型" min-width="200" /><el-table-column prop="order_count" label="订单数" width="90" /></el-table></el-tab-pane>
   </el-tabs>
 </el-card>
-<el-radio-group v-if="activeSection === 'logistics'" v-model="logisticsPlatform" aria-label="物流配置平台"><el-radio-button value="ozon">Ozon 物流服务商</el-radio-button><el-radio-button value="wb">WB 揽收仓报价</el-radio-button></el-radio-group>
+<MarketplaceSwitcher v-if="activeSection === 'logistics'" v-model="logisticsPlatform" label="物流配置平台" ozon-label="Ozon 物流服务商" wb-label="WB 揽收仓报价" />
 <WbLogisticsCatalog v-if="activeSection === 'logistics' && logisticsPlatform === 'wb'" />
 <el-card v-if="activeSection === 'logistics' && logisticsPlatform === 'ozon'" shadow="never" class="page-card settings-list-card">
           <template #header>

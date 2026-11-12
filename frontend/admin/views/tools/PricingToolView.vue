@@ -7,6 +7,8 @@ import { pricingLogisticsCandidates } from "../../utils/pricing-logistics-candid
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionBandLabel } from "../../utils/rfbs-commission.js";
+import MarketplaceSwitcher from "../../components/MarketplaceSwitcher.vue";
+import "./pricing-workbench.css";
 import WbCalculator from "./WbCalculator.vue";
 import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
@@ -89,15 +91,15 @@ const money = (value) => Number(value || 0).toFixed(2);
 </script>
 
 <template>
-  <div class="pricing-page" :class="{ 'is-embedded': props.embedded }">
-    <el-radio-group v-model="platform" aria-label="计算平台"><el-radio-button value="ozon">Ozon</el-radio-button><el-radio-button value="wb">WB</el-radio-button></el-radio-group>
-    <KeepAlive><WbCalculator v-if="platform === 'wb'" mode="pricing" /></KeepAlive>
+  <div class="pricing-page pricing-workbench" :class="{ 'is-embedded': props.embedded }">
+    <div class="pricing-platform-bar"><MarketplaceSwitcher v-model="platform" label="计算平台" /><span class="pricing-platform-note">{{ platform === 'ozon' ? 'Ozon 跨境 rFBS' : 'WB 中国跨境 FBS' }}</span></div>
+    <KeepAlive><WbCalculator v-if="platform === 'wb'" mode="pricing" :embedded="props.embedded" /></KeepAlive>
     <template v-if="platform === 'ozon'">
     <el-alert type="info" :closable="false" show-icon title="物流按售价、重量和尺寸匹配本地最新规则；佣金按 Ozon 中国 rFBS 费率表计算。" />
     <div class="pricing-grid">
       <el-card shadow="never" class="pricing-form">
         <template v-if="!props.embedded" #header><h2>OZON 跨境定价工具</h2></template>
-        <el-form :model="form" label-width="150px" label-position="right">
+        <el-form :model="form" label-width="130px" label-position="right">
           <h3>基础设置</h3>
           <el-form-item label="类目佣金" required><div class="category-field"><RfbsCommissionPicker :selection="selection" :price-rub="result?.saleRub || activeQuote?.saleRub || 0" @select="selectCategory" /><small v-if="selection">rFBS {{ selection.version }} · {{ selection.sourceFile }}</small><small v-if="activeQuote && selection?.band !== activeQuote.band" class="tier-note">按当前成本和目标利润，预估售价约 ₽{{ money(activeQuote.saleRub) }}；将自动使用 {{ commissionBandLabel(activeQuote.band) }} 档（{{ activeQuote.commissionRate }}%）。</small><small v-else-if="quoteReady && !candidates.length && !logisticsError" class="rate-error">三档佣金均未匹配到有效物流报价，请检查重量、尺寸或切换服务商。</small></div></el-form-item>
           <el-form-item label="采购成本" required><el-input-number :controls="false" v-model="form.purchaseCost" :min="0" :precision="2" /> <span class="unit">元/件</span></el-form-item>
@@ -122,7 +124,7 @@ const money = (value) => Number(value || 0).toFixed(2);
         <el-card shadow="never">
           <template #header><strong>计算结果</strong></template>
           <div v-if="result" class="price-pair"><div><small>建议售价</small><strong>₽ {{ money(result.saleRub) }}</strong><span>≈ ¥ {{ money(result.saleCny) }}</span></div><div><small>划线价</small><strong>₽ {{ money(result.listRub) }}</strong><span>按填写的折扣倒推</span></div></div>
-          <el-empty v-else description="填写参数后计算售价" :image-size="80" />
+          <div v-else class="pricing-empty"><span class="pricing-empty-symbol">—</span><strong>填写参数后计算售价</strong><p>测算结果与费用明细将在这里展示</p></div>
         </el-card>
         <el-card shadow="never" class="shipping-panel">
           <template #header><strong>物流费用</strong></template>

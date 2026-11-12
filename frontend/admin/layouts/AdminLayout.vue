@@ -3,7 +3,7 @@ import { KeepAlive, computed, defineAsyncComponent, nextTick, onBeforeUnmount, o
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { ArrowDown, Bell, Camera, Close, Download, Expand, Fold, Lock, Operation, Paperclip, RefreshRight, SwitchButton, Ticket, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { navigationMenus, navigationMenusForRole } from "../constants/navigation.js";
+import { navigationMenus, navigationMenusForRole, navigationPlatformByRoute } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
 import { useAuthStore } from "../stores/auth";
 import { useAppStore } from "../stores/app";
@@ -18,6 +18,7 @@ import InventoryModuleTabs from '../components/InventoryModuleTabs.vue';
 import { inventoryModule } from '../constants/inventory-modules.js';
 import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
+import MarketplaceBadge from "../components/MarketplaceBadge.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
 import { consumeMembershipDialogRequest, membershipDialogRequest } from "../utils/membership-dialog.js";
 import { consumeExchangeRateDialogRequest, exchangeRateDialogRequest } from "../utils/exchange-rate-dialog.js";
@@ -874,6 +875,7 @@ onBeforeUnmount(() => {
                   @mouseenter="prefetchMenuRoute(child.route)"
                   @focus="prefetchMenuRoute(child.route)"
                 >
+                  <MarketplaceBadge v-if="child.platform" :platform="child.platform" :size="20" class="erp-menu-platform-logo" />
                   {{ child.label }}
                   <el-tag v-if="child.badge" size="small" type="info" effect="plain" class="erp-menu-legacy-badge">{{ child.badge }}</el-tag>
                 </el-menu-item>
@@ -1029,7 +1031,8 @@ onBeforeUnmount(() => {
               @click="handleTabClick(tab.key)"
               @contextmenu="openTabContextMenu($event, tab.key)"
             >
-              <span v-if="tab.icon" class="erp-workspace-tab__icon">
+              <MarketplaceBadge v-if="navigationPlatformByRoute.get(tab.route?.path)" :platform="navigationPlatformByRoute.get(tab.route?.path)" :size="18" />
+              <span v-else-if="tab.icon" class="erp-workspace-tab__icon">
                 <el-icon><component :is="tab.icon" /></el-icon>
               </span>
               <span v-else-if="tab.pinned || !tab.closable" class="erp-workspace-tab__pin">
@@ -1226,6 +1229,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.erp-menu-platform-logo{margin-right:8px}
 .erp-menu-legacy-badge { margin-left: 8px; }
 .erp-header-left { flex: 1; overflow: hidden; }
 .erp-header-right { flex-shrink: 0; gap: 5px; }

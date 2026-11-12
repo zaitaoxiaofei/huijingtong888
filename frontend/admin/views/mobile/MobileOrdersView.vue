@@ -1,4 +1,5 @@
 <script setup>
+import MarketplaceBadge from "../../components/MarketplaceBadge.vue";
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Search } from "@element-plus/icons-vue";
@@ -173,7 +174,7 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
     <section class="mobile-order-list">
       <article v-for="row in rows" :key="row.id" class="mobile-order-card" @click="openDetail(row)">
         <div class="mobile-order-card__head">
-          <span>{{ shortText(row.shop_name, "店铺") }}</span>
+          <span><MarketplaceBadge :platform="row.platform || 'ozon'" :size="20" /> {{ shortText(row.shop_name, "店铺") }}</span>
           <strong>{{ orderStatusLabel(row) }}</strong>
         </div>
 
