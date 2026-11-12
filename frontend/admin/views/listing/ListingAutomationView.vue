@@ -718,6 +718,8 @@ function batchDraftVariant(draft = {}, index = 0) {
     offer_id: sourceVariant.offer_id || draft.internal_code || "",
     name: sourceVariant.name || sourceVariant.title || draft.product_name || "",
     title: sourceVariant.title || sourceVariant.name || draft.product_name || "",
+    description: listingVariantCopyText(sourceVariant, 4191, editable.description ?? template.description ?? ""),
+    rich_content_json: listingVariantCopyText(sourceVariant, 11254, editable.rich_content_json ?? editable.rich_content ?? localAttributes.find((item) => Number(item?.attribute_id || item?.id) === 11254)?.value ?? ""),
     images: effectiveImages,
     cost_price: Number(sourceVariant.cost_price || draft.cost_price || 0),
     price: Number(sourceVariant.price || draft.sale_price || 0),
@@ -1740,6 +1742,18 @@ function updateVariantAttributeSelectValue(row = {}, field = {}, value) {
   const displayLabel = entry.selected_values.map((option) => displayAttributeOptionLabel(option, field)).filter(Boolean).join(", ");
   entry.label = displayLabel;
   entry.display_value_zh = displayLabel;
+  if (Number(field.attribute_id || field.id) === 4191) row.description = String(entry.value ?? "");
+  if (Number(field.attribute_id || field.id) === 11254) row.rich_content_json = String(entry.value ?? "");
+  const copyId = Number(field.attribute_id || field.id);
+  if ([4191, 11254].includes(copyId)) {
+    for (const map of [row.dynamic_attributes, row.dynamicAttributes]) {
+      for (const [key, attribute] of Object.entries(map || {})) {
+        if (Number(attribute?.attribute_id || attribute?.id || key) !== copyId) continue;
+        map[key] = { ...attribute, value: entry.value, values: entry.value ? [{ value: entry.value }] : [],
+          selected_values: [], selectedValues: [], label: "", display_value_zh: "", displayValueZh: "" };
+      }
+    }
+  }
   if (isColorAttributeField(field)) {
     row.color_values = normalizeColorValuesForField(normalizedValue, field);
     row.color = normalizeColorForPayload(row);
@@ -3177,6 +3191,12 @@ function cmToMm(value) {
 
 function updateFixedField(key, value) {
   fixedForm.value = { ...fixedForm.value, [key]: value };
+  const attributeId = { summary: 4191, richJson: 11254 }[key];
+  if (attributeId) {
+    const field = { attribute_id: attributeId, type: key === "summary" ? "textarea" : "rich_json" };
+    if (key === "summary") templateEditor.description = String(value ?? "");
+    if (!isVariantAttributeField(field)) templateEditor.variants.forEach((row) => updateVariantAttributeSelectValue(row, field, value));
+  }
 }
 
 function normalizeAttributeType(item) {
@@ -3218,6 +3238,33 @@ function normalizeVariantVideoFields(item = {}) {
   };
 }
 
+function listingVariantCopyText(row = {}, attributeId, fallback = "") {
+  const entry = findVariantDynamicAttributeEntry(row, { attribute_id: attributeId })
+    || normalizeArray(row.attributes).find((item) => Number(item?.attribute_id || item?.id) === attributeId);
+  const plain = attributeId === 4191 ? row.description : (row.rich_content_json ?? row.richContentJson ?? row.rich_content ?? row.richContent);
+  const value = entry?.value ?? entry?.values ?? plain ?? fallback;
+  if (attributeId === 11254 && value && typeof value === "object" && !Array.isArray(value) && value.content) return JSON.stringify(value);
+  return String(unwrapDynamicAttributeValue(value));
+}
+
+function listingVariantCopyAttributes(attributes = [], variant = {}) {
+  const next = attributes.map((item) => ({ ...item }));
+  for (const item of next.filter((attribute) => Number(attribute.attribute_id || attribute.id) === 4180)) {
+    const value = variant.name || variant.title;
+    if (value) Object.assign(item, { value, values: [{ value }], selected_values: [], selectedValues: [], label: value, display_value_zh: value });
+  }
+  for (const [id, value, name, type] of [[4191, variant.description, "Description", "textarea"], [11254, variant.rich_content_json, "rich_content_json", "rich_json"]]) {
+    if (value === undefined) continue;
+    const index = next.findIndex((item) => Number(item.attribute_id || item.id) === id);
+    const previous = next[index] || {};
+    const item = { ...previous, attribute_id: id, name: previous.name || name, type,
+      value, values: value ? [{ value }] : [], selected_values: [], selectedValues: [], label: value, display_value_zh: value };
+    if (index >= 0) next[index] = item;
+    else next.push(item);
+  }
+  return next;
+}
+
 function normalizeEditorVariants(variants) {
   const colorAttribute = findVariantDictionaryAttribute("color");
   const specAttribute = findVariantDictionaryAttribute("spec", { excludeIds: [colorAttribute?.attribute_id, 9048] });
@@ -3233,6 +3280,10 @@ function normalizeEditorVariants(variants) {
     offer_id: item?.offer_id || "",
     name: item?.name || item?.title || templateEditor.title || "",
     title: item?.title || item?.name || templateEditor.title || "",
+    description: listingVariantCopyText(item, 4191, templateEditor.description || ""),
+    rich_content_json: listingVariantCopyText(item, 11254, fixedForm.value.richJson || ""),
+    attributes: normalizeArray(item?.attributes).filter((attribute) => Number(attribute?.attribute_id || attribute?.id) === 4180)
+      .map((attribute) => ({ attribute_id: 4180, name: attribute.name || attribute.attribute_name || "Name", type: "text", value: attribute.value ?? "" })),
     images: normalizeEditorImages(item?.images || (item?.primary_image ? [item.primary_image].concat(item?.images || []) : [])),
     video_cover_urls: videoFields.video_cover_urls,
     video_urls: videoFields.video_urls,
@@ -3980,8 +4031,18 @@ function moveVariantFieldBackToCommon(field) {
     if (attr && value !== null && value !== undefined) {
       attr.value = cloneVariantValue(value);
       rows.forEach((row) => {
+        if (Number(attr.attribute_id || attr.id) === 4191) row.description = String(unwrapDynamicAttributeValue(value));
+        if (Number(attr.attribute_id || attr.id) === 11254) row.rich_content_json = String(unwrapDynamicAttributeValue(value));
         if (row.dynamic_attributes && typeof row.dynamic_attributes === "object" && !Array.isArray(row.dynamic_attributes)) {
           delete row.dynamic_attributes[variantDynamicAttributeKey(attr)];
+        }
+        const copyId = Number(attr.attribute_id || attr.id);
+        if ([4191, 11254].includes(copyId)) {
+          for (const map of [row.dynamic_attributes, row.dynamicAttributes]) {
+            for (const [key, attribute] of Object.entries(map || {})) {
+              if (Number(attribute?.attribute_id || attribute?.id || key) === copyId) delete map[key];
+            }
+          }
         }
       });
     }
@@ -5217,7 +5278,9 @@ function openPublishSubmitRecord(row = {}) {
 function buildTemplatePayload() {
   applyOzonAttributeMappings();
   syncFixedFormAttributes();
-  if (!fixedForm.value.richJson && (fixedForm.value.summary || templateEditor.description) && richContentImageUrl()) {
+  if (!fixedForm.value.richJson && routeDraftIds.value.length < 2
+    && !templateEditor.variants.some((row) => listingVariantCopyText(row, 11254))
+    && (fixedForm.value.summary || templateEditor.description) && richContentImageUrl()) {
     generateRichContentJson();
   }
   let sourceRaw = {};
@@ -5227,18 +5290,21 @@ function buildTemplatePayload() {
     sourceRaw = {};
   }
   const images = templateEditor.images.filter((item) => item.url);
-  const attributes = templateEditor.attributes
+  let attributes = templateEditor.attributes
     .filter((item) => item.name || item.value)
     .map((item) => normalizeAttributeForPayload(item));
   const payloadTitle = templateEditor.variants.find((item) => item.name || item.title)?.name || templateEditor.variants.find((item) => item.title)?.title || templateEditor.title || templateEditor.template_name;
   const variants = templateEditor.variants
     .filter((item) => item.sku || item.name)
-    .map((item) => ({
+    .map((item) => {
+      const variant = {
       ...item,
       price_strategy_mode: item.price_strategy_mode || "finalized",
       price_strategy_applied: true,
       color: normalizeColorForPayload(item),
       title: item.name || item.title || templateEditor.title,
+      description: listingVariantCopyText(item, 4191, templateEditor.description || ""),
+      rich_content_json: listingVariantCopyText(item, 11254, fixedForm.value.richJson || ""),
       weight_g: variantFieldMode.weight ? item.weight_g : Number(templateEditor.weight_g || 0),
       length_mm: variantFieldMode.dimensions ? item.length_mm : cmToMm(templateEditor.length_cm),
       width_mm: variantFieldMode.dimensions ? item.width_mm : cmToMm(templateEditor.width_cm),
@@ -5246,10 +5312,16 @@ function buildTemplatePayload() {
       main_tags: variantFieldMode.tags ? item.main_tags : fixedForm.value.tags,
       dynamic_attributes: Object.fromEntries(Object.entries(item.dynamic_attributes || {}).map(([key, attribute]) => [
         key,
-        normalizeAttributeForPayload(attribute)
+        normalizeAttributeForPayload(Number(attribute?.attribute_id || attribute?.id || key) === 4180
+          ? listingVariantCopyAttributes([attribute], item)[0] : attribute)
       ]))
-    }));
+      };
+      variant.attributes = listingVariantCopyAttributes(item.attributes || [], variant);
+      return variant;
+    });
   const firstVariantDimensions = firstVariantPackageValues(variants);
+  const firstCopy = variants[0] || { description: templateEditor.description, rich_content_json: fixedForm.value.richJson || "" };
+  attributes = listingVariantCopyAttributes(attributes, firstCopy);
   const payload = {
     archive_collector_media: Boolean(collectorSourceSku.value),
     ozon_category_id: templateEditor.ozon_category_id,
@@ -5258,13 +5330,15 @@ function buildTemplatePayload() {
     shop_ids: draftForm.shop_ids,
     template_name: templateEditor.template_name,
     title: payloadTitle,
-    description: templateEditor.description,
+    description: firstCopy.description,
+    rich_content_json: firstCopy.rich_content_json,
     attributes,
     images,
     editable_payload: {
       sku: templateEditor.source_ozon_sku,
       title: payloadTitle,
-      description: templateEditor.description,
+      description: firstCopy.description,
+      rich_content_json: firstCopy.rich_content_json,
       category_id: templateEditor.ozon_category_id,
       description_category_id: templateEditor.description_category_id,
       type_id: templateEditor.type_id,
@@ -5406,14 +5480,21 @@ function buildBatchDraftUpdateItems() {
     variant.images = images;
     variant.images_manually_edited = true;
     variant.image_edit_intent = "manual";
+    const attributes = listingVariantCopyAttributes(commonTemplate.attributes, variant);
     const templatePayload = {
       ...commonTemplate,
       id: Number(row._template_id || 0),
       title: variant.name || variant.title || commonTemplate.title,
+      description: variant.description,
+      rich_content_json: variant.rich_content_json,
+      attributes,
       images,
       editable_payload: {
         ...(commonTemplate.editable_payload || {}),
         title: variant.name || variant.title || commonTemplate.editable_payload?.title || "",
+        description: variant.description,
+        rich_content_json: variant.rich_content_json,
+        attributes,
         sku: variant.sku || variant.offer_id || "",
         images,
         variants: [variant]

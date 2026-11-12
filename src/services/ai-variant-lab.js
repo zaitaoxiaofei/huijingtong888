@@ -3273,6 +3273,7 @@ function normalizeOzonVariantTags(value, target, analysis = {}, fallback = {}) {
     .map((tag) => normalizeOzonVariantTag(tag))
     .filter((tag) => tag && !containsChinese(tag))
     .filter((tag) => isBuyerFacingCopyText(tag))
+    .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback))
     .filter((tag) => !hasForbiddenCategoryLeak(tag, analysis));
   // Preserve target-model tags before generic AI tags are capped at 25.
   const merged = uniqueStrings([...buildOzonVariantTags(target, analysis, fallback), ...normalized]);
@@ -3370,6 +3371,7 @@ function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
     ...(toArray(fallback.extraTags).length ? toArray(fallback.extraTags) : [])
   ];
   return uniqueStrings(candidates.map((tag) => normalizeOzonVariantTag(tag)).filter(Boolean))
+    .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback))
     .filter((tag) => !hasForbiddenCategoryLeak(tag, analysis))
     .slice(0, 25);
 }
@@ -3527,20 +3529,57 @@ function isValidOzonVariantDescription(text, target, analysis = {}, fallback = {
 
 function hasVariantSourceLeak(text, target, analysis = {}, fallback = {}) {
   const targetText = cleanText(target).toLowerCase();
+  const identityKey = (value) => cleanText(value).toLowerCase().replace(/[\s_]+/g, "");
   const sourceAliases = sourceTitleVehicleAliases(fallback.sourceTitle, fallback.sourceVariantValue || analysis.source_variant_value);
   const sourceAliasKeys = new Set(sourceAliases.map((item) => item.toLowerCase()));
-  const sourceRefs = uniqueStrings([
+  const explicitSourceRefs = uniqueStrings([
     fallback.sourceVariantValue,
     analysis.source_variant_value,
     analysis.sourceVehicleModel,
-    analysis.source_vehicle_model,
+    analysis.source_vehicle_model
+  ].map(cleanText));
+  const explicitSourceKeys = new Set(explicitSourceRefs.map((item) => item.toLowerCase()));
+  const unchangedSource = explicitSourceRefs.find((ref) => identityKey(ref) === identityKey(targetText) && /[\s_]/.test(ref)) || "";
+  const sourceRefs = uniqueStrings([
+    ...explicitSourceRefs,
     ...toArray(analysis.changeable_facts),
     ...sourceAliases
   ].map(cleanText))
-    .filter((ref) => ref && ref.toLowerCase() !== targetText)
-    .filter((ref) => sourceAliasKeys.has(ref.toLowerCase()) || isVariantSourceReference(ref, analysis, fallback));
-  const lower = text.toLowerCase();
-  return sourceRefs.some((ref) => ref.length >= 3 && containsExactVehicleModel(lower, ref));
+    .filter((ref) => ref && identityKey(ref) !== identityKey(targetText))
+    .filter((ref) => !unchangedSource || !containsExactVehicleModel(unchangedSource.replace(/_/g, " "), ref.replace(/_/g, " ")))
+    .filter((ref) => explicitSourceKeys.has(ref.toLowerCase()) || sourceAliasKeys.has(ref.toLowerCase()) || isVariantSourceReference(ref, analysis, fallback));
+  const lower = withoutTargetVehicleReference(text, targetText).toLowerCase();
+  return sourceRefs.some((ref) => ref.length >= 2 && (containsExactVehicleModel(lower, ref) || containsVehicleTagReference(lower, ref)));
+}
+
+function withoutTargetVehicleReference(text, target) {
+  const parts = cleanText(target).split(/[\s_]+/).filter(Boolean);
+  if (!parts.length) return String(text);
+  const key = (value) => vehicleTagReferenceParts(value).join("").toLowerCase();
+  const targetTags = new Set([key(target), `для${key(target)}`, ...(parts.length > 1 ? [`для${key(parts.slice(1).join(""))}`] : [])]);
+  const tagEscaped = vehicleTagReferenceParts(target).map(escapeRegExp).join("_*");
+  const tagPattern = new RegExp(`(^|[^\\p{L}\\p{N}])${tagEscaped}(?=$|[^\\p{L}\\p{N}])`, "giu");
+  const withoutTargetTags = String(text).replace(/#[\p{L}\p{N}_]+/gu, (tag) =>
+    targetTags.has(key(tag.slice(1))) ? "" : tagEscaped ? tag.replace(tagPattern, "$1") : tag);
+  const escaped = parts.map(escapeRegExp).join("[\\s_]*");
+  return withoutTargetTags.replace(new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "giu"), "$1");
+}
+
+function vehicleTagReferenceParts(value) {
+  // normalizeOzonVariantTag maps punctuation (including hyphens) to underscores.
+  return cleanText(value).split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+function containsVehicleTagReference(text, model) {
+  // Only compare the explicit identity's separator spellings inside hashtags;
+  // do not infer brands, aliases or prefixes of longer model names.
+  const parts = vehicleTagReferenceParts(model);
+  if (!parts.length) return false;
+  const identity = parts.join("").toLowerCase();
+  const escaped = parts.map(escapeRegExp).join("_*");
+  const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "iu");
+  return [...String(text).matchAll(/#[\p{L}\p{N}_]+/gu)].some(([tag]) =>
+    tag.slice(1).replace(/_/g, "").toLowerCase() === identity || pattern.test(tag));
 }
 
 function sourceTitleVehicleAliases(sourceTitle = "", sourceModel = "") {
