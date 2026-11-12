@@ -9,12 +9,14 @@ test('daily finance ingestion works without profit-policy activation, stays idem
 }, async () => {
   const fixture = await createTenantMysqlFixture('finance_source');fixture.useEnvironment();const q=fixture.query;
   const service=await import('../src/services/mysql-cutover.js');const {closeMysqlPool}=await import('../src/mysql-pool.js');
-  const oldFetch=globalThis.fetch;const calls=[];let rotate=false;
+  const oldFetch=globalThis.fetch;const calls=[];let rotate=false, limitedOnce=false, retryPayload=null;
   globalThis.fetch=async(url,options)=>{
     const path=new URL(url).pathname;assert.equal(new URL(url).host,'api-seller.ozon.ru');calls.push(path);
     if(rotate)await q("UPDATE shops SET api_key_hint='replacement-key' WHERE id=20");
     if(path==='/v1/finance/accrual/types')return new Response(JSON.stringify({accrual_types:[{id:1,name:'Acquiring'}]}));
     assert.equal(path,'/v1/finance/accrual/by-day');const date=JSON.parse(options.body).date;
+    if(limitedOnce){limitedOnce=false;retryPayload=options.body;return new Response(JSON.stringify({message:'quota'}),{status:429,headers:{'Retry-After':'1'}});}
+    if(retryPayload){assert.equal(options.body,retryPayload);retryPayload=null;}
     return new Response(JSON.stringify({accruals:[{accrual_id:'17',date,accrued_category:'POSTING',unit_number:'123-456-1',
       total_amount:{amount:'90',currency:'CNY'},posting:{products:[{sku:'700',quantity:1,commission:{sale_amount:{amount:'100',currency:'CNY'},commission:{amount:'-10',currency:'CNY'}}}]}}],last_id:''}));
   };
@@ -41,6 +43,11 @@ test('daily finance ingestion works without profit-policy activation, stays idem
     const full=await service.syncOzonFinanceMysql({shop_id:20,from:day,to:day},{tenantId:2});
     assert.equal(full.applied.items,0);assert.deepEqual(await q('SELECT * FROM order_items WHERE id=1011'),frozen);
     assert.equal(Number((await q('SELECT net_profit_cny FROM order_profit_items WHERE order_item_id=1011'))[0].net_profit_cny),88);
+    calls.length=0;limitedOnce=true;
+    await service.syncOzonFinanceRawMysql({shop_id:20,from:day,to:day},{tenantId:2});
+    assert.deepEqual(calls,['/v1/finance/accrual/types','/v1/finance/accrual/by-day','/v1/finance/accrual/by-day']);
+    assert.deepEqual(await q("SELECT id,operation_id,amount,amount_cny,currency_code FROM ozon_finance_items WHERE shop_id=20 ORDER BY id"),rows);
+    assert.deepEqual(await q('SELECT * FROM order_items WHERE id=1011'),frozen);
     const boundary=await service.syncOzonFinanceRawMysql({shop_id:21,from:'2026-10-25',to:day},{tenantId:2});
     assert.equal(boundary.shops[0].source_from,day);assert.equal(boundary.warnings.length,1);
     assert.deepEqual(await q("SELECT * FROM ozon_finance_items WHERE operation_id IN('legacy-21','foreign-30') ORDER BY id"),protectedRows);

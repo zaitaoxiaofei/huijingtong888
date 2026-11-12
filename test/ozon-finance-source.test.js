@@ -32,11 +32,11 @@ test('explicit retired source and missing real credentials fail before network I
   assert.equal(calls,0);
 });
 
-test('daily throttling fails without old transaction endpoint fallback or fast retry', async t => {
+test('daily throttling stops after bounded retries without old transaction endpoint fallback', async t => {
   const previous = globalThis.fetch; t.after(() => { globalThis.fetch = previous; }); const paths = [];
   globalThis.fetch = async url => { paths.push(new URL(url).pathname); return json({message:'Too many requests'},429); };
   await assert.rejects(fetchOzonFinanceTransactions(SHOP, { from: day, to: day }), error=>error.statusCode===429);
-  assert.deepEqual(paths,['/v1/finance/accrual/types']);
+  assert.deepEqual(paths,Array(3).fill('/v1/finance/accrual/types'));
 });
 
 const source = readFileSync(new URL('../src/services/mysql-cutover.js',import.meta.url),'utf8');
