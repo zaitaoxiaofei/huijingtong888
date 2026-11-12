@@ -1,0 +1,14 @@
+<script setup>
+import {onMounted,onBeforeUnmount,ref} from 'vue';
+import {ElMessage} from 'element-plus';
+import {apiClient,currentApiCacheScope} from '../../utils/api.js';
+const props=defineProps({subjectId:{type:Number,default:null},displayLabel:{type:String,default:''},disabled:Boolean});const emit=defineEmits(['select']);
+const parents=ref([]),parent=ref(null),options=ref([]),search=ref(''),loading=ref(false),next=ref(null),cache=ref(null);let sequence=0,timer;
+async function load(keyword='',append=false,refresh=false){const key=++sequence,scope=currentApiCacheScope();loading.value=true;search.value=keyword;try{const q=new URLSearchParams({search:keyword,offset:String(append?next.value||0:0),...(parent.value?{parent_id:String(parent.value)}:{}),...(refresh?{refresh:'1'}:{})});const r=await apiClient.get('/api/wb/catalog/categories?'+q,{noCache:true});if(key!==sequence||scope!==currentApiCacheScope())return;options.value=append?[...options.value,...r.data]:r.data;next.value=r.next_offset;cache.value=r.cache;}catch(e){if(key===sequence)ElMessage.error(e.message);}finally{if(key===sequence)loading.value=false;}}
+function remote(value){clearTimeout(timer);timer=setTimeout(()=>load(value),300);}
+function select(id){const selected=options.value.find(c=>Number(c.subjectID)===Number(id));if(selected)emit('select',selected);}
+onMounted(async()=>{const scope=currentApiCacheScope();try{const r=await apiClient.get('/api/wb/catalog/parents',{noCache:true});if(scope===currentApiCacheScope())parents.value=r.data||[];await load();}catch(e){ElMessage.error(e.message);}});
+onBeforeUnmount(()=>{sequence++;clearTimeout(timer);});
+</script>
+<template><div class="wb-category-select"><div class="category-row"><el-select v-model="parent" clearable filterable placeholder="全部一级类目" :disabled="disabled" @change="load(search)"><el-option v-for="p in parents" :key="p.id" :value="Number(p.id)" :label="p.name"/></el-select><el-select :model-value="subjectId" filterable remote :remote-method="remote" :loading="loading" :disabled="disabled" placeholder="搜索并选择 WB 产品类目" @change="select"><el-option v-if="subjectId&&!options.some(c=>Number(c.subjectID)===subjectId)" :value="subjectId" :label="displayLabel"/><el-option v-for="c in options" :key="c.subjectID" :value="Number(c.subjectID)" :label="`${c.parentName} / ${c.subjectName}`"/></el-select><el-button :loading="loading" :disabled="disabled" @click="load(search,false,true)">刷新类目</el-button><el-button v-if="next!==null" :loading="loading" @click="load(search,true)">更多类目</el-button></div><small v-if="cache?.stale" class="cache-warning">{{cache.message}}</small></div></template>
+<style scoped>.wb-category-select{width:100%}.category-row{display:flex;gap:8px;flex-wrap:wrap}.category-row>.el-select:first-child{width:180px}.category-row>.el-select:nth-child(2){flex:1;min-width:260px}.cache-warning{color:var(--el-color-warning)}</style>

@@ -1,4 +1,5 @@
-export const WB_SCHEMA = [
+import { WB_CATALOG_CACHE_SCHEMA } from "./wb-category-catalog.js";
+export const WB_SCHEMA = [WB_CATALOG_CACHE_SCHEMA,
   `CREATE TABLE IF NOT EXISTS wb_listing_templates (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT UNSIGNED NOT NULL,
     name VARCHAR(120) NOT NULL, subject_id BIGINT UNSIGNED NOT NULL, category_name VARCHAR(255) NOT NULL,

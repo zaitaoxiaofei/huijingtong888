@@ -3,6 +3,9 @@ import test from "node:test";
 import { SCHEMA_MIGRATIONS, migrationNeedsApply } from "../scripts/lib/release-database-plan.mjs";
 
 const cases = [
+  ["migrate-wb-listing-catalog.mjs",
+    {ok:true,mode:"dry-run",changes_database:false,ready:true,missing_tables:[],problems:[]},
+    {ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["wb_catalog_cache"],problems:[]}],
   ["migrate-sku-traffic-daily.mjs",
     {ok:true,mode:"dry-run",changes_database:false,ready:true,missing_tables:[],problems:[]},
     {ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["seller_sku_traffic_daily","seller_sku_traffic_days"],problems:[]}],
@@ -61,7 +64,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 18);
+  assert.equal(SCHEMA_MIGRATIONS.length, 19);
 });
 
 for (const [filename, ready, pending] of cases) {

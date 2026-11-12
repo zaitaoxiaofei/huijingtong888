@@ -10,11 +10,11 @@ export function createWbListingWorkflow({query,request,account}) {
     if(!name||name.length>120)throw fail('模板名称：请填写 1–120 个字符。',400);
     const result=await request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}});
     if(!Array.isArray(result.data)||!result.data.length)throw fail('WB 没有返回该类目的属性，模板尚未导入，请重新选择类目。',502);
-    const defaults=body.defaults||{currency:'CNY',characteristics:[]};
+    const defaults={...(body.defaults||{currency:'CNY',characteristics:[]}),environment:a.environment};
     if(defaults.currency!=='CNY'||JSON.stringify(defaults).length>100000)throw fail('中国主体 WB 模板使用人民币 CNY；请核对模板默认值。',400);
     const attributes=result.data,categoryName=String(attributes[0].subjectName||body.category_name||subject);
     try{
-      if(body.template_id){const previous=await template(a.tenant_id,body.template_id);if(Number(previous.subject_id)!==subject)throw fail('已有模板不能替换类目，请为新类目新建模板。');const changed=await query('UPDATE wb_listing_templates SET name=?,category_name=?,attributes_json=?,defaults_json=?,revision=revision+1 WHERE id=? AND tenant_id=? AND revision=?',[name,categoryName,JSON.stringify(attributes),JSON.stringify(defaults),previous.id,a.tenant_id,Number(body.revision)]);if(!changed.affectedRows)throw fail('模板已在其他窗口更新，请刷新后重试。');return {ok:true,template:await template(a.tenant_id,previous.id)};}
+      if(body.template_id){const previous=await template(a.tenant_id,body.template_id);if((previous.defaults.environment||'production')!==a.environment)throw fail('正式和沙箱模板不能混用，请重新选择类目。');if(Number(previous.subject_id)!==subject)throw fail('已有模板不能替换类目，请为新类目新建模板。');const changed=await query('UPDATE wb_listing_templates SET name=?,category_name=?,attributes_json=?,defaults_json=?,revision=revision+1 WHERE id=? AND tenant_id=? AND revision=?',[name,categoryName,JSON.stringify(attributes),JSON.stringify(defaults),previous.id,a.tenant_id,Number(body.revision)]);if(!changed.affectedRows)throw fail('模板已在其他窗口更新，请刷新后重试。');return {ok:true,template:await template(a.tenant_id,previous.id)};}
       const saved=await query('INSERT INTO wb_listing_templates (tenant_id,name,subject_id,category_name,attributes_json,defaults_json) VALUES (?,?,?,?,?,?)',[a.tenant_id,name,subject,categoryName,JSON.stringify(attributes),JSON.stringify(defaults)]);return {ok:true,template:await template(a.tenant_id,saved.insertId)};
     }catch(error){if(error.code==='ER_DUP_ENTRY')throw fail('本企业已有同名 WB 模板，请编辑已有模板。');throw error;}
   }
@@ -23,6 +23,7 @@ export function createWbListingWorkflow({query,request,account}) {
   async function saveListingDraft(tenantId,body){
     const a=await account(tenantId,body.shop_id),payload=body.payload;
     const selected=await template(a.tenant_id,payload?.template_id);
+    if((selected.defaults.environment||'production')!==a.environment)throw fail('所选店铺环境与模板不一致，请重新选择 WB 类目。');
     if(Number(payload.subject_id)!==Number(selected.subject_id))throw fail('草稿类目与所选 WB 模板不一致，请重新套用模板。',400);
     const vendor=String(payload.card?.vendorCode||'').trim();
     if(!vendor||vendor.length>72||JSON.stringify(payload).length>1000000)throw fail('草稿商家货号：请填写 1–72 个字符，图片请使用地址。',400);
@@ -32,5 +33,14 @@ export function createWbListingWorkflow({query,request,account}) {
     try{const r=await query("INSERT INTO wb_listing_drafts (tenant_id,shop_id,template_id,vendor_code,payload_json,status) VALUES (?,?,?,?,?,'draft')",[a.tenant_id,a.shop_id,selected.id,vendor,JSON.stringify(saved)]);return {ok:true,draft_id:r.insertId,revision:1};}catch(error){if(error.code==='ER_DUP_ENTRY')throw fail('该 WB 店铺已存在此货号草稿，请在草稿列表继续编辑。');throw error;}
   }
   async function validateListingDraft(tenantId,body){const {a,payload}=await owned(tenantId,body),selected=await template(a.tenant_id,payload.template_id);const current=await request(a,'content',`/content/v2/object/charcs/${selected.subject_id}`,{query:{locale:'zh'}});const result=wbListingValidation(payload,current.data||[]);if(payload.currency!=='CNY')result.errors.push('售价币种：请选择人民币 CNY。');return {...result,ok:!result.errors.length,review_only:true,message:'本次只校验资料，不会向 WB 创建商品、生成条码、发布价格或库存。'};}
-  return {listingTemplates,saveListingTemplate,listingDrafts,saveListingDraft,validateListingDraft};
+  async function workbenchDrafts(tenantId){const rows=await query(`SELECT d.*,s.name AS shop_name FROM wb_listing_drafts d JOIN shops s ON s.id=d.shop_id AND s.tenant_id=d.tenant_id WHERE d.tenant_id=? AND s.platform='wb' AND s.status='active' ORDER BY d.updated_at DESC LIMIT 200`,[id(tenantId)]);return {rows:rows.map(row=>({...row,payload:parse(row.payload_json),payload_json:undefined}))};}
+  async function previewListingPayload(tenantId,body){
+    const selected=await template(tenantId,body.payload?.template_id);
+    if(Number(body.payload?.subject_id)!==Number(selected.subject_id))throw fail('请重新选择 WB 类目，模板与当前类目不一致。',400);
+    const result=wbListingValidation(body.payload,selected.attributes);
+    if(body.payload.currency!=='CNY')result.errors.push('售价币种须为人民币 CNY。');
+    if(body.shop_id){const a=await account(tenantId,body.shop_id);if((selected.defaults.environment||'production')!==a.environment)result.errors.push('目标店铺与模板环境不一致，请同步该店铺的类目字段。');}else result.errors.push('上架店铺：请在页面下方选择目标 WB 店铺。');
+    return {...result,ok:!result.errors.length,review_only:true};
+  }
+  return {previewListingPayload,workbenchDrafts,listingTemplates,saveListingTemplate,listingDrafts,saveListingDraft,validateListingDraft};
 }
