@@ -63,7 +63,7 @@ export const ozonCredentialHealth = createOzonCredentialHealth({ repository: {
 
 export async function ozonHealthShops(tenantId, shopId = null) {
   const scope = await resolveInventoryTenantScope(tenantId);
-  const rows = await query(`SELECT s.* FROM shops s WHERE ${inventoryTenantSql(scope, 's')} AND s.status = 'active'${shopId ? ' AND s.id = ?' : ''} ORDER BY s.id`, shopId ? [shopId] : []);
+  const rows = await query(`SELECT s.* FROM shops s WHERE ${inventoryTenantSql(scope, 's')} AND s.status = 'active' AND s.platform = 'ozon'${shopId ? ' AND s.id = ?' : ''} ORDER BY s.id`, shopId ? [shopId] : []);
   return rows.map(shop => ({ ...shop, health_tenant_id: scope.id }));
 }
 

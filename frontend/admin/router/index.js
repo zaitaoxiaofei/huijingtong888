@@ -45,7 +45,7 @@ const ReimbursementView = () => import("../views/finance/ReimbursementView.vue")
 const PayrollView = () => import("../views/finance/PayrollLedgerView.vue");
 const SellerAnalyticsView = () => import("../views/analytics/SellerAnalyticsView.vue");
 const OrderCarHeatmapView = () => import("../views/analytics/OrderCarHeatmapView.vue");
-const OzonActionsView = () => import("../views/marketing/OzonActionsView.vue");
+const OzonActionsView = () => import("../views/marketing/PlatformActivitiesView.vue");
 const OrdersView = () => import("../views/orders/OrdersView.vue");
 const OrderTrackingView = () => import("../views/orders/OrderTrackingView.vue");
 const OutboundView = () => import("../views/orders/OutboundView.vue");
@@ -128,7 +128,6 @@ export const router = createRouter({
       children: [
         { path: "", redirect: "/dashboard" },
         { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "任务系统", breadcrumb: ["任务系统"] } },
-        { path: "marketplace-demo", name: "marketplace-demo", component: () => import("../views/marketplace/MarketplaceDemoView.vue"), meta: { title: "多平台预览", breadcrumb: ["运营", "多平台预览"] } },
         { path: "dashboard", name: "dashboard", component: DashboardView, meta: { title: "经营首页", breadcrumb: ["经营首页"] } },
         { path: "ai-credits", name: "ai-credits", component: () => import("../views/AiCreditsView.vue"), meta: { title: "AI积分", breadcrumb: ["AI积分"] } },
         { path: "membership", name: "membership", component: MembershipView, meta: { title: "会员中心", breadcrumb: ["会员中心"] } },
@@ -159,6 +158,8 @@ export const router = createRouter({
             { path: "alerts", name: "inventory-alerts", component: InventoryAlertsPage, meta: { title: "库存预警", breadcrumb: ["库存中心", "库存预警"] } }
           ]
         },
+        { path: "wb/online-products", name: "wb-online-products", component: () => import("../views/inventory/WbOnlineProductsView.vue"), meta: { title: "WB 在线商品", breadcrumb: ["商品运营", "WB 在线商品"] } },
+        { path: "wb/listing", name: "wb-listing", component: () => import("../views/inventory/WbOnlineProductsView.vue"), meta: { title: "WB 商品上架", breadcrumb: ["商品运营", "WB 商品上架"] } },
         { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品运营", "在线商品"] } },
         { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵", breadcrumb: ["运营", "店铺矩阵"] } },
         { path: "asset-variant-center/create", name: "asset-variant-center-create", redirect: (to) => ({ name: "ai-variant-lab", query: to.query }) },
@@ -187,7 +188,7 @@ export const router = createRouter({
           }),
           meta: { title: "编辑上架", breadcrumb: ["商品运营", "上架记录", "编辑上架"], tabKey: "workbench" }
         },
-        { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "Ozon 活动", breadcrumb: ["商品运营", "Ozon 活动"] } },
+        { path: "ozon-actions", name: "ozon-actions", component: OzonActionsView, meta: { title: "平台活动", breadcrumb: ["商品运营", "平台活动"] } },
         { path: "selection", name: "selection", component: SelectionView, meta: { title: "选品池", breadcrumb: ["商品运营", "选品池"], tabKey: "workbench" } },
         { path: "finance/inventory-capital", name: "inventory-capital", component: () => import("../views/finance/InventoryCapitalView.vue"), meta: { title: "库存占用", breadcrumb: ["库存", "库存占用"] } },
         { path: "profit", redirect: "/profit/monthly-billing" },

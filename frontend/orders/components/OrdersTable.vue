@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { WB_REMOTE_WRITES_ENABLED } from "../../../src/shared/wb-capabilities.js";
 import MarketplaceBadge from "../../admin/components/MarketplaceBadge.vue";
 import { computed, defineAsyncComponent, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
@@ -9,6 +10,8 @@ import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
 import InventoryIdentity from './InventoryIdentity.vue';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
+const WbHandoverDialog = defineAsyncComponent(() => import("./WbHandoverDialog.vue"));
+const wbHandoverRow = ref(null);
 const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/components/procurement/ProcurementLedgerDialog.vue"));
 
 const props = defineProps({
@@ -186,6 +189,7 @@ function resolveOzonLink(item) {
 }
 
 function resolveOzonPostingLink(row) {
+  if (row.platform === 'wb') return "";
   const postingNumber = String(row?.posting_number || row?.order_number || "").trim();
   if (!postingNumber) return "";
   const query = new URLSearchParams({
@@ -407,7 +411,7 @@ function canEditCollaborationNote(row) {
       <el-table-column label="订单信息" min-width="180" fixed="left">
         <template #default="{ row }">
           <div class="orders-cell-stack">
-            <MarketplaceBadge platform="ozon" />
+            <MarketplaceBadge :platform="row.platform || 'ozon'" />
             <div class="orders-cell-title orders-posting-emphasis orders-order-title">
               <a
                 v-if="resolveOzonPostingLink(row)"
@@ -523,8 +527,8 @@ function canEditCollaborationNote(row) {
                     <el-button link type="primary" size="small">更新本地库存</el-button>
                     <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
                   </el-dropdown>
-                  <el-button v-if="parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
-                  <el-dropdown v-else-if="parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
+                  <el-button v-if="(row.platform !== 'wb' || WB_REMOTE_WRITES_ENABLED) && parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
+                  <el-dropdown v-else-if="(row.platform !== 'wb' || WB_REMOTE_WRITES_ENABLED) && parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
                     <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
                     <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
                   </el-dropdown>
@@ -563,7 +567,7 @@ function canEditCollaborationNote(row) {
                 <el-button link type="primary" size="small">更新本地库存</el-button>
                 <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
               </el-dropdown>
-              <div v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
+              <div v-for="item in (row.platform === 'wb' && !WB_REMOTE_WRITES_ENABLED ? [] : row.unboundItems)" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
                 <el-button
                   size="small"
                   class="orders-inline-accent-button orders-inline-accent-button-secondary"
@@ -620,7 +624,8 @@ function canEditCollaborationNote(row) {
 
       <el-table-column label="利润" min-width="188" align="left">
         <template #default="{ row }">
-          <div class="orders-cell-stack orders-money-cell">
+          <div v-if="row.platform === 'wb'" class="orders-cell-stack orders-money-cell"><div class="orders-cell-meta-line">金额: {{ row.amountText }}</div><small>WB 利润待接入</small></div>
+          <div v-else class="orders-cell-stack orders-money-cell">
             <div class="orders-cell-meta-line">金额: {{ row.amountText }}</div>
             <div
               class="orders-cell-meta-line"
@@ -664,7 +669,7 @@ function canEditCollaborationNote(row) {
           <div class="orders-cell-stack">
             <div class="orders-cell-meta-line orders-time-line">下单: {{ formatDateTime(row.ordered_at) }}</div>
             <div class="orders-cell-meta-line orders-time-line">更新: {{ formatDateTime(row.updated_at) }}</div>
-            <div class="orders-cell-meta-line orders-time-line" :class="{ 'orders-text-danger': row.logisticsSummary.overdue }">
+            <div v-if="row.platform !== 'wb' || row.logisticsSummary.deadline" class="orders-cell-meta-line orders-time-line" :class="{ 'orders-text-danger': row.logisticsSummary.overdue }">
               截止: {{ formatDateTime(row.logisticsSummary.deadline) }}
             </div>
           </div>
@@ -681,7 +686,7 @@ function canEditCollaborationNote(row) {
             </template>
             <template v-else>
               <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.rawOzonMethodName ? `Ozon 原始物流名称：${row.logisticsSummary.rawOzonMethodName}` : ''">渠道: {{ row.logisticsSummary.serviceClass }}<small v-if="row.logisticsSummary.serviceClassSourceLabel">（{{ row.logisticsSummary.serviceClassSourceLabel }}）</small></div>
-              <div class="orders-cell-meta-line orders-logistics-warehouse">运输: {{ row.logisticsSummary.transportMode }}<small v-if="row.logisticsSummary.transportModeSourceLabel">（{{ row.logisticsSummary.transportModeSourceLabel }}）</small></div>
+              <div class="orders-cell-meta-line orders-logistics-warehouse"><template v-if="row.logisticsSummary.transportMode">运输: {{ row.logisticsSummary.transportMode }}</template><small v-if="row.logisticsSummary.transportModeSourceLabel">（{{ row.logisticsSummary.transportModeSourceLabel }}）</small></div>
             </template>
             <div v-if="row.logisticsSummary.shipmentNumber" class="orders-logistics-id-row">
               <span>货件: {{ row.logisticsSummary.shipmentNumber }}</span>
@@ -771,6 +776,7 @@ function canEditCollaborationNote(row) {
             >
               {{ procurementActionLabel(row) }}
             </el-button>
+            <el-button v-if="WB_REMOTE_WRITES_ENABLED && row.platform === 'wb' && row.wb_supply_id && row.wb_supplier_status === 'confirm'" size="small" @click="wbHandoverRow=row">交接</el-button>
             <el-button
               v-if="row.availableActions.showPrepare"
               size="small"
@@ -840,6 +846,7 @@ function canEditCollaborationNote(row) {
       </template>
     </Teleport>
 
+    <WbHandoverDialog v-if="wbHandoverRow" :row="wbHandoverRow" @close="wbHandoverRow=null" @changed="emit('inventory-saved')" />
     <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved', $event)">
       <template #management>
         <template v-for="row in [inventoryRow]" :key="row.id">

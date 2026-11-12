@@ -1,3 +1,4 @@
+import { wbRoutePermission } from "./wb-paths.js";
 import { planFeatures, planFeatureMessage, subscriptionApiFeature } from "../shared/subscription-plan-features.js";
 import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
@@ -28,6 +29,11 @@ export function authorizeApiRequest(req, parts = []) {
     return session.tenant?.id && session.tenant?.slug && access && (access === "member" || canReviewFinance(session)) ? { allowed: true } : deny();
   }
   if (isEnterpriseMessageRoute(parts, String(req.method || "GET").toUpperCase())) return session.tenant?.id ? { allowed: true } : deny("请先选择有效企业后使用私信");
+  if (parts[1] === 'wb') {
+    const permission = wbRoutePermission(parts, String(req.method || 'GET').toUpperCase());
+    if (!session.tenant?.id || !session.tenant?.slug || !permission) return deny();
+    return (permission === 'enterprise.admin' ? isEnterpriseAdmin(session) : hasPermission(session, permission)) ? { allowed: true } : deny();
+  }
   if (isPlatformAdmin(session)) return { allowed: true };
   if (!getRoles(session).length && !isEnterpriseAdmin(session)) return deny();
   const method = String(req.method || "GET").toUpperCase();

@@ -24,7 +24,7 @@ test("shop dictionary invalidates and broadcasts after shop mutations", () => {
 
 test("orders page uses shared shop dictionary instead of a local shop cache", () => {
   assert.match(ordersPageSource, /import \{ loadShopDictionary \} from "\.\.\/\.\.\/admin\/utils\/shop-dictionary\.js"/);
-  assert.match(ordersPageSource, /loadShopDictionary\(\)\.catch/);
+  assert.match(ordersPageSource, /Promise\.all\(\[loadShopDictionary\(\), apiClient\.get\('/api/wb/shops'/);
   assert.doesNotMatch(ordersPageSource, /SHOPS_CACHE_TTL_MS|shopsCache|fetchShopsCached/);
 });
 

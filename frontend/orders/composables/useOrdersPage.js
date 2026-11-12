@@ -658,7 +658,7 @@ export function useOrdersPage() {
         if (showLoading) loading.value = false;
         void loadPageInventory(vm.rows, requestToken, cacheKey);
       }
-      const shopsPromise = loadShopDictionary().catch((error) => {
+      const shopsPromise = Promise.all([loadShopDictionary(), apiClient.get('/api/wb/shops', { noCache: true })]).then(([ozon,wb]) => [...ozon,...wb]).catch((error) => {
         console.warn("fetch shops for orders failed", error);
         return vm.shops;
       });
@@ -1101,6 +1101,15 @@ export function useOrdersPage() {
       await loadOrders();
     },
     syncRecent: async () => {
+      const wbShop=vm.shops.find(shop=>Number(shop.id)===Number(vm.filters.shopId)&&shop.platform==='wb');
+      if(wbShop){
+        if(vm.syncRunning)return;
+        vm.syncRunning=true;vm.syncStatus='正在同步 WB 订单与官方状态...';
+        try{const result=await apiClient.post('/api/wb/orders/sync',{shop_id:wbShop.id,});await loadOrders({includeCounts:true,forceRefresh:true});vm.syncStatus=`WB 同步完成：获取 ${result.fetched} 单，核对 ${result.refreshed} 单状态。`;return result;}
+        catch(error){ElMessage.error(error.message);vm.syncStatus=error.message;}finally{vm.syncRunning=false;}
+        return;
+      }
+
       const body = { from_latest: true, fallback_days: 7, overlap_minutes: 15 };
       const postingNumbers = exactPostingNumbers(vm.filters.searchType, vm.filters.searchQuery);
       if (postingNumbers.length) body.posting_numbers = postingNumbers;
@@ -1113,6 +1122,15 @@ export function useOrdersPage() {
       });
     },
     syncAll: async () => {
+      const wbShop=vm.shops.find(shop=>Number(shop.id)===Number(vm.filters.shopId)&&shop.platform==='wb');
+      if(wbShop){
+        if(vm.syncRunning)return;
+        vm.syncRunning=true;vm.syncStatus='正在同步 WB 订单与官方状态...';
+        try{const result=await apiClient.post('/api/wb/orders/sync',{shop_id:wbShop.id,from:vm.filters.dateFrom||'',to:vm.filters.dateTo||''});await loadOrders({includeCounts:true,forceRefresh:true});vm.syncStatus=`WB 同步完成：获取 ${result.fetched} 单，核对 ${result.refreshed} 单状态。`;return result;}
+        catch(error){ElMessage.error(error.message);vm.syncStatus=error.message;}finally{vm.syncRunning=false;}
+        return;
+      }
+
       const body = {
         from: vm.filters.dateFrom || "",
         to: vm.filters.dateTo || ""

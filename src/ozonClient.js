@@ -1509,6 +1509,7 @@ function isOzonRateLimitError(error) {
 }
 
 async function ozonRequestOnce(shop, path, payload, options = {}) {
+  if (shop?.platform && shop.platform !== 'ozon') throw Object.assign(new Error('该店铺属于其他平台，不能执行 Ozon 操作。'), { statusCode: 409 });
   if (options.beforeRequest) shop = await options.beforeRequest() || shop;
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次拉取已取消"));

@@ -104,6 +104,7 @@ export function oglPlatformProgress(row = {}) {
 }
 
 export function oglCandidateIssue(row, targetBatchId=0) {
+  if (row?.platform && row.platform !== 'ozon') return { code:'WRONG_PLATFORM', reason:'WB 订单请使用订单行的交接操作，不能加入 Ozon OGL 发运单' };
   if (!row || row.shop_status !== 'active') return {code:'SHOP_UNAVAILABLE',reason:'订单不存在、不属于当前企业或来源店铺已停用'};
   const logistics=classifyOrderLogistics(row);
   if(logistics.logistics_fulfillment_type==='fbp')return {code:'FBP_ORDER',reason:'FBP 订单由平台仓履约，不能加入本地 OGL 交运'};
@@ -155,7 +156,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     return { id: tenantId, slug: row.slug, personId, session: trusted, can_settings: isEnterpriseAdmin(trusted) };
   }
   async function shops(connection, current) {
-    const [rows] = await connection.execute(`SELECT s.* FROM shops s WHERE ${shopScope(current)} AND s.status = 'active' ORDER BY s.id`, [current.id]);
+    const [rows] = await connection.execute(`SELECT s.* FROM shops s WHERE ${shopScope(current)} AND s.status = 'active' AND s.platform='ozon' ORDER BY s.id`, [current.id]);
     return rows;
   }
   async function shop(connection, current, shopId, credentials = false) {
@@ -223,7 +224,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   }
   async function previewRows(connection, current, orderIds, lock = false, targetBatchId = 0) {
     const selected = ids(orderIds);
-    const [rows] = await connection.execute(`SELECT o.*, s.name AS shop_name, s.status AS shop_status, raw.raw_json,
+    const [rows] = await connection.execute(`SELECT o.*, s.platform, s.name AS shop_name, s.status AS shop_status, raw.raw_json,
       raw.substatus, olp.printed_at, olp.print_batch_id, om.mark_type, om.note AS mark_note, m.batch_id AS active_batch_id,
       EXISTS (SELECT 1 FROM ogl_dispatch_members history WHERE history.tenant_id = ? AND history.order_id = o.id
         AND history.active_order_id IS NULL AND history.official_member = 1) AS has_official_conflict

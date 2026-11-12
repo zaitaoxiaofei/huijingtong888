@@ -1,4 +1,6 @@
 ﻿<script setup>
+import { WB_REMOTE_WRITES_ENABLED } from "../../src/shared/wb-capabilities.js";
+import { wbOrderState, wbOrderCapabilities } from "../../src/shared/wb-order-state.js";
 import {orderHasDispatchHold} from "../../src/shared/order-dispatch-hold.js";
 import {orderSelectionSummary,orderPrintPlan,currentPagePreparePlan} from "./utils/order-print-selection.js";
 import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
@@ -679,6 +681,7 @@ async function saveStatusPreference() {
 }
 
 function rowStateLabel(row) {
+  if (row.platform === 'wb') return wbOrderState(row.wb_supplier_status, row.wb_status).label;
   const key = rowDisplayStateKey(row);
   if (key === "ogl_dispatched") return row?.ogl_dispatch?.dispatched === true ? "已实际交运" : "已申请";
   if (key === "returned") return "已退货";
@@ -705,6 +708,12 @@ function rowRegistrationHint(row) {
 }
 
 function rowAvailableActions(row) {
+  if (row.platform === 'wb') {
+    const caps = wbOrderCapabilities(row);
+    if(!WB_REMOTE_WRITES_ENABLED)return {...caps,prepare:false,print:false,handover:false,showPrepare:false,showPrint:false,showSplitPrepare:false,showPurchase:false,profit:false};
+    return { ...caps, showPrepare: caps.prepare && !row.inventory_refresh_pending, showPrint: caps.print,
+      showSplitPrepare: false, showPurchase: ['awaiting_packaging','awaiting_deliver'].includes(row.status), profit: false };
+  }
   const displayStateKey = rowDisplayStateKey(row);
   const statusText = [
     row?.status,
@@ -834,6 +843,9 @@ function buildProfitSummary(row) {
 }
 
 function buildLogisticsSummary(row) {
+  if (row.platform === 'wb') return { deliveryMethodLabel: 'FBS · WB 揽收', serviceClass: 'WB 揽收点交货', transportMode: '',
+    shipmentNumber: row.wb_supply_id || row.posting_number, warehouse: row.warehouse_name || '', deadline: null,
+    trackingNumber: row.tracking_number || '', trackingLink: '', overdue: false, isFbp: false };
   const shipmentNumber = String(row.posting_number || row.order_number || "").trim();
   const trackingNumber = String(row.tracking_number || "").trim();
   const trackingTarget = trackingNumber || shipmentNumber;
@@ -1322,7 +1334,7 @@ function buildTableRow(row) {
     cancelReasonMeta,
     cancelCategoryText: terminalOutcome ? row?.aftersale_bucket_label || "原因待归类" : "--",
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
-    amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
+    amountText: row.platform === 'wb' ? `${row.sale_currency || '币种待核对'} ${formatMoney(row.wb_amount)}` : `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
     statusHint: orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : row?.ogl_dispatch?.stage === "bound" ? "已打印并绑定发运单，尚未实际交运；订单继续保留在等待发运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),

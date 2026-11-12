@@ -1,4 +1,5 @@
 <script setup>
+import MarketplaceBadge from "../../components/MarketplaceBadge.vue";
 import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
@@ -9,6 +10,14 @@ const saving = ref(false);
 const rows = ref([]);
 const healthRows = ref([]);
 const checking = ref(null);
+const wbWarehouse = reactive({ visible: false, shop: null, rows: [], selected: null, loading: false });
+async function openWbWarehouse(row) {
+  Object.assign(wbWarehouse, { visible: true, shop: row, rows: [], selected: null, loading: true });
+  try { const value = await apiClient.get(`/api/wb/warehouses?shop_id=${row.id}`, { noCache: true }); wbWarehouse.rows = value.rows || []; wbWarehouse.selected = value.selected; } catch (error) { ElMessage.error(error.message); } finally { wbWarehouse.loading = false; }
+}
+async function saveWbWarehouse() {
+  try { await apiClient.post('/api/wb/warehouses/save', { shop_id: wbWarehouse.shop.id, warehouse_id: wbWarehouse.selected }); wbWarehouse.visible = false; await load(); } catch (error) { ElMessage.error(error.message); }
+}
 const healthError = ref('');
 const healthShop = ref(null);
 const healthByShop = computed(() => new Map(healthRows.value.map(row => [Number(row.shop_id), row])));
@@ -27,6 +36,7 @@ async function loadHealth() {
 async function checkHealth(row) {
   checking.value = row.id;
   try {
+    if (row.platform === 'wb') { const result = await apiClient.post('/api/wb/check', { shop_id: row.id }); if (result.ok) ElMessage.success('WB 商品、价格和订单授权检查通过'); else ElMessage.warning(result.checks.filter(item => !item.ok).map(item => item.message).join('；')); await load(); return; }
     await apiClient.post('/api/shops/ozon-health', { shop_id: row.id });
     await loadHealth();
     const current = healthByShop.value.get(Number(row.id));
@@ -47,6 +57,10 @@ function createForm() {
     id: null,
     updated_at: null,
     name: "",
+    platform: "ozon",
+    wb_token: "",
+    environment: "production",
+    handover_mode: "unverified",
     legal_entity: "",
     user_id: null,
     ozon_client_id: "",
@@ -68,13 +82,14 @@ async function load() {
   const scope = currentApiCacheScope();
   loading.value = true;
   try {
-    const [shops, tenantMembers] = await Promise.all([
+    const [shops, tenantMembers, , wbShops] = await Promise.all([
       apiClient.get("/api/shops", { noCache: true }),
       apiClient.get("/api/enterprise/people", { noCache: true }),
-      loadHealth()
+      loadHealth(),
+      apiClient.get("/api/wb/shops", { noCache: true })
     ]);
     if (scope !== currentApiCacheScope()) return;
-    rows.value = Array.isArray(shops) ? shops : [];
+    rows.value = [...(Array.isArray(shops) ? shops : []), ...(Array.isArray(wbShops) ? wbShops : [])];
     members.value = Array.isArray(tenantMembers) ? tenantMembers : [];
   } catch (error) {
     ElMessage.error(error.message || "企业店铺加载失败");
@@ -94,6 +109,7 @@ function openEdit(row) {
   Object.assign(form, row, {
     user_id: Number(row.user_id || 0) || null,
     ozon_api_key: "",
+    wb_token: "",
     performance_client_secret: ""
   });
   editing.value = true;
@@ -106,7 +122,8 @@ async function save() {
   saving.value = true;
   try {
     const payload = { ...form, payout_rate: Number(form.payout_rate || 0) };
-    if (editing.value) await apiClient.put(`/api/shops/${form.id}`, payload);
+    if (form.platform === 'wb') await apiClient.post('/api/wb/shops/save', payload);
+    else if (editing.value) await apiClient.put(`/api/shops/${form.id}`, payload);
     else await apiClient.post("/api/shops", payload);
     dialogVisible.value = false;
     ElMessage.success(editing.value ? "店铺已更新" : "店铺已新增");
@@ -137,7 +154,7 @@ onBeforeUnmount(() => window.removeEventListener('erp:auth-scope-changed', reset
 <template>
   <main class="tenant-shops-page" v-loading="loading">
     <header class="page-head">
-      <div><h1>企业店铺</h1><p>管理当前企业自己的 Ozon 店铺和店长。其他企业的店铺不会显示在这里。</p></div>
+      <div><h1>企业店铺</h1><p>管理当前企业自己的平台店铺和店长。其他企业的店铺不会显示在这里。</p></div>
       <el-button type="primary" @click="openCreate">新增店铺</el-button>
     </header>
     <el-alert v-if="healthError" :title="healthError" type="error" :closable="false" show-icon />
@@ -145,19 +162,20 @@ onBeforeUnmount(() => window.removeEventListener('erp:auth-scope-changed', reset
     <el-alert v-if="failedSyncShops" :title="`${failedSyncShops} 个店铺有未完整完成的同步，请查看数据更新时间；已有数据可能尚未更新。`" type="error" :closable="false" show-icon />
     <p class="health-hint">时间均为北京时间。授权查询成功不代表各业务接口权限齐全，也不代表中断期间的数据已补齐。广告授权独立于店铺 API Key。</p>
     <el-table :data="rows" row-key="id" empty-text="当前企业还没有店铺">
-      <el-table-column prop="name" label="店铺名称" min-width="160" />
+      <el-table-column label="店铺名称" min-width="160"><template #default="{ row }"><MarketplaceBadge :platform="row.platform || 'ozon'" /> {{ row.name }}</template></el-table-column>
       <el-table-column prop="user_name" label="店铺负责人" min-width="120" />
       <el-table-column prop="ozon_client_id" label="Client ID" min-width="140" />
-      <el-table-column label="API Key" min-width="110"><template #default="{ row }">{{ row.ozon_api_key ? "已配置" : "未配置" }}</template></el-table-column>
-      <el-table-column label="Ozon 授权与到期" min-width="240"><template #default="{ row }">
+      <el-table-column label="API Key" min-width="110"><template #default="{ row }">{{ (row.platform === 'wb' ? row.wb_token_configured : row.ozon_api_key) ? "已配置" : "未配置" }}</template></el-table-column>
+      <el-table-column label="授权与到期" min-width="240"><template #default="{ row }">
+        <template v-if="row.platform === 'wb'"><el-tag :type="row.checked_at ? 'success' : 'warning'">{{ row.checked_at ? '已检查 WB 授权' : '尚未检查 WB 授权' }}</el-tag><div>{{ dateText(row.checked_at) }}</div></template><template v-else>
         <el-tag :type="healthType(healthByShop.get(Number(row.id)))">{{ healthLabels[healthByShop.get(Number(row.id))?.status] || '尚未检查' }}</el-tag>
         <div v-if="healthByShop.get(Number(row.id))?.expires_at">到期：{{ dateText(healthByShop.get(Number(row.id)).expires_at) }}<br>剩余 {{ healthByShop.get(Number(row.id)).days_remaining }} 天</div>
         <div v-else>到期时间未确认</div>
-        <small v-if="healthByShop.get(Number(row.id))?.check_stale">检查记录缺失或超过两天，请重新检查</small>
+        <small v-if="healthByShop.get(Number(row.id))?.check_stale">检查记录缺失或超过两天，请重新检查</small></template>
       </template></el-table-column>
       <el-table-column label="授权与同步检查" min-width="200"><template #default="{ row }">
         <el-button link type="primary" :loading="checking === row.id" :disabled="checking !== null || row.status !== 'active'" @click="checkHealth(row)">检查授权</el-button>
-        <el-button link type="primary" @click="healthShop = row">数据更新时间</el-button>
+        <el-button v-if="row.platform !== 'wb'" link type="primary" @click="healthShop = row">数据更新时间</el-button><el-button v-else link type="primary" @click="openWbWarehouse(row)">绑定 WB 仓库</el-button>
         <div v-if="Object.values(healthByShop.get(Number(row.id))?.sync || {}).some(item => item.status === 'failed')"><el-tag type="danger">有同步未完成</el-tag></div>
       </template></el-table-column>
       <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag :type="row.status === 'active' ? 'success' : 'info'">{{ row.status === "active" ? "启用" : "停用" }}</el-tag></template></el-table-column>
@@ -167,16 +185,18 @@ onBeforeUnmount(() => window.removeEventListener('erp:auth-scope-changed', reset
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑企业店铺' : '新增企业店铺'" width="min(760px, 94vw)" destroy-on-close class="shop-edit-dialog">
       <el-form label-position="top" class="shop-edit-form">
         <section><h3>基本信息</h3><div class="shop-form-grid">
+          <el-form-item label="销售平台"><el-select v-model="form.platform" :disabled="editing"><el-option label="Ozon" value="ozon"/><el-option label="WB（中国主体）" value="wb"/></el-select></el-form-item>
           <el-form-item label="店铺名称" required><el-input v-model="form.name" maxlength="255" placeholder="填写便于识别的店铺名称" /></el-form-item>
           <el-form-item label="店铺负责人" required><el-select v-model="form.user_id" filterable placeholder="选择本企业成员" style="width:100%"><el-option v-for="member in activeMembers" :key="member.person_id" :label="`${member.name}（${member.username || '未设置登录名'}）`" :value="Number(member.person_id)" /></el-select><small>从本企业已有账号中选择，不会创建新账号。</small></el-form-item>
           <el-form-item label="公司主体名称（选填）"><el-input v-model="form.legal_entity" placeholder="店铺注册的公司或经营主体全称" /></el-form-item>
           <el-form-item><template #label><el-tooltip content="记录店铺利润中拟分配给负责人的比例。例如利润 1,000 元、提成 10%，对应 100 元。目前仅保存比例，不会自动发放或改变订单利润。" placement="top"><span tabindex="0">店铺提成比例 ⓘ</span></el-tooltip></template><div class="shop-percent"><el-input-number v-model="payoutPercent" :min="0" :max="100" :step="1" :precision="2" /><span>%</span></div><small>默认 0%，需要分红时再设置。</small></el-form-item>
         </div></section>
-        <section><h3>Ozon 店铺授权</h3><p>用于订单、商品、库存和财务同步。请填写同一家店铺的 Client ID 与 API Key。</p><div class="shop-form-grid">
+        <section v-if="form.platform !== 'wb'"><h3>Ozon 店铺授权</h3><p>用于订单、商品、库存和财务同步。请填写同一家店铺的 Client ID 与 API Key。</p><div class="shop-form-grid">
           <el-form-item label="Client ID"><el-input v-model="form.ozon_client_id" placeholder="Ozon 卖家后台 → 设置 → API 密钥" /></el-form-item>
           <el-form-item label="API Key"><el-input v-model="form.ozon_api_key" type="password" autocomplete="new-password" show-password :placeholder="editing ? '留空保留原密钥；填写则替换' : '粘贴与 Client ID 配套的 API Key'" /></el-form-item>
         </div></section>
-        <el-collapse><el-collapse-item title="广告接口授权（选填）" name="advertising"><p>仅在需要广告数据时填写；广告凭证独立于上面的店铺 API 授权。</p><div class="shop-form-grid">
+        <section v-if="form.platform === 'wb'"><h3>WB 中国区授权</h3><p>在 WB 卖家后台的 API 集成中创建 Token，勾选 Content（商品）、Marketplace（仓库与订单）、Prices and Discounts（价格与活动），本轮先拉取数据，可先使用只读权限；后续执行平台写操作时再核对对应权限。授权只保存在当前企业，不会回显密钥。</p><div class="shop-form-grid"><el-form-item label="API Token" required><el-input v-model="form.wb_token" type="password" autocomplete="new-password" show-password :placeholder="editing ? '留空保留原授权' : '粘贴 WB API Token'"/></el-form-item><el-form-item label="接口环境"><el-select v-model="form.environment" :disabled="editing"><el-option label="正式店铺" value="production"/><el-option label="WB 沙箱（独立测试店铺）" value="sandbox"/></el-select></el-form-item></div><el-form-item label="揽收交接要求"><el-select v-model="form.handover_mode"><el-option label="尚未核对（交接操作暂不开放）" value="unverified"/><el-option label="已确认：中国跨境揽收点交货" value="collection_point"/><el-option label="已确认：需 WB 运输箱及箱标签" value="shipping_units"/></el-select><small>按 WB 后台及实际揽收点要求选择。中国跨境揽收点与俄罗斯交货自提点不能混为一谈。</small></el-form-item><p>当前履约：自有仓 FBS，交给 WB 揽收点。保存后请检查授权并绑定 WB 卖家仓；不等同于往 WB 平台仓备货。</p></section>
+        <el-collapse v-if="form.platform !== 'wb'"><el-collapse-item title="广告接口授权（选填）" name="advertising"><p>仅在需要广告数据时填写；广告凭证独立于上面的店铺 API 授权。</p><div class="shop-form-grid">
           <el-form-item label="广告 Client ID"><el-input v-model="form.performance_client_id" placeholder="Performance API 的 Client ID" /></el-form-item>
           <el-form-item label="广告 Client Secret"><el-input v-model="form.performance_client_secret" type="password" autocomplete="new-password" show-password :placeholder="editing ? '留空保留原密钥' : 'Performance API 的客户端密钥'" /></el-form-item>
         </div></el-collapse-item><el-collapse-item title="其他店铺信息（选填）" name="extra"><div class="shop-form-grid">
@@ -186,6 +206,7 @@ onBeforeUnmount(() => window.removeEventListener('erp:auth-scope-changed', reset
       </el-form>
       <template #footer><el-button :disabled="saving" @click="dialogVisible=false">取消</el-button><el-button type="primary" :loading="saving" @click="save">保存店铺</el-button></template>
     </el-dialog>
+    <el-dialog v-model="wbWarehouse.visible" title="绑定 WB 卖家仓" width="520px"><div v-loading="wbWarehouse.loading"><p>选择此店铺在 WB 后台创建的自有仓发货仓库。实物库存继续使用现有本地库存；此处绑定 WB 的库存发布入口。</p><el-select v-model="wbWarehouse.selected" placeholder="选择 WB 卖家仓" style="width:100%"><el-option v-for="item in wbWarehouse.rows" :key="item.id" :label="item.name" :value="Number(item.id)"/></el-select></div><template #footer><el-button @click="wbWarehouse.visible=false">取消</el-button><el-button type="primary" :disabled="!wbWarehouse.selected" @click="saveWbWarehouse">保存</el-button></template></el-dialog>
     <el-drawer :model-value="Boolean(healthShop)" :title="`${healthShop?.name || ''} · 授权与数据更新`" size="640px" @close="healthShop = null">
       <template v-if="healthShop">
         <el-alert :title="healthLabels[healthDetails?.status] || '尚未检查'" :type="healthType(healthDetails) === 'danger' ? 'error' : healthType(healthDetails)" :closable="false" />
