@@ -30,6 +30,8 @@ import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, f
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
 import { oglTransportDeadlineHint, oglTransportDeadlineUrgent, usesOglTransportDeadline } from "./utils/ogl-transport-deadline.js";
+import { orderInventoryLogisticsDefaults } from "./utils/inventory-logistics-context.js";
+import { inventoryLogisticsRulesForCarrier } from "../admin/utils/inventory-logistics-selection.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
@@ -551,10 +553,7 @@ function supplierName(id) {
 }
 
 function defaultLogisticsRule() {
-  const rules = sortedInventoryLogisticsRules.value;
-  return rules.find((rule) => String(rule.name || "").includes("CEL 陆空标准 Extra Small"))
-    || rules[0]
-    || null;
+  return inventoryLogisticsRulesForCarrier(inventoryOptions.logisticsRules, "OGL")[0] || null;
 }
 
 function inventoryProductImage(row) {
@@ -1394,7 +1393,9 @@ function resolveOrderInventoryContext(orderId, sku) {
     salePriceRmb: Number(displayItem?.saleAmount || 0) > 0
       ? Number(displayItem.saleAmount) / Math.max(1, Number(displayItem.quantity || 1))
       : Number(row.sale_price || 0) || 0,
-    logisticsRuleId: Number(displayItem?.logisticsRuleId || 0) || null
+    logisticsRuleId: Number(displayItem?.logisticsRuleId || 0) || null,
+    logisticsCarrier: row.logistics_carrier || "",
+    logisticsCarrierLabel: row.logistics_carrier_label || ""
   };
 }
 
@@ -2520,8 +2521,12 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
   }
   await ensureInventoryOptionsLoaded();
   const personId = preferredPersonId();
-  const defaultRule = defaultLogisticsRule();
-  const orderRule = inventoryOptions.logisticsRules.find((rule) => Number(rule.id) === Number(context.logisticsRuleId)) || defaultRule;
+  const logisticsDefaults = orderInventoryLogisticsDefaults({
+    carrier: context.logisticsCarrier,
+    carrierLabel: context.logisticsCarrierLabel,
+    sourceRuleId: context.logisticsRuleId,
+    rules: inventoryOptions.logisticsRules
+  });
   inventoryProductEditorCreateContext.value = {
     online_product_id: context.onlineProductId,
     order_item_id: context.orderItemId,
@@ -2544,8 +2549,7 @@ async function handleOpenCreateProductFromOrder(orderId, sku) {
     source_platform: "1688",
     supplier_note: `来自订单 ${orderId} / Ozon SKU ${context.sku}`,
     stock_unit: "个",
-    logistics_rule_id: orderRule?.id || "",
-    shipping_method: orderRule?.channel || "air_land",
+    ...logisticsDefaults,
     return_rate: 0.05,
     product_type: "main",
     selection_status: "listed"
