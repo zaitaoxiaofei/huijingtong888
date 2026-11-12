@@ -19,7 +19,7 @@ test("advertising sync classifies Russian active request limit errors", () => {
 });
 
 test("advertising sync waits for active reports and polls generated reports for up to five minutes", () => {
-  assert.match(advertisingSource, /if \(!isActiveReportLimitError\(error\)\) break;\s*if \(attempt < 5\) await sleep\(reportRetryDelayMs \+ attempt \* 5000, options\.signal\)/);
+  assert.match(advertisingSource, /if \(!isActiveReportLimitError\(error\)\) break;\s*if \(attempt < 5\) await sleep\(Math\.max\(reportRetryDelayMs \+ attempt \* 5000, Number\(error\.retryAfterMs\) \|\| 0\), options\.signal\)/);
   assert.match(advertisingSource, /reportPollAttempts = Math\.max\(12, Math\.min\(120,[\s\S]*\|\| 60\)\)/);
   assert.match(advertisingSource, /reportMissingRetryDelayMs[\s\S]*\|\| 5000\)/);
   assert.match(advertisingSource, /function sleep\(ms, signal\)[\s\S]*signal\?\.addEventListener\("abort", onAbort/);
