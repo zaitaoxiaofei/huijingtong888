@@ -9,7 +9,7 @@ export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now
   return async function request(account, service, path, { method = 'GET', body, query, signal } = {}) {
     if (!HOSTS[service] || !path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('WB 接口地址无效');
     if (!account?.token) throw Object.assign(new Error('缺少 WB API 授权，请到企业店铺编辑该 WB 店铺，填写 API Token 并检查授权。'), { statusCode: 409 });
-    const readOnly=method==='GET'||(method==='POST'&&(['/api/v3/orders/status','/api/v3/orders/stickers','/content/v2/get/cards/list','/content/v2/cards/error/list'].includes(path)||/^\/api\/v3\/stocks\/\d+$/.test(path)));
+    const readOnly=method==='GET'||(method==='POST'&&(['/api/v3/orders/status','/api/v3/orders/stickers','/content/v2/get/cards/list','/content/v2/get/cards/trash','/content/v2/cards/error/list'].includes(path)||/^\/api\/v3\/stocks\/\d+$/.test(path)));
     const environment = account.environment || 'production';
     if (!['production', 'sandbox'].includes(environment)) throw new Error('WB 接口环境无效');
     if (environment === 'sandbox' && ['calendar', 'common'].includes(service)) throw Object.assign(new Error('该 WB 能力未启用沙箱，请使用有对应权限的正式店铺。'), { statusCode: 409 });

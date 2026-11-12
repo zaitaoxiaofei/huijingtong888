@@ -137,8 +137,10 @@ const productLimitSummary = computed(() => {
     };
   }
   const sum = (selector) => rows.reduce((total, row) => {
-    const value = Number(selector(row));
-    return Number.isFinite(value) ? total + value : total;
+    const raw = selector(row);
+    if (total === null || raw === null || raw === undefined) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? total + value : null;
   }, 0);
   return {
     label: `${rows.length}个店铺`,
@@ -161,7 +163,7 @@ function dateText(value) {
 }
 
 function limitNumber(value) {
-  return Number.isFinite(Number(value)) ? integer(value) : "--";
+  return value !== null && value !== undefined && Number.isFinite(Number(value)) ? integer(value) : "--";
 }
 
 function limitPercent(bucket = {}) {
@@ -172,6 +174,7 @@ function limitPercent(bucket = {}) {
 }
 
 function limitStatusType(bucket = {}) {
+  if (bucket.remaining === null || bucket.remaining === undefined) return "";
   const remaining = Number(bucket.remaining);
   const max = Number(bucket.limit);
   if (!Number.isFinite(remaining) || !Number.isFinite(max) || max <= 0) return "";
@@ -899,7 +902,7 @@ onDeactivated(() => {
             <div class="shop-limit-popover">
               <div class="shop-limit-panel-head">
                 <strong>店铺链接空间</strong>
-                <span class="muted-text">来自 Ozon 商品额度接口</span>
+                <span class="muted-text">来自 Ozon / WB 官方商品额度接口</span>
                 <span v-if="state.productLimitsFetchedAt" class="muted-text">更新 {{ dateText(state.productLimitsFetchedAt) }}</span>
                 <el-button link type="primary" :loading="productLimitLoading" @click="loadProductLimits(true)">刷新</el-button>
               </div>
@@ -917,15 +920,17 @@ onDeactivated(() => {
                   <template #default="{ row }">
                     <div v-if="row.ok" class="shop-limit-metric">
                       <div><span>剩余</span><strong>{{ limitNumber(row.limit?.total?.remaining) }}</strong><span>/ 上限 {{ limitNumber(row.limit?.total?.limit) }}</span></div>
-                      <el-progress :percentage="limitPercent(row.limit?.total)" :status="limitProgressStatus(row.limit?.total)" :stroke-width="8" :show-text="false" />
-                      <small>已用 {{ limitNumber(row.limit?.total?.usage) }}</small>
+                      <el-progress v-if="row.limit?.total?.usage !== null" :percentage="limitPercent(row.limit?.total)" :status="limitProgressStatus(row.limit?.total)" :stroke-width="8" :show-text="false" />
+                      <small>已用 {{ row.limit?.refreshing ? "核对中" : limitNumber(row.limit?.total?.usage) }}</small>
+                      <small v-if="row.limit?.usage_error">{{ row.limit.usage_error }}</small>
                     </div>
-                    <span v-else class="muted-text">{{ row.error || "Ozon 未返回额度" }}</span>
+                    <span v-else class="muted-text">{{ row.error || "平台未返回额度" }}</span>
                   </template>
                 </el-table-column>
                 <el-table-column label="今日创建" min-width="170">
                   <template #default="{ row }">
-                    <div v-if="row.ok" class="shop-limit-metric shop-limit-metric-compact">
+                    <span v-if="row.ok && row.platform === 'wb'" class="muted-text">接口未提供</span>
+                    <div v-else-if="row.ok" class="shop-limit-metric shop-limit-metric-compact">
                       <div><span>剩余</span><strong>{{ limitNumber(row.limit?.daily_create?.remaining) }}</strong><span>/ 上限 {{ limitNumber(row.limit?.daily_create?.limit) }}</span></div>
                       <small>已用 {{ limitNumber(row.limit?.daily_create?.usage) }}</small>
                     </div>
@@ -934,7 +939,8 @@ onDeactivated(() => {
                 </el-table-column>
                 <el-table-column label="今日更新" min-width="170">
                   <template #default="{ row }">
-                    <div v-if="row.ok" class="shop-limit-metric shop-limit-metric-compact">
+                    <span v-if="row.ok && row.platform === 'wb'" class="muted-text">接口未提供</span>
+                    <div v-else-if="row.ok" class="shop-limit-metric shop-limit-metric-compact">
                       <div><span>剩余</span><strong>{{ limitNumber(row.limit?.daily_update?.remaining) }}</strong><span>/ 上限 {{ limitNumber(row.limit?.daily_update?.limit) }}</span></div>
                       <small>已用 {{ limitNumber(row.limit?.daily_update?.usage) }}</small>
                     </div>

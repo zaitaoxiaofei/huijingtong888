@@ -142,7 +142,8 @@ test('frontend publishes metrics before requesting optional ranking/stock panels
 test('slow ranking and FBP opportunities do not keep shop capacity loading', async () => {
   const limits = deferred(), ranking = deferred(), opportunities = deferred();
   const context = {
-    overviewRequestSeq: 0, selectedDate: { value: '2026-10-30' }, shopLimitsLoading: { value: false },
+    overviewRequestSeq: 0, shopLimitsRefreshTimer: undefined, clearTimeout() {}, setTimeout,
+    selectedDate: { value: '2026-10-30' }, shopLimitsLoading: { value: false },
     shopProductLimits: { value: [] }, dashboard: { value: { summary: {} } }, currentApiCacheScope: () => 'tenant2',
     getDashboardWithRetry: url => url.includes('limits') ? limits.promise : opportunities.promise,
     loadTopInventory: () => ranking.promise
@@ -153,6 +154,35 @@ test('slow ranking and FBP opportunities do not keep shop capacity loading', asy
   assert.equal(context.shopLimitsLoading.value, false);
   assert.equal(context.shopProductLimits.value[0].shop_id, 20);
   ranking.resolve(); opportunities.resolve({ summary: {} }); await work;
+});
+
+test('WB capacity census polls independently and stops on completion or changed enterprise', async () => {
+  for (const changedScope of [false, true]) {
+    let scope = 'tenant2', calls = 0, scheduled;
+    const context = {
+      overviewRequestSeq: 0, shopLimitsRefreshTimer: undefined, clearTimeout() {},
+      setTimeout(callback) { scheduled = callback; return 1; },
+      selectedDate: { value: '2026-10-30' }, shopLimitsLoading: { value: false },
+      shopProductLimits: { value: [] }, dashboard: { value: { summary: {} } }, currentApiCacheScope: () => scope,
+      getDashboardWithRetry: async url => {
+        if (!url.includes('limits')) return { summary: {} };
+        calls++;
+        const limit = { refreshing: calls === 1, total: { limit: 700, remaining: calls === 1 ? null : 598 } };
+        return url.startsWith('/api/wb/') ? limit : { rows: [{ shop_id: 30, platform: 'wb', limit }] };
+      },
+      loadTopInventory: async () => {}
+    };
+    const load = vm.runInNewContext(`(${extract(frontend, 'async function loadOverviewPanels', 'function scheduleDashboardSnapshotReload')})`, context);
+    await load();
+    assert.equal(context.shopLimitsLoading.value, false);
+    assert.equal(typeof scheduled, 'function');
+    const poll = scheduled; scheduled = undefined;
+    if (changedScope) scope = 'tenant3';
+    await poll();
+    assert.equal(calls, changedScope ? 1 : 2);
+    assert.equal(scheduled, undefined);
+    assert.equal(context.shopProductLimits.value[0].limit.total.remaining, changedScope ? null : 598);
+  }
 });
 
 test('refresh job publishes partial sections, shares duplicate work, and clears progress only after success', async () => {

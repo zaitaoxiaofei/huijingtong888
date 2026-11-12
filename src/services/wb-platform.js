@@ -1,3 +1,4 @@
+import { readWbCardLimits } from './wb-card-limits.js';
 import { createWbCategoryCatalog } from "./wb-category-catalog.js";
 import { createWbListingWorkflow } from "./wb-listing-workflow.js";
 import { wbListingSource } from "../shared/wb-listing-source.js";
@@ -26,6 +27,9 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
     if (!rows[0]) throw fail('该 WB 店铺不存在、已停用或不属于当前企业，请在企业店铺中检查。', 404);
     if(!allowUnchecked && rows[0].environment==='production' && (!rows[0].checked_at||!rows[0].seller_id))throw fail('WB 授权尚未核对，请先在企业店铺点击“检查授权”，确认 Token 对应的卖家身份后再拉取数据。',409);
     return rows[0];
+  }
+  async function cardLimits(tenantId, body) {
+    return readWbCardLimits(await account(tenantId, body.shop_id), request);
   }
   async function pricingCommissions(tenantId, body) {
     const a = await account(tenantId, body.shop_id);
@@ -444,7 +448,7 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
   }
   const catalog=createWbCategoryCatalog({query,request,account});
   async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
-  return { pricingCommissions, ...catalog, listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
@@ -477,6 +481,8 @@ export async function wbPlatform(session, permission = 'operations', signal) {
       const {assembleListingDraftStoredRow}=await import('./listing-frozen-content.js');
       return assembleListingDraftStoredRow(mysqlQuery,{tenantId:key,row:rows[0]});
     }});
+  const readCardLimits = platform.cardLimits;
+  platform.cardLimits = async (...args) => { await authorize(); return readCardLimits(...args); };
   if(!WB_REMOTE_WRITES_ENABLED)for(const action of WB_REMOTE_WRITE_ACTIONS)platform[action]=async()=>{throw fail('当前先开放 WB 授权和数据拉取；上架、改价、平台库存及履约写操作需完成真实店铺联调后开放。',409);};
   return platform;
 }

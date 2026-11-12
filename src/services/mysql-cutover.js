@@ -11434,7 +11434,7 @@ function compactOzonProductLimitMysql(limit = null) {
   };
 }
 
-export async function onlineProductLimitsMysql(query = {}, tenantId = "admin") {
+export async function onlineProductLimitsMysql(query = {}, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
   const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
@@ -11450,12 +11450,19 @@ export async function onlineProductLimitsMysql(query = {}, tenantId = "admin") {
     const row = {
       shop_id: Number(shop.id),
       shop_name: shop.name || "",
+      platform: shop.platform || "ozon",
       ok: true,
       error: "",
       limit: null
     };
     try {
-      row.limit = compactOzonProductLimitMysql(await fetchOzonProductInfoLimit(shop));
+      if (shop.platform === 'wb') {
+        const { wbPlatform } = await import('./wb-platform.js');
+        const wb = await wbPlatform(options.session, 'orders.read', options.signal);
+        row.limit = await wb.cardLimits(normalizedTenantId, { shop_id: shop.id });
+      } else {
+        row.limit = compactOzonProductLimitMysql(await fetchOzonProductInfoLimit(shop));
+      }
     } catch (error) {
       row.ok = false;
       row.error = error?.message || String(error);
