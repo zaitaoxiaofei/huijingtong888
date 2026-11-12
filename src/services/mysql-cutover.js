@@ -10415,6 +10415,8 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
   if (targetShopId && !activeShops.length) throw Object.assign(new Error("店铺不存在或不属于当前企业"), { statusCode: 404 });
   const result = {
     ok: true,
+    status: write ? "ok" : "audit_only",
+    warnings: [],
     mode: write ? "write" : "dry_run",
     apply_profit: applyProfit,
     window_days: windowDays,
@@ -10454,7 +10456,13 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
           rangeResult.fetched = raw.fetched;
           rangeResult.upserted = raw.upserted;
           rangeResult.requests = raw.requests;
-          rangeResult.errors = raw.errors;
+          rangeResult.errors = raw.errors || [];
+          rangeResult.warnings = raw.warnings || [];
+          rangeResult.source_endpoint = raw.source_endpoint || null;
+          rangeResult.source_shops = raw.shops || [];
+          rangeResult.status = rangeResult.errors.length ? "partial_error" : rangeResult.warnings.length ? "needs_reconciliation" : "ok";
+          for (const warning of rangeResult.warnings) result.warnings.push(`${shop.name} ${range.from}~${range.to}: ${warning}`);
+          for (const error of rangeResult.errors) result.errors.push(`${shop.name} ${range.from}~${range.to}: ${error}`);
           shopResult.fetched += Number(raw.fetched || 0);
           shopResult.upserted += Number(raw.upserted || 0);
           shopResult.requests += Number(raw.requests || 0);
@@ -10471,6 +10479,7 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
           }
           rangeResult.after = await financeBackfillWindowCoverageMysql(shop.id, range.from, range.to);
         } catch (error) {
+          rangeResult.status = "error";
           rangeResult.error = error.message;
           result.errors.push(`${shop.name} ${range.from}~${range.to}: ${error.message}`);
         }
@@ -10480,9 +10489,11 @@ export async function backfillOzonFinanceMysql(body = {}, options = {}) {
     }
     result.shops.push(shopResult);
   }
+  result.ok = result.errors.length === 0 && result.warnings.length === 0;
   if (write) {
-    const status = result.errors.length ? "partial_error" : "ok";
-    const message = `Finance backfill ${result.mode}; shops ${result.shops.length}, windows ${result.windows}, fetched ${result.fetched}, upserted ${result.upserted}, apply_profit ${applyProfit ? "yes" : "no"}${result.errors.length ? `; ${result.errors.join(" | ")}` : ""}`;
+    const status = result.errors.length ? "partial_error" : result.warnings.length ? "needs_reconciliation" : "ok";
+    result.status = status;
+    const message = `Finance backfill ${result.mode}; shops ${result.shops.length}, windows ${result.windows}, fetched ${result.fetched}, upserted ${result.upserted}, apply_profit ${applyProfit ? "yes" : "no"}${result.warnings.length ? `; ${result.warnings.join(" | ")}` : ""}${result.errors.length ? `; ${result.errors.join(" | ")}` : ""}`;
     await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance_backfill', ?, ?)", [tenantScope.id, status, message]);
   }
   if (result.errors.length && write && result.upserted === 0) throw new Error(result.errors.join(" | "));

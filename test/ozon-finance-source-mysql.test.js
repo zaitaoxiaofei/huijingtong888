@@ -44,6 +44,13 @@ test('daily finance ingestion works without profit-policy activation, stays idem
     const boundary=await service.syncOzonFinanceRawMysql({shop_id:21,from:'2026-10-25',to:day},{tenantId:2});
     assert.equal(boundary.shops[0].source_from,day);assert.equal(boundary.warnings.length,1);
     assert.deepEqual(await q("SELECT * FROM ozon_finance_items WHERE operation_id IN('legacy-21','foreign-30') ORDER BY id"),protectedRows);
+    calls.length=0;
+    const backfill=await service.backfillOzonFinanceMysql({shop_id:21,from:'2026-10-25',to:'2026-10-25',write:true},{tenantId:2});
+    assert.equal(backfill.ok,false);assert.equal(backfill.status,'needs_reconciliation');assert.equal(backfill.warnings.length,1);
+    assert.equal(backfill.shops[0].ranges[0].source_shops[0].status,'skipped_legacy_range');assert.equal(calls.length,0);
+    const [backfillLog]=await q("SELECT status,message FROM sync_logs WHERE job='ozon_finance_backfill' ORDER BY id DESC LIMIT 1");
+    assert.equal(backfillLog.status,'needs_reconciliation');assert.match(backfillLog.message,/旧流水/);
+    assert.deepEqual(await q("SELECT * FROM ozon_finance_items WHERE operation_id IN('legacy-21','foreign-30') ORDER BY id"),protectedRows);
     calls.length=0;await assert.rejects(service.syncOzonFinanceRawMysql({shop_id:30,from:day,to:day},{tenantId:2}),error=>error.statusCode===404);assert.equal(calls.length,0);
     const before=await q('SELECT * FROM ozon_finance_items WHERE shop_id=20 ORDER BY id');rotate=true;
     await assert.rejects(service.syncOzonFinanceRawMysql({shop_id:20,from:day,to:day},{tenantId:2}),/授权在财务读取期间发生变化/);

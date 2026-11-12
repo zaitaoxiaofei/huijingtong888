@@ -53,3 +53,13 @@ Confirmed type names include `Acquiring`, `SaleCommission`, `RfbsGlobalDelivery`
 - Restoring the raw feed does not authorize recalculating legacy V1 order profits at new daily rates. V2 final profit still requires signature evidence, frozen archives, complete cost categories and reconciled source operations.
 
 Implementation boundaries: `ozon-finance-accrual-client.js` fetches pages, `ozon-finance-accruals.js` normalizes original monetary facts, `order-finance-accrual-write.js` stores operation-day ledger rows, and the separate V2 order-finance path applies the frozen order/signature policy. Platform ledger cash flow and signed-day order profit are different reporting bases.
+
+## 2026-11-12: historical backfill completeness (local, not released)
+
+The outer backfill previously dropped `warnings` and per-shop source boundaries from raw ingestion. A range excluded by the legacy-overlap guard could return `ok: true` and write an `ok` backfill log without reading Ozon. Partial source errors could also be absent from the outer error list.
+
+Backfill now exposes per-range `source_endpoint`, `source_shops`, `warnings` and status. A protected legacy range returns `needs_reconciliation`, warnings are retained in the aggregate and sync log, and aggregate `ok` is false. Partial source errors propagate as `partial_error`. A genuinely successful empty read remains `ok`; dry-run coverage is explicitly `audit_only` and does not contact Ozon or write logs.
+
+This is a completeness-reporting fix, not an automatic historical repair: legacy/accrual identities remain separate, protected dates are not recollected, and no fee classification, order-profit formula or existing application rule changes. `/v1/finance/accrual/postings` still requires its own verified contract and reconciliation work. Official migration notice: https://dev.ozon.ru/news/783-Izmeneniia-v-metodakh-dlia-raboty-s-finansovymi-otchetami-v-Seller-API/
+
+Validation: 36 focused unit/contract tests and 5 isolated MySQL tests passed without skips. The MySQL check confirms an excluded legacy range makes no provider request, preserves legacy/foreign rows, and records `needs_reconciliation`; existing V1/V2 pipeline tests continue to pass. No production change is included in this local batch.
