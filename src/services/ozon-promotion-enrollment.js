@@ -1,3 +1,5 @@
+import { isPromotionRateLimit } from "./ozon-promotion-request-queue.js";
+
 function invalid(message) {
   return Object.assign(new Error(message), { status: 400 });
 }
@@ -77,18 +79,23 @@ export function promotionEnrollmentOutcome(products, receipt, joined = [], verif
   const deactivated = new Set((Array.isArray(receipt?.deactivated_product_ids) ? receipt.deactivated_product_ids : []).map(String));
   const rejected = new Map((Array.isArray(receipt?.rejected) ? receipt.rejected : []).map(row => [String(row.product_id ?? row.id), String(row.reason || "Ozon 拒绝报名")]));
   const current = new Map(joined.map(row => [String(row.product_id ?? row.id), row]));
-  const confirmedProductIds = [], failures = [];
+  const confirmedProductIds = [], failures = [], pendingProductIds = [], rejectedProductIds = [];
   const blocked = new Map(preflightFailures.map(row => [String(row.product_id), row.reason]));
   for (const product of products) {
     const id = String(product.product_id), row = current.get(id);
     let reason = blocked.get(id) || rejected.get(id);
     if (!reason && deactivated.has(id)) reason = "Ozon 回执显示商品被退出，请核对活动限价";
     if (!reason && !active.has(id)) reason = "Ozon 未明确确认商品报名，请核对后再决定是否重试";
-    if (!reason && verificationError) reason = `收到报名回执，但回读未完成：${verificationError}`;
+    if (!reason && verificationError) reason = `收到报名回执，但回读未完成：${verificationError?.message || verificationError}`;
     if (!reason && (!row || String(row.action_price?.currency) !== product.action_price.currency || Number(row.action_price?.amount) !== Number(product.action_price.amount))) reason = "回读尚未确认商品已参加且活动价及币种一致，请稍后刷新核对";
-    if (reason) failures.push({ product_id: product.product_id, reason });
-    else confirmedProductIds.push(product.product_id);
+    if (reason) {
+      const isRejected = blocked.has(id) || deactivated.has(id) || rejected.has(id);
+      const status = isRejected ? "rejected" : "pending";
+      const code = !isRejected && active.has(id) && verificationError && isPromotionRateLimit(verificationError) ? "READBACK_RATE_LIMITED" : undefined;
+      failures.push({ product_id: product.product_id, reason, status, ...(code ? { code } : {}) });
+      (isRejected ? rejectedProductIds : pendingProductIds).push(product.product_id);
+    } else confirmedProductIds.push(product.product_id);
   }
   const warnings = (Array.isArray(receipt?.warnings) ? receipt.warnings : []).map(row => `商品 ${row.product_id || ""}：${row.reason || "Ozon 返回活动提示"}`);
-  return { success: failures.length === 0, count: confirmedProductIds.length, confirmedProductIds, failures, warnings, result: receipt, apiVersion: "update" };
+  return { success: failures.length === 0, count: confirmedProductIds.length, confirmedProductIds, pendingProductIds, rejectedProductIds, failures, warnings, result: receipt, apiVersion: "update" };
 }

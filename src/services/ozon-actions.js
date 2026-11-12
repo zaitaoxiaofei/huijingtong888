@@ -1,8 +1,11 @@
+import { createOzonPromotionRequestQueue } from "./ozon-promotion-request-queue.js";
 import { normalizePromotionEnrollment, normalizePromotionProductPage, validatePromotionEnrollmentFacts, promotionEnrollmentOutcome } from "./ozon-promotion-enrollment.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
 import { inventoryTenantSql } from "./inventory-tenant-scope.js";
+
+const runPromotionRequest = createOzonPromotionRequestQueue();
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const ACTION_CLEANUP_SETTING_PREFIX = "ozon.actions.cleanup:";
@@ -70,7 +73,12 @@ function ozonHeaders(shop) {
   };
 }
 
-async function ozonRequest(path, { method = "POST", payload = null, shop, signal } = {}) {
+function ozonRequest(path, options = {}) {
+  return runPromotionRequest(options.shop?.clientId || options.shop?.id, path,
+    () => ozonRequestOnce(path, options), { signal: options.signal });
+}
+
+async function ozonRequestOnce(path, { method = "POST", payload = null, shop, signal } = {}) {
   shop = await readShop(shop?.id);
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(signal.reason || new Error("请求已取消"));
@@ -93,7 +101,12 @@ async function ozonRequest(path, { method = "POST", payload = null, shop, signal
     }
     if (!response.ok) {
       const message = data?.message || data?.error || data?.raw || `Ozon API ${path} HTTP ${response.status}`;
-      throw statusError(message, response.status);
+      const error = statusError(message, response.status);
+      const retryAfter = response.headers?.get?.("retry-after");
+      const seconds = Number(retryAfter);
+      error.retryAfterMs = retryAfter == null ? 0 : Number.isFinite(seconds)
+        ? Math.max(0, seconds * 1000) : Math.max(0, Date.parse(retryAfter) - Date.now()) || 0;
+      throw error;
     }
     return data;
   } catch (error) {
@@ -285,7 +298,7 @@ export async function addOzonActionProductsMysql(body = {}, options = {}) {
       const verification = await fetchAllJoinedActionProductIds({ ...shop, promotionApiMode: "unified" }, payload.action_id, options.signal);
       if (verification.paginationWarning) throw new Error(verification.paginationWarning);
       joined = verification.joinedProducts;
-    } catch (error) { verificationError = error.message; }
+    } catch (error) { verificationError = error; }
   }
   return promotionEnrollmentOutcome(payload.products, receipt, joined, verificationError, preflight.failures);
 }
