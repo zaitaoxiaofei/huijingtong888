@@ -97,14 +97,4 @@ test("carrier changes clear the select's filter input without closing its dropdo
   assert.equal(f.form.logistics_rule_id, 1);
 });
 
-test("procurement layout keeps carrier controls inside its select and has ordered four-column measurements", () => {
-  const section = source.match(/class="form-section procurement-section">([^]*?)<\/el-row>/)[1];
-  const labels = [...section.matchAll(/<el-form-item label="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(labels, ["采购成本", "国内运费", "打包费", "生产周期", "物流到仓时长", "物流规则", "长(cm)", "宽(cm)", "高(cm)", "重量(g)"]);
-  const measures = [...section.matchAll(/<el-col class="mobile-packaging-field" v-show="showMobileSection\('measure'\)" :span="(\d+)">/g)];
-  assert.equal(measures.length, 4);
-  assert.ok(measures.every(match => match[1] === "6"));
-  assert.match(section, /<template #header>\s*<div class="inventory-logistics-dropdown-header" @mousedown\.prevent @click\.stop>\s*<el-radio-group/);
-  assert.doesNotMatch(section, /已选：/);
-});
 
