@@ -54,7 +54,7 @@ Confirmed type names include `Acquiring`, `SaleCommission`, `RfbsGlobalDelivery`
 
 Implementation boundaries: `ozon-finance-accrual-client.js` fetches pages, `ozon-finance-accruals.js` normalizes original monetary facts, `order-finance-accrual-write.js` stores operation-day ledger rows, and the separate V2 order-finance path applies the frozen order/signature policy. Platform ledger cash flow and signed-day order profit are different reporting bases.
 
-## 2026-11-12: historical backfill completeness (local, not released)
+## 2026-11-12: historical backfill completeness (released)
 
 The outer backfill previously dropped `warnings` and per-shop source boundaries from raw ingestion. A range excluded by the legacy-overlap guard could return `ok: true` and write an `ok` backfill log without reading Ozon. Partial source errors could also be absent from the outer error list.
 
@@ -62,4 +62,15 @@ Backfill now exposes per-range `source_endpoint`, `source_shops`, `warnings` and
 
 This is a completeness-reporting fix, not an automatic historical repair: legacy/accrual identities remain separate, protected dates are not recollected, and no fee classification, order-profit formula or existing application rule changes. `/v1/finance/accrual/postings` still requires its own verified contract and reconciliation work. Official migration notice: https://dev.ozon.ru/news/783-Izmeneniia-v-metodakh-dlia-raboty-s-finansovymi-otchetami-v-Seller-API/
 
-Validation: 36 focused unit/contract tests and 5 isolated MySQL tests passed without skips. The MySQL check confirms an excluded legacy range makes no provider request, preserves legacy/foreign rows, and records `needs_reconciliation`; existing V1/V2 pipeline tests continue to pass. No production change is included in this local batch.
+Validation: 36 focused unit/contract tests and 5 isolated MySQL tests passed without skips. The MySQL check confirms an excluded legacy range makes no provider request, preserves legacy/foreign rows, and records `needs_reconciliation`; existing V1/V2 pipeline tests continue to pass. Released in PR #192 at `6d0bb07d4a6b4cbb0da74ff552e788639a8bd1c7`, ECS version `2026.11.12-finance-backfill-6d0bb07`. Production verification used an existing protected legacy day in an authorized shop: audit mode wrote no logs; the guarded backfill returned and logged `needs_reconciliation`, made zero external requests and zero ledger upserts, preserved ledger aggregates, and did not apply profits. Login, release and readiness checks passed.
+
+
+## 2026-11-12: routine sync and scheduled warning propagation (local, not released)
+
+The same completeness warning could still disappear above the routine raw-sync path: normal sync logs reported `ok`, cross-enterprise task aggregation dropped warnings, and scheduled finance completion reported `success`. This local batch preserves those warnings through every layer.
+
+- Raw and ordinary finance sync expose and log `needs_reconciliation` when protected ranges need review; errors retain precedence.
+- Platform scheduling aggregates warnings with enterprise IDs while retaining the existing active-subscription checks and enterprise execution boundaries.
+- Finance jobs with warnings return `partial`, preserve an actionable warning in the task registry, emit a warning event, and retain bounded warning details plus the full warning count in the saved task result. The existing task UI already renders `partial` as a warning.
+- An actual successful empty read still succeeds. Warnings mean dates remain unverified, not that missing financial operations have been proven. No source identity, historical boundary, financial allocation, profit formula, scheduling configuration, or external API behavior changes.
+- Validation: 41 focused unit/contract tests and 13 isolated MySQL tests passed without skips. The real scheduler test persists `partial` and its warning through registry/history while making no Ozon call or ledger change. Related tenant/subscription checks, credential scheduling and frozen V1/V2 finance pipelines pass. UTF-8, SQL binding and runtime syntax checks passed. This next batch remains local pending its own release approval.

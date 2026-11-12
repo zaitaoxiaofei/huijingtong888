@@ -101,6 +101,9 @@ function summarizeScheduledJobResult(jobKey, resultPayload = {}) {
   if (jobKey === "ozon_finance_sync") {
     return {
       status: String(payload.status || "success"),
+      warning: truncateText(payload.warning || "", 1000),
+      warningCount: Array.isArray(payload.warnings) ? payload.warnings.length : 0,
+      warnings: Array.isArray(payload.warnings) ? payload.warnings.slice(0, MAX_RESULT_ERRORS).map(item => truncateText(item, 300)) : [],
       from: String(payload.from || ""),
       to: String(payload.to || ""),
       fetched: Number(payload.fetched || 0),

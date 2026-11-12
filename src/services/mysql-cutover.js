@@ -10053,11 +10053,11 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
     }
     shops.push(shopResult);
   }
-  const status = errors.length ? "partial_error" : "ok";
+  const status = errors.length ? "partial_error" : warnings.length ? "needs_reconciliation" : "ok";
   const message = `Raw finance ${from}~${to}; fetched ${fetched}, upserted ${upserted}, requests ${requests}${warnings.length ? `; ${warnings.join(" | ")}` : ""}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance_raw', ?, ?)", [tenantScope.id, status, message]);
   if (errors.length && upserted === 0) throw new Error(errors.join(" | "));
-  return { fetched, upserted, requests, from, to, source_endpoint: "/v1/finance/accrual/by-day", shops, errors, warnings, db: "mysql" };
+  return { status, fetched, upserted, requests, from, to, source_endpoint: "/v1/finance/accrual/by-day", shops, errors, warnings, db: "mysql" };
 }
 
 async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null, tenantId = "admin", taskOptions = {}, requiredPermissions = ["finance"] } = {}) {
@@ -10392,11 +10392,11 @@ export async function syncOzonFinanceMysql(body = {}, options = {}) {
   const to = raw.to || body.to || todayDateKeyMysql();
   await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
   const applied = await applyOzonFinanceToOrdersMysql({ from, to, tenantId, taskOptions: options });
-  const status = raw.errors.length ? "partial_error" : "ok";
-  const message = `Fetched ${raw.fetched}, upserted ${raw.upserted}, applied ${applied.items}${raw.errors.length ? `; ${raw.errors.join(" | ")}` : ""}`;
+  const status = raw.errors.length ? "partial_error" : raw.warnings?.length ? "needs_reconciliation" : "ok";
+  const message = `Fetched ${raw.fetched}, upserted ${raw.upserted}, applied ${applied.items}${raw.warnings?.length ? `; ${raw.warnings.join(" | ")}` : ""}${raw.errors.length ? `; ${raw.errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance', ?, ?)", [tenantScope.id, status, message]);
   if (raw.errors.length && raw.upserted === 0) throw new Error(raw.errors.join(" | "));
-  return { fetched: raw.fetched, upserted: raw.upserted, requests: raw.requests, applied, errors: raw.errors, shops: raw.shops, warnings: raw.warnings, source_endpoint: raw.source_endpoint, db: "mysql" };
+  return { status, fetched: raw.fetched, upserted: raw.upserted, requests: raw.requests, applied, errors: raw.errors, shops: raw.shops, warnings: raw.warnings, source_endpoint: raw.source_endpoint, db: "mysql" };
 }
 
 export async function backfillOzonFinanceMysql(body = {}, options = {}) {
