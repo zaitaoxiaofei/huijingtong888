@@ -53,3 +53,12 @@ Release `092abea` and the reviewed tracker-table migration were deployed after e
 The additional local-only fix restarts the entire v2 traversal when a legacy list ends before its declared total. A mid-traversal explicit unified-price refusal must also restart from v2 page one: no legacy cursor, product IDs, manual attribution or counters may be mixed into v2 evidence. Mode changes prevent more than one restart. V2 schema, completeness, repeated-ID and terminal-confirmation checks remain mandatory; permission errors, throttling, timeouts and server errors do not trigger a generic fallback.
 
 This follow-up is not included in deployed `092abea`. Another ECS deployment still requires fresh user approval.
+
+
+## 2026-11-12：自动退出统一新版接口（本地验证批次）
+
+- 自动清理、手动移除、报名后的参与状态核对统一直接读取 `/v2/actions/products`，不再请求旧 `/v1/actions/products` 或旧退出方法，也不根据旧接口的错误文本决定是否迁移。
+- 活动券使用 `/v2/actions/products/deactivate`；弹性提升和库存折扣使用仍有效的 `/v1/actions/products/update`，不是将所有 v1 路径机械替换成 v2。
+- 保留完整分页、异常终点复核、跨活动手动参与保护、写入前再次读取以及共享限价不降低的约束。任何相关活动读取不完整时，不进行共享限价退出。
+- 活动券退出必须逐个核对本批商品回执，缺失、重复或其他商品的回执均不确认成功；随后仍需读取已参加列表验证商品已退出。
+- 上方的旧版回退记录仅为历史说明，不再代表当前执行路径。本批未公开发布或部署；本地通过后等待审核、合并部署和受控线上验收。

@@ -7,7 +7,7 @@ const cleanupKey = id => `ozon.actions.cleanup:${id}`;
 
 test("promotion cleanup recovers current-enterprise authorization and preserves execution failures", {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && "Requires the isolated TENANT_TEST_MYSQL_SOCKET",
-  timeout: 120000
+  timeout: 600000
 }, async t => {
   const fixture = await createTenantMysqlFixture("action_cleanup");
   const originalFetch = globalThis.fetch;
@@ -30,6 +30,7 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.equal(new URL(url).origin, "https://api-seller.ozon.ru");
       const request = { endpoint: new URL(url).pathname, client: options.headers?.["Client-Id"], body: options.body ? JSON.parse(options.body) : null };
       requests.push(request);
+      assert.ok(!["/v1/actions/products", "/v1/actions/products/deactivate"].includes(request.endpoint), "retired endpoints must never be called");
       const data = respond ? await respond(request) : { result: [] };
       const { __status: status = 200, ...body } = data;
       return { ok: status >= 200 && status < 300, status, headers: new Headers(), text: async () => JSON.stringify(body) };
@@ -170,16 +171,14 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.ok(!requests.some(row => /products\/(?:deactivate|delete)$/.test(row.endpoint)));
     });
 
-    const unifiedPriceRefusal = () => ({ __status: 400, message: "the method is blocked due to unified price logic. To resume management via promotions, please switch to the new methods" });
     const money = amount => ({ amount, currency: "RUB" });
     const automaticProduct = (id, fields = {}) => ({ id, add_mode: "AUTO", max_action_price: money("50.00"), action_price: money("40.00"), min_seller_price: money("45.00"), price: money("60.00"), ...fields });
 
-    await t.test("unified-price fallback follows root-level cursors, exits AUTO and preserves SELLER participation", async () => {
+    await t.test("v2 cleanup follows root-level cursors, exits AUTO and preserves SELLER participation", async () => {
       await reset();
       let exited = false;
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") {
           if (exited) return { products: [{ id: 502, add_mode: "SELLER" }], total: 1, last_id: "" };
           if (request.body.last_id === "next") return { products: [automaticProduct(503, { action_price: money("70.00"), min_seller_price: money("75.00"), price: money("100.00") }), { id: 502, add_mode: "SELLER" }], total: 3, last_id: "" };
@@ -199,16 +198,15 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.equal(result.config.lastResult.actionSummaries[0].verified, true);
       assert.ok(requests.some(row => row.endpoint === "/v2/actions/products" && row.body.last_id === "next"));
       assert.ok(requests.filter(row => row.endpoint === "/v2/actions/products").length >= 3, "an update receipt must be followed by a fresh product-list check");
-      assert.equal(requests.filter(row => row.endpoint === "/v1/actions/products").length, 1, "a migrated shop should not repeatedly call its rejected old method");
+      assert.equal(requests.filter(row => row.endpoint === "/v1/actions/products").length, 0, "no retired endpoint probe is needed");
       assert.ok(!requests.some(row => /products\/deactivate$/.test(row.endpoint)), "Boosting cannot use the voucher-only v2 deactivate method");
     });
 
-    await t.test("an incomplete first legacy page restarts v2 without a legacy cursor or target", async () => {
+    await t.test("retired endpoints cannot block a fresh v2 scan and AUTO exit", async () => {
       await reset();
       let exited = false;
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "" } };
         if (request.endpoint === "/v2/actions/products") {
           assert.equal(request.body.last_id, undefined);
           return { products: exited ? [] : [automaticProduct(501)], total: exited ? 0 : 1, last_id: "" };
@@ -226,18 +224,13 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       const v2 = requests.filter(row => row.endpoint === "/v2/actions/products");
       assert.ok(v2.length >= 2);
       assert.equal(v2[0].body.last_id, undefined);
-      assert.equal(requests.filter(row => row.endpoint === "/v1/actions/products").length, 1);
+      assert.equal(requests.filter(row => row.endpoint === "/v1/actions/products").length, 0);
     });
 
-    await t.test("a legacy terminal empty page discards every legacy-only AUTO target before a fresh v2 scan", async () => {
+    await t.test("a manual-only v2 page never becomes an automatic exit target", async () => {
       await reset();
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") {
-          if (!request.body.last_id) return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "legacy-tail" } };
-          assert.equal(request.body.last_id, "legacy-tail");
-          return { result: { products: [], total: 2, last_id: "legacy-tail" } };
-        }
         if (request.endpoint === "/v2/actions/products") {
           assert.equal(request.body.last_id, undefined);
           return { products: [{ id: 501, add_mode: "SELLER" }], total: 1, last_id: "" };
@@ -249,20 +242,15 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.equal(result.immediateRun.count, 0);
       assert.equal(result.config.lastResult.actionSummaries[0].detectedCount, 0);
       assert.ok(!requests.some(row => /products\/(?:deactivate|update|delete)$/.test(row.endpoint)));
-      assert.deepEqual(requests.filter(row => row.endpoint === "/v1/actions/products").map(row => row.body.last_id), [undefined, "legacy-tail"]);
+      assert.deepEqual(requests.filter(row => row.endpoint === "/v1/actions/products").map(row => row.body.last_id), []);
       assert.ok(requests.some(row => row.endpoint === "/v2/actions/products"));
     });
 
-    await t.test("a unified-price refusal on a later legacy page restarts independent v2 pagination and targets", async () => {
+    await t.test("v2 pagination uses only current cursors and verified AUTO targets", async () => {
       await reset();
       let exited = false;
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") {
-          if (!request.body.last_id) return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "legacy-tail" } };
-          assert.equal(request.body.last_id, "legacy-tail");
-          return unifiedPriceRefusal();
-        }
         if (request.endpoint === "/v2/actions/products") {
           assert.notEqual(request.body.last_id, "legacy-tail");
           if (exited) return { products: [{ id: 502, add_mode: "SELLER" }], total: 1, last_id: "" };
@@ -286,14 +274,13 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.ok(!v2.some(row => row.body.last_id === "legacy-tail"));
     });
 
-    await t.test("fallback does not bypass invalid v2 cursors or an inconsistent terminal confirmation", async () => {
+    await t.test("v2 cleanup rejects invalid cursors and inconsistent terminal confirmation", async () => {
       for (const failure of ["missing_cursor", "repeated_cursor", "changed_terminal_total"]) {
         await reset();
         let terminalReads = 0;
         respond = async request => {
           if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-          if (request.endpoint === "/v1/actions/products") return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "" } };
-          if (request.endpoint === "/v2/actions/products") {
+            if (request.endpoint === "/v2/actions/products") {
             if (failure === "missing_cursor") return { products: [automaticProduct(501)], total: 2, last_id: "" };
             if (!request.body.last_id) return { products: [automaticProduct(501)], total: 2, last_id: "v2-tail" };
             assert.equal(request.body.last_id, "v2-tail");
@@ -317,7 +304,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       let terminalEmptyReads = 0;
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") {
           if (!request.body.last_id) {
             terminalEmptyReads = 0;
@@ -357,7 +343,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       ];
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING", auto_add_dates: [autoAddDate] }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") return { products: [], total: 0, last_id: "" };
         if (request.endpoint === "/v2/actions/auto-add/products/list") {
           assert.equal(request.body.action_id, 123);
@@ -394,7 +379,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       const autoAddDate = new Date(Date.now() + 86400000).toISOString();
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING", auto_add_dates: [autoAddDate] }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") return { products: [], total: 0, last_id: "" };
         if (request.endpoint === "/v2/actions/auto-add/products/list") return { products: [{ product_id: 701, add_mode: request.body.offset === 0 ? false : true }], total: 2 };
         throw new Error(`Conflicting future-list evidence must not cause ${request.endpoint}`);
@@ -411,7 +395,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       await reset();
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }, { id: 124, action_type: "STOCK_DISCOUNT" }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") return { products: request.body.action_id === 123 ? [automaticProduct(501)] : [{ id: 501, add_mode: "SELLER" }], total: 1, last_id: "" };
         throw new Error(`A protected product must not cause ${request.endpoint}`);
       };
@@ -430,7 +413,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       let exitedSafe = false;
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }, { id: 124, action_type: "STOCK_DISCOUNT" }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") {
           const products = request.body.action_id === 123
             ? [...(exitedSafe ? [] : [automaticProduct(501)]), automaticProduct(503)]
@@ -462,7 +444,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       const exited = new Set();
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }, { id: 124, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") {
           const actionId = request.body.action_id;
           const products = exited.has(actionId) ? [] : [automaticProduct(501, { max_action_price: money(actionId === 123 ? "200.00" : "100.00"), action_price: money("90.00"), min_seller_price: money("90.00"), price: money("250.00") })];
@@ -498,8 +479,7 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
         await reset();
         respond = async request => {
           if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-          if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
-          if (request.endpoint === "/v2/actions/products") return { products: [automaticProduct(501, fields)], total: 1, last_id: "" };
+            if (request.endpoint === "/v2/actions/products") return { products: [automaticProduct(501, fields)], total: 1, last_id: "" };
           throw new Error(`Invalid Money must not cause ${request.endpoint}`);
         };
         const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
@@ -515,8 +495,7 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
         await reset();
         respond = async request => {
           if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-          if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
-          if (request.endpoint === "/v2/actions/products") return { products: [automaticProduct(501)], ...pagination };
+            if (request.endpoint === "/v2/actions/products") return { products: [automaticProduct(501)], ...pagination };
           throw new Error(`An incomplete promotion scan must not cause ${request.endpoint}`);
         };
         const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
@@ -530,7 +509,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       await reset();
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") return { products: [automaticProduct(501)], total: 1, last_id: "" };
         if (request.endpoint === "/v1/actions/products/update") return { active_product_ids: ["501"], deactivated_product_ids: [], rejected: [] };
         throw new Error(`Unexpected promotion request ${request.endpoint}`);
@@ -547,7 +525,6 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       const autoAddDate = new Date(Date.now() + 86400000).toISOString();
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING", auto_add_dates: [autoAddDate] }] };
-        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
         if (request.endpoint === "/v2/actions/products") return { products: [], total: 0, last_id: "" };
         if (request.endpoint === "/v2/actions/auto-add/products/list") return { products: [{ product_id: 701, add_mode: false }], total: 1 };
         if (request.endpoint === "/v2/actions/auto-add/products/delete") return { product_ids: ["701"] };

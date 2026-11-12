@@ -295,7 +295,7 @@ export async function addOzonActionProductsMysql(body = {}, options = {}) {
   let joined = [], verificationError = "";
   if (preflight.products.length) {
     try {
-      const verification = await fetchAllJoinedActionProductIds({ ...shop, promotionApiMode: "unified" }, payload.action_id, options.signal);
+      const verification = await fetchAllJoinedActionProductIds(shop, payload.action_id, options.signal);
       if (verification.paginationWarning) throw new Error(verification.paginationWarning);
       joined = verification.joinedProducts;
     } catch (error) { verificationError = error; }
@@ -326,7 +326,6 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
   const catalog = await fetchCurrentOfficialActionSummaries(shop, options.signal);
   const action = catalog.find(item => item.actionId === actionId);
   if (!action) throw statusError("该活动已不在本店可操作活动列表，请刷新活动后重试", 404);
-  shop.promotionApiMode = "unified";
   const scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
   const byId = new Map(scan.joinedProducts.map(row => [Number(row.product_id ?? row.id), row]));
   const reasons = new Map();
@@ -790,18 +789,8 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
       limit: ACTION_PRODUCTS_PAGE_LIMIT
     };
     if (lastId) payload.last_id = String(lastId);
-    let response;
-    if (shop.promotionApiMode === "unified") response = await ozonRequest("/v2/actions/products", { payload, shop, signal });
-    else {
-      try { response = await ozonRequest("/v1/actions/products", { payload, shop, signal }); }
-      catch (error) {
-        if (!isUnifiedPriceError(error)) throw error;
-        shop.promotionApiMode = "unified";
-        return fetchAllJoinedActionProductIds(shop, actionId, signal);
-      }
-    }
-    const result = shop.promotionApiMode === "unified" ? response : response?.result;
-    if (shop.promotionApiMode === "unified" && (result?.total === undefined || result.total === null || result.total === "" || !Number.isSafeInteger(Number(result.total)) || Number(result.total) < 0)) {
+    const result = await ozonRequest("/v2/actions/products", { payload, shop, signal });
+    if (result?.total === undefined || result.total === null || result.total === "" || !Number.isSafeInteger(Number(result.total)) || Number(result.total) < 0) {
       throw statusError(`活动 ${actionId} 商品分页数量异常，已停止以避免漏删`, 502);
     }
     if (!Array.isArray(result?.products)) throw statusError(`活动 ${actionId} 商品响应缺少有效商品列表，已停止以避免误报清理成功`, 502);
@@ -819,13 +808,6 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
     }
     const nextCursor = String(result.last_id ?? "").trim();
     if ((!rows.length || !nextCursor) && Number(result.total) > scannedCount) {
-      if (shop.promotionApiMode !== "unified") {
-        // Legacy reads can remain available after legacy removals are blocked.
-        // Restart v2 from page one; its cursor and product evidence cannot be
-        // mixed with anything collected from the legacy traversal.
-        shop.promotionApiMode = "unified";
-        return fetchAllJoinedActionProductIds(shop, actionId, signal);
-      }
       // Ozon v2 can report a larger total than its cursor can enumerate. Only
       // accept an explicit, stable terminal cursor after re-reading that exact
       // empty page. A missing cursor or a first empty page is still incomplete.
@@ -850,7 +832,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
         reportedTotal: Number(result.total),
         totalMismatch,
         paginationWarning: totalMismatch ? `Ozon 统计 ${Number(result.total)} 件、游标实际返回 ${scannedCount} 件；已再次读取同一空页确认分页终点` : "",
-        apiVersion: shop.promotionApiMode === "unified" ? "v2" : "v1"
+        apiVersion: "v2"
       };
     }
     if (seenCursors.has(nextCursor)) {
@@ -861,10 +843,6 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
     await sleep(180);
   }
   throw statusError(`活动 ${actionId} 商品分页超过 ${ACTION_PRODUCTS_MAX_PAGES} 页，已停止以避免漏删`, 502);
-}
-
-function isUnifiedPriceError(error) {
-  return /unified price logic|switch to the new methods/i.test(String(error?.message || ""));
 }
 
 async function officialProductPage(shop, endpoint, payload, signal) {
@@ -893,7 +871,7 @@ async function fetchSelectedEnrollmentProducts(shop, actionId, productIds, signa
     const nextCursor = String(data.last_id ?? "").trim();
     if (!data.products.length || !nextCursor) {
       if (Number(data.total) > scannedCount) throw statusError("Ozon 活动候选商品分页提前结束，请重新拉取后再报名", 502);
-      const joined = await fetchAllJoinedActionProductIds({ ...shop, promotionApiMode: "unified" }, actionId, signal);
+      const joined = await fetchAllJoinedActionProductIds(shop, actionId, signal);
       for (const row of joined.joinedProducts) {
         const id = Number(row.product_id ?? row.id);
         if (selected.has(id) && !found.has(id)) found.set(id, row);
@@ -953,18 +931,13 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal, 
       let batch = remainingIds.slice(index, index + ACTION_DELETE_BATCH_LIMIT);
       if (!batch.length) continue;
       await assertCleanupStillEnabled(shop);
-      if (shop.promotionApiMode !== "unified") {
-        try {
-          await ozonRequest("/v1/actions/products/deactivate", { payload: { action_id: Number(actionId), product_ids: batch }, shop, signal });
-        } catch (error) {
-          if (!isUnifiedPriceError(error)) throw error;
-          // A rollout between scan and delete requires a fresh complete scan;
-          // do not change a price using incomplete legacy price/identity data.
-          throw statusError("Ozon 已切换新版活动规则，请重新扫描后执行退出", 409);
-        }
-      } else if (action.isVoucher) {
+      if (action.isVoucher) {
         const result = await ozonRequest("/v2/actions/products/deactivate", { payload: { action_id: Number(actionId), product_ids: batch.map(String) }, shop, signal });
         if (!Array.isArray(result.product_ids)) throw statusError("Ozon 退出活动回执格式异常，请重新扫描核对", 502);
+        const confirmedIds = new Set(result.product_ids.map(String));
+        if (result.product_ids.length !== batch.length || confirmedIds.size !== batch.length || batch.some(id => !confirmedIds.has(String(id)))) {
+          throw statusError("Ozon 未确认全部商品已退出，已停止并等待重新扫描核对", 502);
+        }
       } else {
         if (!["ELASTIC_BOOSTING", "STOCK_DISCOUNT"].includes(action.actionType)) throw statusError("该活动类型不支持安全自动退出，请在 Ozon 后台核对", 409);
         const refreshed = await refreshBeforePriceWrite();
@@ -1234,7 +1207,7 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
           continue;
         }
         const action = currentActions.find(item => item.actionId === actionId) || current.knownActions.find(item => item.actionId === actionId) || {};
-        if (shop.promotionApiMode === "unified" && !action.isVoucher && (actionListSync.error || [...scanErrors.values()].some(error => !isOzonActionNotFoundError(error)))) {
+        if (!action.isVoucher && (actionListSync.error || [...scanErrors.values()].some(error => !isOzonActionNotFoundError(error)))) {
           throw statusError("尚未完整核实本店所有手动活动，已停止统一限价退出，避免影响手动报名", 409);
         }
         const deletion = await deleteOfficialActionProducts(shop, actionId, productIds, options.signal, { action, scan, manualProductIds, refreshBeforePriceWrite, writtenPrices });
