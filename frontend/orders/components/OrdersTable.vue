@@ -1,4 +1,5 @@
 ﻿<script setup>
+import MarketplaceBadge from "../../admin/components/MarketplaceBadge.vue";
 import { computed, defineAsyncComponent, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
@@ -406,6 +407,7 @@ function canEditCollaborationNote(row) {
       <el-table-column label="订单信息" min-width="180" fixed="left">
         <template #default="{ row }">
           <div class="orders-cell-stack">
+            <MarketplaceBadge platform="ozon" />
             <div class="orders-cell-title orders-posting-emphasis orders-order-title">
               <a
                 v-if="resolveOzonPostingLink(row)"

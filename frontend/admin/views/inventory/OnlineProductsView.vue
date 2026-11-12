@@ -1,4 +1,5 @@
 ﻿<script setup>
+import MarketplaceBadge from "../../components/MarketplaceBadge.vue";
 import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -966,6 +967,7 @@ onDeactivated(() => {
           <el-table-column label="店铺 / 状态" min-width="160" fixed="left">
             <template #default="{ row }">
               <div class="cell-stack">
+                <MarketplaceBadge platform="ozon" />
                 <strong>{{ row.shop_name || "-" }}</strong>
                 <el-tag :type="onlineStatusType(row)">{{ onlineStatusLabel(row) }}</el-tag>
               </div>
