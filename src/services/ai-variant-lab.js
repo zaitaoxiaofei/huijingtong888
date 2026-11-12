@@ -1,4 +1,4 @@
-import { variantVehicleIdentity, variantCopyContainsIdentity } from '../shared/variant-copy-identity.js';
+import { variantVehicleIdentity, variantCopyContainsIdentity, variantForeignBrands, variantSharedSourceBrand, variantVehicleReferences, variantUnrelatedCopy } from '../shared/variant-copy-identity.js';
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -3265,9 +3265,10 @@ function enforceCopyItemProductFacts(item, target, analysis = {}, fallback = {})
 function isCopyTextAlignedWithProductFacts(text, target, analysis = {}, fallback = {}, options = {}) {
   const value = cleanText(text);
   if (!value || value.length < Number(options.minLength || 1)) return false;
+  if (variantUnrelatedCopy(value,[analysis.product_type,analysis.product_subject_ru,fallback.sourceTitle].filter(Boolean).join(" "))) return false;
   if (!isBuyerFacingCopyText(value)) return false;
   if (containsChinese(value)) return false;
-  if (hasVariantSourceLeak(value, target, analysis, fallback)) return false;
+  if (hasVariantSourceLeak(value, target, analysis, fallback) || variantForeignBrands(value,target).length) return false;
   if (target && !(options.tags ? variantVehicleIdentity(target).split(/\s+/u).every(part => variantCopyContainsIdentity(value, part)) : variantCopyContainsIdentity(value, target))) return false;
   if (hasForbiddenCategoryLeak(value, analysis)) return false;
   const subjectTerms = productSubjectSearchTerms(analysis, fallback);
@@ -3282,7 +3283,7 @@ function normalizeOzonVariantTags(value, target, analysis = {}, fallback = {}) {
     .map((tag) => normalizeOzonVariantTag(tag))
     .filter((tag) => tag && !containsChinese(tag))
     .filter((tag) => isBuyerFacingCopyText(tag))
-    .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback))
+    .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback) && !variantForeignBrands(tag,target).length && !variantUnrelatedCopy(tag,[analysis.product_type,analysis.product_subject_ru,fallback.sourceTitle].filter(Boolean).join(" ")))
     .filter((tag) => !hasForbiddenCategoryLeak(tag, analysis));
   // Preserve target-model tags before generic AI tags are capped at 25.
   const merged = uniqueStrings([...buildOzonVariantTags(target, analysis, fallback), ...normalized]);
@@ -3298,13 +3299,13 @@ function hasTargetVariantTag(tags, target) {
 
 function normalizeOzonVariantTitle(value, target, analysis = {}, fallback = {}) {
   const text = cleanText(value);
-  if (text && variantCopyContainsIdentity(text, target) && isBuyerFacingCopyText(text) && !containsChinese(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !hasForbiddenCategoryLeak(text, analysis)) return text;
+  if (text && variantCopyContainsIdentity(text, target) && isBuyerFacingCopyText(text) && !containsChinese(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !variantForeignBrands(text,target).length && !hasForbiddenCategoryLeak(text, analysis)) return text;
   return buildOzonVariantTitle(target, analysis, fallback);
 }
 
 export function buildOzonVariantTitle(target, analysis = {}, fallback = {}) {
   const sourceBasedTitle = buildVariantTitleFromSource(fallback.sourceTitle, fallback.sourceVariantValue || analysis.source_variant_value, target);
-  if (sourceBasedTitle) return sourceBasedTitle;
+  if (sourceBasedTitle && !variantForeignBrands(sourceBasedTitle,target).length && !hasVariantSourceLeak(sourceBasedTitle,target,analysis,fallback)) return sourceBasedTitle;
   const dna = buildCopyProductDna(analysis, fallback);
   const subject = dna.subject;
   const quantity = productQuantityRu(analysis);
@@ -3376,7 +3377,7 @@ function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
     ...(toArray(fallback.extraTags).length ? toArray(fallback.extraTags) : [])
   ];
   return uniqueStrings(candidates.map((tag) => normalizeOzonVariantTag(tag)).filter(Boolean))
-    .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback))
+    .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback) && !variantForeignBrands(tag,target).length && !variantUnrelatedCopy(tag,[analysis.product_type,analysis.product_subject_ru,fallback.sourceTitle].filter(Boolean).join(" ")))
     .filter((tag) => !hasForbiddenCategoryLeak(tag, analysis))
     .slice(0, 25);
 }
@@ -3546,7 +3547,7 @@ function buildLegacyOzonVariantDescription(target, analysis = {}, fallback = {})
 function isValidOzonVariantDescription(text, target, analysis = {}, fallback = {}) {
   if (!text || containsChinese(text)) return false;
   if (text.length < 350 || text.length > 500) return false;
-  return isBuyerFacingCopyText(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !hasForbiddenCategoryLeak(text, analysis);
+  return isBuyerFacingCopyText(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !variantForeignBrands(text,target).length && !hasForbiddenCategoryLeak(text, analysis);
 }
 
 function hasVariantSourceLeak(text, target, analysis = {}, fallback = {}) {
@@ -3565,7 +3566,8 @@ function hasVariantSourceLeak(text, target, analysis = {}, fallback = {}) {
     fallback.sourceVariantValue,
     analysis.source_variant_value,
     analysis.sourceVehicleModel,
-    analysis.source_vehicle_model
+    analysis.source_vehicle_model,
+    ...variantVehicleReferences(fallback.sourceTitle)
   ].map(variantVehicleIdentity));
   const explicitSourceKeys = new Set(explicitSourceRefs.map((item) => item.toLowerCase()));
   const unchangedSource = explicitSourceRefs.find((ref) => identityKey(ref) === identityKey(targetText) && /[\s_]/.test(ref)) || "";
@@ -3574,7 +3576,7 @@ function hasVariantSourceLeak(text, target, analysis = {}, fallback = {}) {
     ...toArray(analysis.changeable_facts),
     ...sourceAliases
   ].map(cleanText))
-    .filter((ref) => ref && identityKey(ref) !== identityKey(targetText))
+    .filter((ref) => ref && identityKey(ref) !== identityKey(targetText) && !variantSharedSourceBrand(ref,targetText))
     .filter((ref) => !unchangedSource || !containsExactVehicleModel(unchangedSource.replace(/_/g, " "), ref.replace(/_/g, " ")))
     .filter((ref) => explicitSourceKeys.has(ref.toLowerCase()) || sourceAliasKeys.has(ref.toLowerCase()) || isVariantSourceReference(ref, analysis, fallback));
   const lower = withoutTargetVehicleReference(text, targetText).toLowerCase();
@@ -3656,9 +3658,10 @@ function hasForbiddenCategoryLeak(text = "", analysis = {}) {
 function productSubjectRu(analysis = {}, fallback = {}) {
   const subject = confirmedFactText(analysis.product_fact_contract?.product_subject_ru || analysis.product_subject_ru || fallback.productSubjectRu || "");
   const sourceModel = cleanText(fallback.sourceVariantValue || analysis.source_variant_value || analysis.sourceVehicleModel || analysis.source_vehicle_model || "");
-  const normalizedSubject = removeSourceModelFromProductSubject(subject, sourceModel);
+  const withoutSource = removeSourceModelFromProductSubject(subject, sourceModel);
+  const normalizedSubject = variantForeignBrands(withoutSource, "").length ? "" : withoutSource;
   if (normalizedSubject && !containsChinese(normalizedSubject) && !hasForbiddenCategoryLeak(normalizedSubject, analysis)) return sentenceStart(normalizedSubject);
-  const type = cleanText(analysis.product_type || fallback.productType || "");
+  const type = cleanText([analysis.product_type || fallback.productType || "", subject].join(" "));
   if (isSillPlateProduct(analysis, fallback)) return "Защитные накладки на пороги автомобиля";
   if (/钥匙|ключ|брелок|key.?case/i.test(type)) return "Чехол для автомобильного ключа";
   if (/扶手|подлокотник/i.test(type)) return "Органайзер в подлокотник";
@@ -3760,7 +3763,7 @@ function isAffirmedSillPlateFact(value = "") {
 
 function normalizeOzonVariantRichContent(value, target, analysis = {}, fallback = {}) {
   const text = cleanText(value);
-  if (text && !containsChinese(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !hasForbiddenCategoryLeak(text, analysis)) return text;
+  if (text && !containsChinese(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !variantForeignBrands(text,target).length && !hasForbiddenCategoryLeak(text, analysis)) return text;
   return buildOzonVariantRichContent(target, analysis, fallback);
 }
 

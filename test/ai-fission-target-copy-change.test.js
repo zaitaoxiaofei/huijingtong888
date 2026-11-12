@@ -1,4 +1,4 @@
-import {variantVehicleIdentity} from '../src/shared/variant-copy-identity.js';
+import {variantVehicleIdentity, variantForeignBrands, variantSharedSourceBrand, variantVehicleReferences, variantUnrelatedCopy} from '../src/shared/variant-copy-identity.js';
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -12,7 +12,7 @@ const functions = parse(script, { ecmaVersion: "latest", sourceType: "module" })
     && node.declarations.some(item => /^(UNKNOWN_FACT_RE|INTERNAL_COPY_LEAK_RE|DESCRIPTION_MIN_LENGTH|DESCRIPTION_MAX_LENGTH)$/.test(item.id.name))))
   .map(node => script.slice(node.start, node.end)).join("\n");
 function fixture() {
-  const context = vm.createContext({ variantVehicleIdentity, material: { sourceTitle: "Накладки HAVAL H3", sourceDescription: "", sourceTags: "#HAVAL_H3 #HAVALH3",
+  const context = vm.createContext({ variantUnrelatedCopy, variantVehicleReferences, variantForeignBrands, variantSharedSourceBrand, variantVehicleIdentity, material: { sourceTitle: "Накладки HAVAL H3", sourceDescription: "", sourceTags: "#HAVAL_H3 #HAVALH3",
     sourceVariantValue: "HAVAL H3", productName: "Накладки", targetInput: "HAVAL H9" }, sourceModel: { value: "HAVAL H3" }, state: { analysis: null } });
   vm.runInContext(functions, context);
   return context;

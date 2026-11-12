@@ -29,3 +29,12 @@ test('server rejects contaminated saved copy but allows same-source targets and 
 test('long target names may use separate complete brand/model tags without truncating identity',()=>{
  assert.doesNotThrow(()=>assertVariantCopyIdentity({title:'Чехол MERCEDES-BENZ CLA C117',description:'Чехол MERCEDES-BENZ CLA C117',tags:['#MERCEDES_BENZ','#CLA_C117']},{source:'Volkswagen Jetta',target:'MERCEDES-BENZ CLA C117'}));
 });
+test('foreign maker contamination is rejected even when the recorded source maker is different',()=>{
+ assert.throws(()=>assertVariantCopyIdentity({title:'Чехол MERCEDES-BENZ GLC',description:'Чехол Volkswagen Jetta для MERCEDES-BENZ GLC',tags:['#MERCEDES_BENZ','#GLC']},{source:'MERCEDES-BENZ W176，3 кнопки',target:'MERCEDES-BENZ GLC'}),{status:422});
+ assert.doesNotThrow(()=>assertVariantCopyIdentity({title:'Чехол VOLKSWAGEN Golf',description:'Чехол VOLKSWAGEN Golf',tags:['#VOLKSWAGEN_Golf','#для_VOLKSWAGEN']},{source:'VOLKSWAGEN',target:'VOLKSWAGEN Golf'}));
+});
+test('mother title model references are checked when recognition used a different chassis alias',()=>{
+ assert.throws(()=>assertVariantCopyIdentity({title:'Чехол MERCEDES-BENZ GLC',description:'Чехол MERCEDES-BENZ CLA C117 для MERCEDES-BENZ GLC',tags:['#MERCEDES_BENZ','#GLC']},{source:'MERCEDES-BENZ W176',sourceTitle:'Чехол для ключа Mercedes-Benz CLA C117, 3 кнопки',target:'MERCEDES-BENZ GLC'}),{status:422});
+ const [result]=normalizeBatchItems([{target_variant_value:'MERCEDES-BENZ GLC',title_ru:'Чехол MERCEDES-BENZ CLA C117 для MERCEDES-BENZ GLC'}],{product_type:'钥匙壳',product_subject_ru:'Чехол для ключа Volkswagen Jetta',source_variant_value:'MERCEDES-BENZ W176'},{sourceVariantValue:'MERCEDES-BENZ W176',sourceTitle:'Чехол Mercedes-Benz CLA C117',targets:['MERCEDES-BENZ GLC']});
+ assert.doesNotMatch(result.title_ru,/CLA|Jetta/i);assert.match(result.title_ru,/GLC/);
+});

@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { variantVehicleIdentity } from "../../../../src/shared/variant-copy-identity.js";
+import { variantVehicleIdentity, variantForeignBrands, variantSharedSourceBrand, variantVehicleReferences } from "../../../../src/shared/variant-copy-identity.js";
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -92,6 +92,8 @@ const material = reactive({
   richContentJson: "",
   templatePayload: null,
   sourceDraftId: "",
+  sourceVariantKey: "",
+  sourceVariantIndex: -1,
   sourceShopIds: [],
   includeDetailImages: false,
   sourceVariantValue: "",
@@ -463,6 +465,8 @@ function applyImportedMaterial(row) {
   material.templatePayload = row.templatePayload || null;
   material.sourceDraftId = row.source === "draft" ? String(row.sourceDraftId || row.sourceId || "").trim() : "";
   material.sourceShopIds = normalizeShopIds(row.sourceShopIds || []);
+  material.sourceVariantKey = String(row.sourceVariantKey || "");
+  material.sourceVariantIndex = Number.isInteger(row.sourceVariantIndex) ? row.sourceVariantIndex : -1;
   if (row.sourceVariantValue) material.sourceVariantValue = row.sourceVariantValue;
   resetPlanState();
 }
@@ -817,6 +821,8 @@ function workbenchSnapshot() {
       richContentJson: material.richContentJson,
       templatePayload: material.templatePayload,
       sourceDraftId: material.sourceDraftId,
+      sourceVariantKey: material.sourceVariantKey,
+      sourceVariantIndex: material.sourceVariantIndex,
       sourceShopIds: material.sourceShopIds,
       includeDetailImages: material.includeDetailImages,
       sourceVariantValue: material.sourceVariantValue,
@@ -990,6 +996,8 @@ async function importCaseForQuickVariant(caseRow = {}, targets = [], options = {
 
   resetPlanState();
   material.sourceType = "case";
+  material.sourceVariantKey = "";
+  material.sourceVariantIndex = -1;
   material.productName = caseRow.product_subject_name || productFacts.product_subject_name || productFacts.product_type || caseRow.case_name || "案例模板商品";
   material.sourceSku = caseRow.case_no || "";
   material.sourceTitle = material.productName;
@@ -1550,7 +1558,7 @@ async function restoreHistoryJob(job) {
     const detail = await apiClient.get(`/api/ai-variant-lab/batch-jobs/${encodeURIComponent(jobNo)}?full=1`, { noCache: true });
     const snapshot = detail.job?.request_json?.workbench_snapshot || {};
     const savedMaterial = snapshot.material || {};
-    if (Object.keys(savedMaterial).length) Object.assign(material, savedMaterial);
+    if (Object.keys(savedMaterial).length) Object.assign(material, {sourceVariantKey:"",sourceVariantIndex:-1}, savedMaterial);
     else {
       const restoredSource = await restoreLegacyHistorySource(detail.job);
       if (!restoredSource) {
@@ -1964,6 +1972,8 @@ function buildListingDraftPayload(row) {
     template_id: material.templateId,
     template_payload: material.sourceDraftId ? null : material.templatePayload || null,
     source_draft_id: material.sourceDraftId || "",
+    source_variant_key: material.sourceVariantKey || "",
+    source_variant_index: material.sourceVariantIndex,
     shop_ids: normalizeShopIds(material.sourceShopIds || []),
     product_name: title,
     offer_id: offerId,
@@ -2325,9 +2335,10 @@ function containsChinese(value) {
 
 function hasSourceModelLeak(text, target, row = null) {
   const targetValue = String(target || "").trim().toLowerCase();
-  const candidates = uniqueList([sourceModel.value, material.sourceVariantValue, ...sourceTitleVehicleAliases(material.sourceTitle, sourceModel.value || material.sourceVariantValue), ...(row?.raw?.case_template?.stale_values || []), ...parseTargets(material.targetInput)])
+  if (variantForeignBrands(text,target).length) return true;
+  const candidates = uniqueList([sourceModel.value, material.sourceVariantValue, ...variantVehicleReferences(material.sourceTitle), ...sourceTitleVehicleAliases(material.sourceTitle, sourceModel.value || material.sourceVariantValue), ...(row?.raw?.case_template?.stale_values || []), ...parseTargets(material.targetInput)])
     .map(variantVehicleIdentity)
-    .filter((item) => item && item.toLowerCase() !== targetValue);
+    .filter((item) => item && item.toLowerCase() !== targetValue && !variantSharedSourceBrand(item,targetValue));
   return candidates.some((item) => item.length >= 3 && containsExactModelText(text, item));
 }
 

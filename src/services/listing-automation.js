@@ -13343,6 +13343,7 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
     const copyJob = copyJobNo ? await row('SELECT source_variant_value FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1', [tenantId, copyJobNo]) : null;
     assertVariantCopyIdentity({title:patch.title, description:patch.description, tags:normalizeCleanOzonTagList(patch.tags || patch.hashtags)}, {
       source:copyJob?.source_variant_value || facts.source_variant_value,
+      sourceTitle:sourceDraftMediaRow?.product_name || facts.source_product_title,
       target:facts.target_variant_value || body.ai_optimization?.target_variant_value || body.aiOptimization?.target_variant_value
     });
   }
@@ -13788,6 +13789,10 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
     next.offerId = offerId;
   }
   next.attributes = syncAiVariantTextAttributes(next.attributes || [], { title, description, tags, richContentJson });
+  if (Array.isArray(next.category_attributes)) next.category_attributes = syncAiVariantTextAttributes(next.category_attributes, {title, description, tags, richContentJson});
+  const rootDynamic = {...objectValue(next.dynamicAttributes), ...objectValue(next.dynamic_attributes)};
+  if (description && Object.entries(rootDynamic).some(([key,value])=>Number(value?.attribute_id||value?.id||key)===4191)) next=syncAiVariantVariantDescription(next,description);
+  if (tags.length && Object.entries(rootDynamic).some(([key,value])=>Number(value?.attribute_id||value?.id||key)===23171)) next=syncAiVariantVariantTags(next,tags);
   next.logistics = {
     ...(next.logistics || {}),
     ...(tags.length ? { tags } : {})
@@ -13824,6 +13829,7 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
       delete nextVariant.video_cover_urls;
       delete nextVariant.videoCoverUrls;
     }
+    if (Array.isArray(nextVariant.category_attributes)) nextVariant.category_attributes=syncAiVariantTextAttributes(nextVariant.category_attributes,{title,description,tags,richContentJson});
     nextVariant = syncAiVariantVariantTitle(nextVariant, title);
     nextVariant = syncAiVariantVariantTags(nextVariant, tags);
     return syncAiVariantVariantDescription(nextVariant, description);

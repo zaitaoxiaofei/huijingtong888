@@ -1,4 +1,5 @@
 import test from 'node:test';
+import {restoreReviewedSingleFissionVariant} from '../src/shared/reviewed-single-fission-variant.js';
 import assert from 'node:assert/strict';
 import {reviewedCopyHash} from '../scripts/lib/reviewed-ai-fission-copy.mjs';
 import {inspectReviewedVariantCompatibility,applyReviewedVariantCompatibility} from '../scripts/lib/reviewed-variant-compatibility.mjs';
@@ -35,4 +36,16 @@ test('stale rows, changed prices and forged dictionary selections fail before wr
 });
 test('backup failure prevents any compatibility write',async()=>{
  const f=fixture();await assert.rejects(applyReviewedVariantCompatibility(f.db,f.manifest,'/private/backups',{backup:async()=>{throw Error('backup unavailable');}}));assert.equal(f.writes,0);
+});
+
+test('reviewed single-product compatibility plan reconstructs current media and rejects forged source price',async()=>{
+ const f=fixture(),entry=f.manifest.entries[0];
+ f.row.internal_code='AI-GOLF';f.row.source_images_json=JSON.stringify(['current.png']);
+ for(const column of ['template_payload_json','manual_facts_json']){const value=JSON.parse(f.row[column]);value.price={value:361,old_price:1379,currency_code:'CNY'};value.variants=[{sku:'old1',offer_id:'old1',price:1},{sku:'old2',offer_id:'old2'}];f.row[column]=JSON.stringify(value);}
+ entry.single_variant=true;entry.expected_sha=hash(f.row);
+ for(const column of ['template_payload_json','manual_facts_json']){const corrected=JSON.parse(entry.updates[column]);corrected.price={value:361,old_price:1379,currency_code:'CNY'};entry.updates[column]=JSON.stringify(restoreReviewedSingleFissionVariant(corrected,{offerId:'AI-GOLF',title:f.row.product_name,canonical:corrected,images:['current.png']}));}
+ entry.after_sha=hash({...f.row,...entry.updates});
+ assert.equal((await inspectReviewedVariantCompatibility(f.db,f.manifest)).changed_rows,1);
+ const forged=structuredClone(f.manifest),value=JSON.parse(forged.entries[0].updates.template_payload_json);value.variants[0].price=1;forged.entries[0].updates.template_payload_json=JSON.stringify(value);
+ await assert.rejects(inspectReviewedVariantCompatibility(f.db,forged));assert.equal(f.writes,0);
 });

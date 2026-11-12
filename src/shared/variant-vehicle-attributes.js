@@ -6,13 +6,17 @@ export function retargetVariantVehicleAttributes(payload, vehicle, options = {})
   function attribute(a,id=Number(a?.attribute_id||a?.id)) {
     if(!a||![7204,7212].includes(id))return;
     const value=id===7204?vehicle.vehicle_brand:vehicle.vehicle_model;
+    const previous=[...(Array.isArray(a.values)?a.values:[]),...(Array.isArray(a.selected_values)?a.selected_values:[])];
+    const selected=previous.find(option=>Number(option?.dictionary_value_id||option?.id)>0&&key(option.value)===key(value));
+    const scalarValues=Array.isArray(a.value)?a.value:[a.value];
+    if(selected&&previous.every(option=>key(option.value)===key(value))&&scalarValues.every(text=>!text||key(text)===key(value)||Number(text)===Number(selected.dictionary_value_id||selected.id)))return;
     const match=(options[id]||[]).find(option=>Number(option.dictionary_value_id||option.id)>0&&(key(option.value)===key(value)||key(option.label)===key(value)));
-    const selected=match?[{dictionary_value_id:Number(match.dictionary_value_id||match.id),value:match.value,label:match.label||match.value}]:[];
-    a.value=selected.length?[match.value]:[];
-    a.values=structuredClone(selected);a.selected_values=structuredClone(selected);
-    if(a.selectedValues)a.selectedValues=structuredClone(selected);
+    const replacement=match?[{dictionary_value_id:Number(match.dictionary_value_id||match.id),value:match.value,label:match.label||match.value}]:[];
+    a.value=replacement.length?[match.value]:[];
+    a.values=structuredClone(replacement);a.selected_values=structuredClone(replacement);
+    if(a.selectedValues)a.selectedValues=structuredClone(replacement);
     if(a.raw&&typeof a.raw==='object') {
-      a.raw.value=structuredClone(a.value);a.raw.values=structuredClone(selected);a.raw.selected_values=structuredClone(selected);
+      a.raw.value=structuredClone(a.value);a.raw.values=structuredClone(replacement);a.raw.selected_values=structuredClone(replacement);
     }
   }
   function owner(v){

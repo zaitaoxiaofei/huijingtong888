@@ -1,4 +1,4 @@
-import {variantVehicleIdentity, variantCopyContainsIdentity} from '../src/shared/variant-copy-identity.js';
+import {variantVehicleIdentity, variantCopyContainsIdentity, variantForeignBrands, variantSharedSourceBrand, variantVehicleReferences, variantUnrelatedCopy} from '../src/shared/variant-copy-identity.js';
 ﻿import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,7 +17,7 @@ function read(relativePath) {
 // tenant-ai-material-optimization-mysql.test.js; production never bypasses auth.
 async function aiProductMaterialOptimizerPrepareTemplate(body) {
   const actor = { personId: 7, tenant: { id: 2, slug: "enterprise-2" } };
-  const context = vm.createContext({ variantVehicleIdentity, variantCopyContainsIdentity, console, Buffer, URL, fs, path, crypto: {}, config: {appBaseUrl:"http://localhost:8788"},
+  const context = vm.createContext({ variantUnrelatedCopy, variantVehicleReferences, variantForeignBrands, variantSharedSourceBrand, variantVehicleIdentity, variantCopyContainsIdentity, console, Buffer, URL, fs, path, crypto: {}, config: {appBaseUrl:"http://localhost:8788"},
     needsAiTenantSession: () => false,
     currentAiTenantSession: () => actor,
     assertCurrentAiTenantPermission: async () => actor,

@@ -13,3 +13,7 @@ test('an unavailable target dictionary selection clears stale compatibility inst
  const out=retargetVariantVehicleAttributes({attributes:[attr(7204),attr(7212)]},{vehicle_brand:'VOLKSWAGEN',vehicle_model:'Golf'},{7204:[{dictionary_value_id:1,value:'Tenet'}]});
  for(const a of out.attributes){assert.deepEqual(a.value,[]);assert.deepEqual(a.values,[]);assert.deepEqual(a.selected_values,[]);assert.deepEqual(a.raw.values,[]);}
 });
+test('an existing exact target dictionary selection survives a missing cache without losing its metadata',()=>{
+ const a={attribute_id:7212,value:['Golf'],values:[{dictionary_value_id:55,value:'Golf',label:'高尔夫'}],selected_values:[{dictionary_value_id:55,value:'Golf',label:'高尔夫'}],custom_ui_hint:'keep'};
+ assert.deepEqual(retargetVariantVehicleAttributes({attributes:[a]},{vehicle_brand:'VOLKSWAGEN',vehicle_model:'Golf'}).attributes[0],a);
+});

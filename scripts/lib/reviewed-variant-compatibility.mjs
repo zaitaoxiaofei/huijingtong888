@@ -1,3 +1,4 @@
+import {restoreReviewedSingleFissionVariant} from '../../src/shared/reviewed-single-fission-variant.js';
 import {reviewedCopyHash} from './reviewed-ai-fission-copy.mjs';
 import {writeAiFissionCleanupBackup} from './ai-fission-variant-cleanup.mjs';
 import {retargetVariantVehicleAttributes} from '../../src/shared/variant-vehicle-attributes.js';
@@ -28,13 +29,17 @@ export async function inspectReviewedVariantCompatibility(db,manifest,{lock=fals
   if(!draft||draft.status!=='draft'||String(draft.tenant_id??'admin')!==manifest.tenant_id||!variantCopyContainsIdentity(draft.product_name,entry.target))fail('Reviewed target does not match the draft');
   const savedTarget=JSON.parse(draft.ai_payload_json||'{}').ai_optimization?.target_variant_value;
   if(savedTarget&&variantVehicleIdentity(savedTarget).toLowerCase()!==variantVehicleIdentity(entry.target).toLowerCase())fail('Reviewed target differs from saved target');
-  const template=JSON.parse(draft.template_payload_json),editable=template.editable_payload||template;
+  const template=JSON.parse(draft.template_payload_json||'{}')||{},editable=template.editable_payload||template;
   const options={};
   for(const[id,value]of [[7204,vehicle.vehicle_brand],[7212,vehicle.vehicle_model]])options[id]=await query(db,"SELECT dictionary_value_id, value, display_value_zh AS label FROM ozon_attribute_values WHERE description_category_id = ? AND type_id = ? AND attribute_id = ? AND status = 'active' AND (value = ? OR display_value_zh = ?)",[Number(editable.description_category_id||0),Number(editable.type_id||0),id,value,value]);
   const computed=entry.table==='listing_drafts'?Object.fromEntries(Object.entries(vehicle).filter(([k,v])=>before[k]!==v)):{};
   if(entry.metadata_only && entry.table!=='listing_drafts')fail('Metadata-only mode requires a draft');
   for(const column of entry.metadata_only ? [] : jsonColumns[entry.table]){
-   const old=JSON.parse(before[column]),next=retargetVariantVehicleAttributes(old,vehicle,options);
+   const old=JSON.parse(before[column]);let next=retargetVariantVehicleAttributes(old,vehicle,options);
+   if(entry.single_variant===true&&column!=='attributes_json'){
+     const canonical=retargetVariantVehicleAttributes(editable,vehicle,options);
+     next=restoreReviewedSingleFissionVariant(next,{offerId:draft.internal_code,title:draft.product_name,canonical,images:JSON.parse(draft.source_images_json||'[]')});
+   }
    if(reviewedCopyHash(old)!==reviewedCopyHash(next))computed[column]=JSON.stringify(next);
   }
   if(reviewedCopyHash(normalize(computed))!==reviewedCopyHash(normalize(entry.updates)))fail(`Reviewed updates are not the exact dictionary/identity repair: ${entry.table} #${entry.id}`);
