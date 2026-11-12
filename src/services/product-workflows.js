@@ -11,6 +11,9 @@ import { validateWorkflow, validateWorkflowVariants, buildWorkflowDraft, workflo
 
 import { normalizeWorkflowKeyModel, normalizeWorkflowMaterial } from "../shared/workflow-key-models.js";
 
+// Model words must match business data, never media hosts, hashes or internal IDs.
+const MATERIAL_SEARCH_TEXT=`CONCAT_WS(' ',${['name','label','brand','model','coreName','searchTerms','notes','moldCode','shape','material','category','listingCategory.name','bindings[*].brand','bindings[*].models'].map(key=>`JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.${key}'))`).join(',')})`;
+
 const SCHEMA=`CREATE TABLE IF NOT EXISTS product_workflow_documents (
   id VARCHAR(36) NOT NULL, tenant_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL,
   name VARCHAR(200) NOT NULL, revision INT NOT NULL DEFAULT 1, payload_json LONGTEXT NOT NULL,
@@ -39,7 +42,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
       const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'"];
       const terms=keyword.split(/\s+/).filter(Boolean);if(!terms.length)terms.push('');
-      const params=[tenant];for(const term of terms){filters.push('(name LIKE ? OR payload_json LIKE ?)');params.push(`%${term}%`,`%${term}%`);}
+      const params=[tenant];for(const term of terms){filters.push(`(LOWER(name) LIKE LOWER(?) OR LOWER(${MATERIAL_SEARCH_TEXT}) LIKE LOWER(?))`);params.push(`%${term}%`,`%${term}%`);}
       if(options.reviewStatus&&['pending','verified'].includes(options.reviewStatus)){filters.push("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reviewStatus')), 'verified') = ?");params.push(options.reviewStatus);}
       if(options.role==='compatibility'||kind==='mapping')filters.push("(kind = 'key_model' OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.role')) = 'compatibility')");
       if(options.category){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.listingCategory.key')) = ? OR JSON_EXTRACT(payload_json, '$.listingCategory') IS NULL OR JSON_TYPE(JSON_EXTRACT(payload_json, '$.listingCategory')) = 'NULL')");params.push(String(options.category));}
@@ -80,7 +83,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     }
     if(['key_model','material'].includes(kind)){
       const keyword=String(options.keyword||options.model||'').trim().slice(0,200);
-      const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (name LIKE ? OR payload_json LIKE ?) ORDER BY updated_at DESC LIMIT 500",[tenant,kind,`%${keyword}%`,`%${keyword}%`]);
+      const rows=await query(`SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (LOWER(name) LIKE LOWER(?) OR LOWER(${MATERIAL_SEARCH_TEXT}) LIKE LOWER(?)) ORDER BY updated_at DESC LIMIT 500`,[tenant,kind,`%${keyword}%`,`%${keyword}%`]);
       return decorate(rows.map(map).filter(record=>!record.payload.archived),actor);
     }
     return (await query(`SELECT id, name, revision, kind, updated_at,
