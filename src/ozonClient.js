@@ -2,10 +2,12 @@ import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js
 import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
 import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
 import { fetchOzonDailyAccruals } from "./services/ozon-finance-accrual-client.js";
+import { createOzonFinanceReadQueue } from "./services/ozon-finance-read-queue.js";
 import { normalizeOzonFinanceAccrual } from "./services/ozon-finance-accruals.js";
 import { ozonStockUpdateReceipts } from "./services/ozon-stock-update.js";
 
 const runOzonLabelRequest = createOzonLabelRequestQueue();
+const runOzonFinanceRead = createOzonFinanceReadQueue();
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1171,7 +1173,8 @@ export async function fetchOzonFinanceTransactions(shop, options = {}) {
   const result = await fetchOzonDailyAccruals(shop, {
     from: options.from || normalizeIsoStart(undefined, 30), to: options.to || normalizeIsoEnd(undefined, new Date()),
     signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
-    request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions)
+    request: (path, payload, requestOptions) => runOzonFinanceRead(shop.ozon_client_id, path,
+      () => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions), requestOptions)
   });
   return { ...result, operations: result.accruals };
 }
