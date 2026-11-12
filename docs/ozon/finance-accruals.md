@@ -19,7 +19,7 @@ Verified on 2026-10-26 using read-only responses from the official Seller API. N
 - The old `/v3/finance/transaction/list` path returns HTTP 404 in the current integration. Do not change only its URL: the replacement has a different identity, paging and monetary model.
 - `POST /v1/finance/accrual/types` with `{}` returned `accrual_types: [{id, name, description}]`. Resolve fee semantics through the returned name, never a guessed numeric ID.
 - `POST /v1/finance/accrual/by-day` with `{date: "YYYY-MM-DD", last_id: ""}` returned `{accruals, last_id}`. An explicit empty response `last_id` ended the observed page. Missing cursors, repeated cursors and unsupported response shapes must not be treated as a successfully completed import.
-- `/v1/finance/accrual/postings` returned HTTP 429 in the read-only probe. It was not retried. No complete contract or delivery/acquiring coverage was established for that method.
+- `/v1/finance/accrual/postings` returned HTTP 429 in the original read-only probe. Its formal Swagger contract and a local read-only adapter are now documented in [finance-posting-reconciliation.md](./finance-posting-reconciliation.md); real fee-response acceptance and complete delivery/acquiring coverage remain unverified because bounded probes still receive 429.
 - The confirmed daily response has `accrual_id`, `date`, `total_amount: {amount, currency}`, `unit_number`, `accrued_category`, and optional `posting`, `item_fees`, `non_item_fee`, `container_fees`.
 - `date` supplies day precision. Do not present a database midnight used to represent that day as the exact official event time.
 

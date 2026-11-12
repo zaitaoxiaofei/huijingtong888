@@ -1,4 +1,4 @@
-const READ_PATHS = new Set(['/v1/finance/accrual/types', '/v1/finance/accrual/by-day']);
+const READ_PATHS = new Set(['/v1/finance/accrual/types', '/v1/finance/accrual/by-day', '/v1/finance/accrual/postings']);
 const aborted = signal => signal?.reason || new Error('财务查询已取消');
 function wait(ms, signal) {
   if (signal?.aborted) return Promise.reject(aborted(signal));
@@ -9,13 +9,13 @@ function wait(ms, signal) {
   });
 }
 
-// Process-local pacing for the two verified read-only financial POST methods.
+// Process-local pacing for the verified read-only financial POST methods.
 // This interval is an internal conservative policy, not an Ozon rate-limit claim.
 export function createOzonFinanceReadQueue({ now = Date.now, wait: pause = wait } = {}) {
   const clients = new Map();
   return function run(clientId, path, request, { signal } = {}) {
     if (!String(clientId || '').trim() || !READ_PATHS.has(path)) {
-      return Promise.reject(new Error('财务查询队列仅接受已配置店铺的计提类型和按日账单读取'));
+      return Promise.reject(new Error('财务查询队列仅接受已配置店铺的已适配账单读取'));
     }
     const key = String(clientId).trim();
     const state = clients.get(key) || { tail: Promise.resolve(), nextAt: 0 };

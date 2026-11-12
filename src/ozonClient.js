@@ -2,6 +2,7 @@ import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js
 import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
 import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
 import { fetchOzonDailyAccruals } from "./services/ozon-finance-accrual-client.js";
+import { fetchOzonPostingAccruals } from "./services/ozon-finance-postings-client.js";
 import { createOzonFinanceReadQueue } from "./services/ozon-finance-read-queue.js";
 import { normalizeOzonFinanceAccrual } from "./services/ozon-finance-accruals.js";
 import { ozonStockUpdateReceipts } from "./services/ozon-stock-update.js";
@@ -586,17 +587,31 @@ export async function fetchOzonProductPrices(shop, options = {}) {
 
   const rows = [];
   let cursor = String(options.cursor || "");
+  const fromStart = !cursor;
+  const seenCursors = new Set();
+  let itemCount = 0;
   do {
     throwIfAborted(options.signal);
     const data = await ozonRequest(shop, "/v5/product/info/prices", {
       cursor,
       filter,
       limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
-    }, { signal: options.signal });
+    }, { signal: options.signal, beforeRequest: options.beforeRequest });
     const result = data.result || data;
-    const items = result.items || result.products || [];
+    await options.afterRequest?.();
+    const items = result.items ?? result.products;
+    if (!Array.isArray(items)) throw new Error("Ozon 价格列表格式已变化，请重新拉取后重试");
+    itemCount += items.length;
     rows.push(...items.map(normalizeOzonProductPrice).filter((item) => item.ozon_product_id || item.offer_id || item.ozon_sku));
-    cursor = result.cursor || "";
+    const next = result.cursor ?? "";
+    if (typeof next !== "string") throw new Error("Ozon 价格列表分页游标格式已变化，请重新拉取后重试");
+    const total = Number(result.total_items ?? result.total);
+    if (!next && fromStart && !options.once && Number.isFinite(total) && total > itemCount) {
+      throw new Error("Ozon 价格分页提前结束，未取得完整价格列表，请重新拉取");
+    }
+    if (next && !options.once && (next === cursor || seenCursors.has(next))) throw new Error("Ozon 价格列表分页未推进，请稍后重新拉取");
+    if (next) seenCursors.add(next);
+    cursor = next;
   } while (cursor && !options.once);
   return rows;
 }
@@ -1177,6 +1192,13 @@ export async function fetchOzonFinanceTransactions(shop, options = {}) {
       () => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions), requestOptions)
   });
   return { ...result, operations: result.accruals };
+}
+
+export async function fetchOzonPostingFinance(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) throw Object.assign(new Error('店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」更新授权后核对费用'), { statusCode: 409 });
+  return fetchOzonPostingAccruals(shop, { ...options,
+    request: (path, payload, requestOptions) => runOzonFinanceRead(shop.ozon_client_id, path,
+      () => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions), requestOptions) });
 }
 
 export async function splitOzonPosting(shop, postingNumber, postings, options = {}) {
