@@ -1,3 +1,4 @@
+import {variantVehicleIdentity} from '../src/shared/variant-copy-identity.js';
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -11,7 +12,7 @@ const functions = parse(script, { ecmaVersion: "latest", sourceType: "module" })
     && node.declarations.some(item => /^(UNKNOWN_FACT_RE|INTERNAL_COPY_LEAK_RE|DESCRIPTION_MIN_LENGTH|DESCRIPTION_MAX_LENGTH)$/.test(item.id.name))))
   .map(node => script.slice(node.start, node.end)).join("\n");
 function fixture() {
-  const context = vm.createContext({ material: { sourceTitle: "Накладки HAVAL H3", sourceDescription: "", sourceTags: "#HAVAL_H3 #HAVALH3",
+  const context = vm.createContext({ variantVehicleIdentity, material: { sourceTitle: "Накладки HAVAL H3", sourceDescription: "", sourceTags: "#HAVAL_H3 #HAVALH3",
     sourceVariantValue: "HAVAL H3", productName: "Накладки", targetInput: "HAVAL H9" }, sourceModel: { value: "HAVAL H3" }, state: { analysis: null } });
   vm.runInContext(functions, context);
   return context;
@@ -106,4 +107,16 @@ test("canonical wrapper target changes keep shared identities and protect prefix
     assert.equal(result, expected, `${sourceModel}→${target}`);
     assert.equal(ctx.replaceSpecificVariantText(result, sourceModel, target), expected, `${sourceModel}→${target} repeated`);
   }
+});
+
+test('mixed source notes cannot bypass title or description contamination checks', () => {
+  const ctx = fixture();
+  ctx.sourceModel.value = 'Volkswagen Jetta，三按键钥匙';
+  ctx.material.sourceVariantValue = 'Volkswagen Jetta，三按键钥匙';
+  ctx.material.productName = 'Чехол для ключа Volkswagen Jetta';
+  ctx.material.targetInput = 'VOLKSWAGEN Polo';
+  const contaminated = 'Чехол Volkswagen Jetta для VOLKSWAGEN Polo. ' + 'Сравните форму ключа перед заказом. '.repeat(10);
+  assert.equal(ctx.isValidDraftTitle('VOLKSWAGEN Polo Чехол Volkswagen Jetta', 'VOLKSWAGEN Polo'), false);
+  assert.equal(ctx.isValidDraftDescription(contaminated.slice(0, 450), 'VOLKSWAGEN Polo'), false);
+  assert.equal(ctx.safeProductNameForCopy(), 'Чехол для автомобильного ключа');
 });

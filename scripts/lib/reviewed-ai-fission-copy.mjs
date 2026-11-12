@@ -42,7 +42,8 @@ function copyPath(payload, column, path) {
   if (!Array.isArray(path) || !path.length || path.length > 12 || path.some(key => typeof key !== "string" || ["__proto__", "constructor", "prototype"].includes(key))) fail("Invalid reviewed path");
   let owner = payload, rest = [...path];
   if (["editable_payload", "editablePayload"].includes(rest[0])) { owner = at(owner, [rest.shift()]); }
-  if (column === "manual_facts_json" && rest[0] === "user_facts") owner = at(owner, [rest.shift()]);
+  while (column === "manual_facts_json" && rest[0] === "user_facts") owner = at(owner, [rest.shift()]);
+  if (rest.length === 2 && rest[0] === "logistics" && rest[1] === "tags") return 0;
   if (rest[0] === "variants") { rest.shift(); const index = rest.shift(); if (!/^\d+$/.test(index || "") || !Array.isArray(owner.variants)) fail("Invalid variant path"); owner = at(owner.variants, [index]); }
   if (rest.length === 1 && copyKeys.has(rest[0])) return richKeys.has(rest[0]) ? 11254 : 0;
   let attribute;

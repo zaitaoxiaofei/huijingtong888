@@ -323,3 +323,16 @@ test("image mode synchronizes repeated canonical value/label/display documents w
   invalid.state.templates[0].attributes_json = JSON.stringify([{ attribute_id: 11254, values: op.before_value }]);
   await assert.rejects(audit(invalid), /Rich/);
 });
+
+test('nested imported copy and logistics tags can be repaired while prices remain protected', async () => {
+  const {db, state, manifest: plan} = fixture();
+  state.drafts[0].manual_facts_json = JSON.stringify({user_facts:{user_facts:{title:'old title', price:199}}, logistics:{tags:['#old']}});
+  plan.drafts[0].changes = [{column:'manual_facts_json',operations:[
+    {path:['user_facts','user_facts','title'],before_value:'old title',after_value:'new title'},
+    {path:['logistics','tags'],before_value:['#old'],after_value:['#new']}
+  ]}];
+  plan.templates = [];
+  assert.equal((await inspectReviewedAiFissionCopy(db,plan)).summary.changed_rows,1);
+  plan.drafts[0].changes[0].operations.push({path:['user_facts','user_facts','price'],before_value:199,after_value:299});
+  await assert.rejects(inspectReviewedAiFissionCopy(db,plan));
+});

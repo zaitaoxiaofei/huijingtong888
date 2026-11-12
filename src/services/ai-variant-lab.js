@@ -1,3 +1,4 @@
+import { variantVehicleIdentity, variantCopyContainsIdentity } from '../shared/variant-copy-identity.js';
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -254,7 +255,7 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
   const analysisResult = await resolveOrCreateAnalysis(body, session);
   const operatorNote = cleanText(body.operatorNote || body.operator_note || "");
   const analysis = applyOperatorFactOverrides(analysisResult.analysis, operatorNote);
-  const sourceVariantValue = cleanText(body.sourceVariantValue || body.source_variant_value || analysis.source_variant_value || "");
+  const sourceVariantValue = variantVehicleIdentity(body.sourceVariantValue || body.source_variant_value || analysis.source_variant_value || "");
   const sourceTitle = sourceListingTitle(body);
   const variantType = normalizeImageVariantType(body.variantType || body.variant_type || body.variantGoal || body.variant_goal || analysis.recommended_variant_mode || "vehicle_model_swap");
   validateVariantTargets({ variantType, sourceVariantValue, targets });
@@ -1286,6 +1287,13 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
   const queue = await batchImageQueueStats(key, await resolveImageRuntimeQueueConfig({
     imageConcurrency: positiveInteger(jobs[0].image_concurrency || 20, 20)
   }));
+  const request = parseStoredJson(jobs[0].request_json, {});
+  const snapshot = request.workbench_snapshot || {};
+  const historyAnalysis = snapshot.analysis || {};
+  const historyCopyContext = {
+    sourceVariantValue: jobs[0].source_variant_value,
+    sourceTitle: snapshot.material?.sourceTitle || snapshot.material?.productName || ''
+  };
   return {
     ok: true,
     job: {
@@ -1298,7 +1306,7 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
     queue,
     items: items.map((item) => ({
       ...item,
-      item_json: parseStoredJson(item.item_json, {}),
+      item_json: enforceCopyItemProductFacts(parseStoredJson(item.item_json, {}), item.target_variant_value, historyAnalysis, historyCopyContext),
       image_result_json: parseStoredJson(item.image_result_json, {})
     }))
   };
@@ -2809,7 +2817,7 @@ function batchPlanSystemPrompt() {
     "Main-image recognition facts are the source of truth for title, tags, description, and rich content.",
     "Template title, tags, and description are supplemental style references only; ignore them when they conflict with recognized product facts.",
     "Each item must include: target_variant_value, image_edit_contract, image_edit_prompt_en, negative_prompt_en, title_ru, tags_ru, description_ru, rich_content_ru, copy_contract, quality_checks, display_zh.",
-    "tags_ru must contain 20 to 25 Ozon search tags, each tag starts with #, contains no Chinese, uses underscores inside each tag, and the final tag list must be space-separated rather than comma-separated.",
+    "tags_ru must contain only relevant Ozon search tags, at most 25 tags; never pad the list with unrelated categories, each tag starts with #, contains no Chinese, uses underscores inside each tag, is at most 25 characters including #, and the final tag list must be space-separated rather than comma-separated.",
     "description_ru must be Russian, 350 to 500 characters, never shorter than 350 characters, contain no Chinese, and mention only the item's target vehicle model.",
     "Russian title, tags, description, and rich content must not contain marketplace names or platform-sensitive words such as Ozon, Wildberries, AliExpress, marketplace, seller-service wording, fake official authorization, fake certification, unsupported warranty, or exaggerated claims.",
     "Unknown or uncertain attributes must be omitted from title, tags, description, and rich content. Never write placeholder words such as uncertain, unknown, unclear, n/a, or not visible.",
@@ -3149,7 +3157,7 @@ function removeProtectedProductIdentity(value = "") {
   return withoutIdentity;
 }
 
-function normalizeBatchItems(items, analysis, fallback) {
+export function normalizeBatchItems(items, analysis, fallback) {
   const rawItems = Array.isArray(items) ? items : [];
   const byTarget = new Map(rawItems.map((item) => [cleanText(item.target_variant_value || item.targetVariantValue || item.target || ""), item]));
   return fallback.targets.map((target, index) => {
@@ -3231,7 +3239,7 @@ function buildFallbackBatchItems(targets, analysis, fallback) {
 function enforceCopyItemProductFacts(item, target, analysis = {}, fallback = {}) {
   const next = { ...item };
   const titleOk = isCopyTextAlignedWithProductFacts(next.title_ru, target, analysis, fallback, { minLength: 10 });
-  const tagsOk = isCopyTextAlignedWithProductFacts(toArray(next.tags_ru).join(" "), target, analysis, fallback, { minLength: 10 })
+  const tagsOk = isCopyTextAlignedWithProductFacts(toArray(next.tags_ru).join(" "), target, analysis, fallback, { minLength: 10, tags: true })
     && hasTargetVariantTag(next.tags_ru, target);
   const descriptionOk = isCopyTextAlignedWithProductFacts(next.description_ru, target, analysis, fallback, { minLength: 80 })
     && isValidOzonVariantDescription(next.description_ru, target, analysis, fallback);
@@ -3260,6 +3268,7 @@ function isCopyTextAlignedWithProductFacts(text, target, analysis = {}, fallback
   if (!isBuyerFacingCopyText(value)) return false;
   if (containsChinese(value)) return false;
   if (hasVariantSourceLeak(value, target, analysis, fallback)) return false;
+  if (target && !(options.tags ? variantVehicleIdentity(target).split(/\s+/u).every(part => variantCopyContainsIdentity(value, part)) : variantCopyContainsIdentity(value, target))) return false;
   if (hasForbiddenCategoryLeak(value, analysis)) return false;
   const subjectTerms = productSubjectSearchTerms(analysis, fallback);
   if (!subjectTerms.length) return true;
@@ -3288,10 +3297,8 @@ function hasTargetVariantTag(tags, target) {
 }
 
 function normalizeOzonVariantTitle(value, target, analysis = {}, fallback = {}) {
-  const sourceBasedTitle = buildVariantTitleFromSource(fallback.sourceTitle, fallback.sourceVariantValue || analysis.source_variant_value, target);
-  if (sourceBasedTitle) return sourceBasedTitle;
   const text = cleanText(value);
-  if (text && isBuyerFacingCopyText(text) && !containsChinese(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !hasForbiddenCategoryLeak(text, analysis)) return text;
+  if (text && variantCopyContainsIdentity(text, target) && isBuyerFacingCopyText(text) && !containsChinese(text) && !hasVariantSourceLeak(text, target, analysis, fallback) && !hasForbiddenCategoryLeak(text, analysis)) return text;
   return buildOzonVariantTitle(target, analysis, fallback);
 }
 
@@ -3309,7 +3316,7 @@ export function buildOzonVariantTitle(target, analysis = {}, fallback = {}) {
 
 export function buildVariantTitleFromSource(sourceTitle = "", sourceModel = "", targetModel = "") {
   const title = cleanText(sourceTitle);
-  const source = cleanText(sourceModel);
+  const source = variantVehicleIdentity(sourceModel);
   const target = cleanText(targetModel);
   if (!title || !source || !target || containsChinese(title) || !isBuyerFacingCopyText(title)) return "";
   if (!containsExactVehicleModel(title, source)) return containsExactVehicleModel(title, target) ? title : "";
@@ -3332,6 +3339,7 @@ function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
   const subject = dna.subject;
   const subjectTags = productSubjectTagCandidates(subject);
   const isSillPlate = isSillPlateProduct(analysis, fallback);
+  const isKeyCase = /ключ|брелок|key.?case|钥匙/i.test(subject);
   const candidates = [
     cleanedTarget,
     cleanedTarget.replace(/\s+/g, ""),
@@ -3340,7 +3348,7 @@ function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
     ...subjectTags,
     "автоаксессуары",
     "аксессуары авто",
-    "салон авто",
+    ...(isKeyCase ? [] : ["салон авто"]),
     ...dna.tagFacts,
     ...(isSillPlate ? [
       "защита порогов",
@@ -3358,11 +3366,11 @@ function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
       "декор порогов",
       "автомобильные наклейки",
       "наружные аксессуары"
-    ] : [
+    ] : isKeyCase ? ["чехол для ключа", "чехол для брелока", "защита автоключа", "автомобильный ключ", "аксессуар для ключа"] : [
       "органайзер авто",
       "хранение в авто"
     ]),
-    "интерьер авто",
+    ...(isKeyCase ? [] : ["интерьер авто"]),
     "для автомобиля",
     ...(toArray(analysis.product_subject_ru).length ? toArray(analysis.product_subject_ru) : []),
     ...(toArray(fallback.extraTags).length ? toArray(fallback.extraTags) : [])
@@ -3494,6 +3502,17 @@ function buildBuyerFacingVariantDescription(target, analysis = {}, fallback = {}
   const model = cleanText(target) || "автомобиля";
   const dna = buildCopyProductDna(analysis, fallback);
   const factSentences = [dna.materialSentence, dna.quantitySentence].filter((text) => isBuyerFacingCopyText(text));
+  if (/ключ|брелок/i.test(subject)) {
+    const facts = [dna.materialTitle ? `Материал и отделка: ${dna.materialTitle}.` : '', productQuantityRu(analysis) ? `Комплектация: ${productQuantityRu(analysis)}.` : ''].filter(Boolean);
+    const sentences = [`${subject} для ${model}.`, ...facts,
+      'Перед заказом сравните форму ключа, расположение кнопок и нижнее крепление с фотографиями товара.',
+      'При выборе ориентируйтесь на внешний вид вашего ключа: у одной модели автомобиля могут встречаться разные исполнения.',
+      'На изображениях показаны внешний вид чехла и детали выбранного варианта. Проверьте комплектацию, цвет и наличие аксессуаров в карточке товара.'];
+    const text = sentences.join(' ');
+    if (text.length <= 500) return text;
+    const clipped = text.slice(0, 497).replace(/\s+\S*$/, '').trim();
+    return clipped.lastIndexOf('.') >= 349 ? clipped.slice(0, clipped.lastIndexOf('.') + 1) : `${clipped}...`;
+  }
   const productUse = isSillPlateProduct(analysis, fallback)
     ? "предназначены для защиты дверных проемов и зоны посадки от царапин, потертостей и следов обуви"
     : "подходит для ежедневного использования в автомобиле и аккуратно дополняет салон";
@@ -3505,7 +3524,7 @@ function buildBuyerFacingVariantDescription(target, analysis = {}, fallback = {}
     ...factSentences,
     "Форма, посадка и внешний вид подобраны для аккуратного размещения без изменения штатных элементов автомобиля.",
     `${sentenceStart(subject)} ${careBenefit}, поэтому аксессуар удобен для повседневной эксплуатации.`,
-    "Описание не включает неподтвержденные размеры, сертификаты, гарантийные обещания или дополнительные совместимости."
+    "Перед заказом проверьте фотографии и комплектацию выбранного варианта."
   ].join(" ");
   if (text.length >= 350 && text.length <= 500) return text;
   const expanded = `${text} Подходит для тех, кто хочет сохранить чистоту и опрятный вид автомобиля без сложной доработки и лишних деталей.`;
@@ -3547,7 +3566,7 @@ function hasVariantSourceLeak(text, target, analysis = {}, fallback = {}) {
     analysis.source_variant_value,
     analysis.sourceVehicleModel,
     analysis.source_vehicle_model
-  ].map(cleanText));
+  ].map(variantVehicleIdentity));
   const explicitSourceKeys = new Set(explicitSourceRefs.map((item) => item.toLowerCase()));
   const unchangedSource = explicitSourceRefs.find((ref) => identityKey(ref) === identityKey(targetText) && /[\s_]/.test(ref)) || "";
   const sourceRefs = uniqueStrings([
@@ -3594,7 +3613,7 @@ function containsVehicleTagReference(text, model) {
 
 function sourceTitleVehicleAliases(sourceTitle = "", sourceModel = "") {
   const title = cleanText(sourceTitle);
-  const source = cleanText(sourceModel);
+  const source = variantVehicleIdentity(sourceModel);
   if (!title || !source) return [];
   const escaped = source.split(/\s+/).map(escapeRegExp).join("\\s+");
   const match = title.match(new RegExp(`${escaped}((?:\\s*[/|]\\s*[A-Za-z0-9-]+(?:\\s+(?:Pro|Plus|Max))?)*)`, "iu"));
@@ -3604,7 +3623,7 @@ function sourceTitleVehicleAliases(sourceTitle = "", sourceModel = "") {
 
 function containsExactVehicleModel(text = "", model = "") {
   const value = cleanText(text);
-  const target = cleanText(model);
+  const target = variantVehicleIdentity(model);
   if (!value || !target) return false;
   const escaped = target.split(/\s+/).map(escapeRegExp).join("\\s+");
   return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "iu").test(value);
@@ -3641,6 +3660,7 @@ function productSubjectRu(analysis = {}, fallback = {}) {
   if (normalizedSubject && !containsChinese(normalizedSubject) && !hasForbiddenCategoryLeak(normalizedSubject, analysis)) return sentenceStart(normalizedSubject);
   const type = cleanText(analysis.product_type || fallback.productType || "");
   if (isSillPlateProduct(analysis, fallback)) return "Защитные накладки на пороги автомобиля";
+  if (/钥匙|ключ|брелок|key.?case/i.test(type)) return "Чехол для автомобильного ключа";
   if (/扶手|подлокотник/i.test(type)) return "Органайзер в подлокотник";
   if (/收纳|органайзер/i.test(type)) return "Автомобильный органайзер";
   return "Автомобильный аксессуар";
@@ -3648,7 +3668,7 @@ function productSubjectRu(analysis = {}, fallback = {}) {
 
 export function removeSourceModelFromProductSubject(subject = "", sourceModel = "") {
   const text = cleanText(subject);
-  const source = cleanText(sourceModel);
+  const source = variantVehicleIdentity(sourceModel);
   if (!text || !source || !containsExactVehicleModel(text, source)) return text;
   const escaped = source.split(/\s+/).map(escapeRegExp).join("\\s+");
   return cleanText(text
@@ -3699,6 +3719,7 @@ function productSubjectTagCandidates(subject = "") {
       "защитные накладки"
     ];
   }
+  if (/ключ|брелок/.test(lower)) return ["чехол для ключа", "чехол для брелока", "защита автоключа", "ключ автомобиля"];
   if (/подлокотник/.test(lower)) {
     return [
       "ящик в подлокотник",

@@ -1,3 +1,6 @@
+import { retargetVariantVehicleAttributes } from '../shared/variant-vehicle-attributes.js';
+import { vehicleMetaFromTarget } from './product-development-meta.js';
+import { assertVariantCopyIdentity } from '../shared/variant-copy-identity.js';
 import { config } from "../config.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
 import { tenantPrivateFiles } from "./tenant-private-files.js";
@@ -13334,7 +13337,28 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
     throw error;
   }
   const patch = { ...rawPatch, offer_id: offerId };
+  if (String(body.ai_optimization?.source || body.aiOptimization?.source || '') === 'ai_variant_lab') {
+    const facts = objectValue(body.manual_facts || body.manualFacts);
+    const copyJobNo = body.ai_optimization?.job_no || body.aiOptimization?.job_no || '';
+    const copyJob = copyJobNo ? await row('SELECT source_variant_value FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1', [tenantId, copyJobNo]) : null;
+    assertVariantCopyIdentity({title:patch.title, description:patch.description, tags:normalizeCleanOzonTagList(patch.tags || patch.hashtags)}, {
+      source:copyJob?.source_variant_value || facts.source_variant_value,
+      target:facts.target_variant_value || body.ai_optimization?.target_variant_value || body.aiOptimization?.target_variant_value
+    });
+  }
   let editable = applyAiVariantDraftPatch(template.editable_payload || {}, patch);
+  const fissionTarget = body.ai_optimization?.source === 'ai_variant_lab' ? body.ai_optimization.target_variant_value
+    : body.aiOptimization?.source === 'ai_variant_lab' ? body.aiOptimization.target_variant_value : '';
+  const fissionVehicle = vehicleMetaFromTarget(fissionTarget);
+  if (fissionVehicle) {
+    const dictionaryOptions = {};
+    for (const [id,value] of [[7204,fissionVehicle.vehicle_brand],[7212,fissionVehicle.vehicle_model]]) {
+      dictionaryOptions[id] = await all(`SELECT dictionary_value_id, value, display_value_zh AS label FROM ozon_attribute_values
+        WHERE description_category_id = ? AND type_id = ? AND attribute_id = ? AND status = 'active' AND (value = ? OR display_value_zh = ?)`,
+      [Number(editable.description_category_id || template.description_category_id || 0),Number(editable.type_id || template.type_id || 0),id,value,value]);
+    }
+    editable = retargetVariantVehicleAttributes(editable, fissionVehicle, dictionaryOptions);
+  }
   const requestedSourceImages = normalizeStringList(body.source_images || body.sourceImages || patch.source_images || patch.sourceImages)
     .map((item) => String(item || "").trim())
     .filter(Boolean);
@@ -13483,6 +13507,7 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
         ? "copy"
         : cloneSourceDraft ? String(sourceDraftRow?.development_type || "fission") : "fission";
     const developmentMeta = resolveDraftDevelopmentMeta(payload, { body, sourceDraft: sourceDraftRow || {}, fallbackType: developmentType });
+    if (fissionVehicle) Object.assign(developmentMeta, fissionVehicle);
     // An explicit material-optimizer type must win over the generic AI-* code heuristic.
     if (optimizationSource === "ai_product_material_optimizer") developmentMeta.development_type = "copy";
     if (optimizationSource === "ai_ecommerce_suite_workbench") developmentMeta.development_type = "new";
@@ -13750,9 +13775,8 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
   if (description) next.description = description;
   if (tags.length) {
     next.hashtags = tags;
-    for (const key of ["tags", "main_tags"]) {
-      if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = tags.slice();
-    }
+    next.tags = tags.slice();
+    next.main_tags = tags.slice();
   }
   if (images.length) next.images = images;
   if (richContentJson) {
