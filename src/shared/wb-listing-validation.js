@@ -29,6 +29,7 @@ export function wbListingValidation(payload = {}, attributes = []) {
   }
   if (!Array.isArray(payload.images) || !payload.images.length || payload.images.length > 30) errors.push('商品图片：请选择 1–30 张图片，第一张为主图。');
   for (const image of payload.images || []) { try { const url=new URL(image);if(url.protocol!=='https:'||url.username||url.password||!(/\.(jpe?g|png|webp|gif|bmp)$/i.test(url.pathname)))throw Error(); } catch { errors.push('商品图片：请使用无需登录、以图片扩展名结尾的 HTTPS 直链。');break; } }
+  if(payload.video_url){try{if(typeof payload.video_url!=='string')throw Error();const url=new URL(payload.video_url);if(url.protocol!=='https:'||url.username||url.password||!(/\.(mp4|mov)$/i.test(url.pathname)))throw Error();}catch{errors.push('商品视频：请使用有效的 HTTPS MP4 或 MOV 视频地址。');}}
   return {ok:!errors.length,errors};
 }
 

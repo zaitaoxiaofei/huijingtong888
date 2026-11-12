@@ -54,6 +54,7 @@ export function createWbCategoryCatalog({query,request,account}){
   }else if(!result.cache.stale&&JSON.stringify(parse(template.attributes_json))!==JSON.stringify(result.data)){
    await query('UPDATE wb_listing_templates SET attributes_json=?,category_name=?,revision=revision+1 WHERE id=? AND tenant_id=?',[JSON.stringify(result.data),categoryName,template.id,a.tenant_id]);template.revision=Number(template.revision)+1;
   }
+  console.info('[wb-catalog]',JSON.stringify({tenant_id:a.tenant_id,environment:a.environment,subject_id:subject,field_count:result.data.length,source:result.cache.source,stale:result.cache.stale}));
   return {environment:a.environment,subject_id:subject,category_name:categoryName,template_id:template.id,revision:template.revision,attributes:result.data,defaults:parse(template.defaults_json),cache:result.cache};
  }
  return {catalogAccount,categoryParents,catalogCategories,categorySchema};
