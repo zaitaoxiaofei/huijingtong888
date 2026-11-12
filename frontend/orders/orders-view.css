@@ -2104,9 +2104,9 @@
   width: 28px;
   height: 28px;
   padding: 0;
-  border: none;
+  border: 1px solid var(--erp-detail-border, #cbd5e1);
   border-radius: 999px;
-  background: transparent;
+  background: var(--erp-detail-surface-alt, #f1f5f9);
   color: var(--erp-detail-text-regular, #334155);
   cursor: pointer;
   appearance: none;
@@ -2117,7 +2117,13 @@
 
 .orders-mark-pill:hover {
   transform: translateY(-1px);
+  border-color: var(--erp-detail-text-secondary, #64748b);
   background: var(--erp-detail-surface-alt, rgba(241, 245, 249, 0.9));
+}
+
+.orders-mark-pill:focus-visible {
+  outline: 2px solid var(--erp-detail-primary, #6258f6);
+  outline-offset: 2px;
 }
 
 .orders-mark-dot,
@@ -2134,7 +2140,7 @@
 
 .orders-mark-pencil-ring,
 .orders-mark-dot-ring {
-  border: 1.5px dashed var(--erp-detail-border, rgba(203, 213, 225, 0.95));
+  border: 1.5px dashed var(--erp-detail-text-secondary, #64748b);
   background: var(--erp-detail-surface, #fff);
 }
 
@@ -2146,7 +2152,7 @@
   transform: rotate(-45deg);
   background:
     linear-gradient(135deg, transparent 0 42%, var(--erp-detail-surface, #fff) 42% 100%),
-    linear-gradient(135deg, var(--erp-detail-surface-alt, #94a3b8) 0 72%, var(--erp-detail-surface-alt, #e2e8f0) 72% 100%);
+    linear-gradient(135deg, currentColor 0 72%, var(--erp-detail-text-secondary, #64748b) 72% 100%);
   box-shadow: inset -1px -1px 0 var(--erp-detail-border, rgba(255, 255, 255, 0.6));
 }
 
@@ -2160,31 +2166,31 @@
 }
 
 .orders-mark-dot.is-red {
-  background: #ff4d4f;
+  background: #dc3f45;
 }
 
 .orders-mark-dot.is-orange {
-  background: #ff9500;
+  background: #cf7400;
 }
 
 .orders-mark-dot.is-yellow {
-  background: #fbbf24;
+  background: #b58a00;
 }
 
 .orders-mark-dot.is-green {
-  background: #4cd964;
+  background: #208b48;
 }
 
 .orders-mark-dot.is-cyan {
-  background: #5ac8fa;
+  background: #0c85b8;
 }
 
 .orders-mark-dot.is-purple {
-  background: #8b6cf6;
+  background: #7950d6;
 }
 
 .orders-mark-dot.is-gray {
-  background: #9ca3af;
+  background: #64748b;
 }
 
 .orders-mark-floating-panel {
@@ -2262,31 +2268,31 @@
 }
 
 .orders-mark-filter-dot.is-red {
-  background: #ff4d4f;
+  background: #dc3f45;
 }
 
 .orders-mark-filter-dot.is-orange {
-  background: #ff9500;
+  background: #cf7400;
 }
 
 .orders-mark-filter-dot.is-yellow {
-  background: #fbbf24;
+  background: #b58a00;
 }
 
 .orders-mark-filter-dot.is-green {
-  background: #4cd964;
+  background: #208b48;
 }
 
 .orders-mark-filter-dot.is-cyan {
-  background: #5ac8fa;
+  background: #0c85b8;
 }
 
 .orders-mark-filter-dot.is-purple {
-  background: #8b6cf6;
+  background: #7950d6;
 }
 
 .orders-mark-filter-dot.is-gray {
-  background: #9ca3af;
+  background: #64748b;
 }
 
 .orders-chip-button-subtle .orders-mark-filter-dot {

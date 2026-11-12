@@ -33,7 +33,9 @@ test("order inventory creation can bind an existing similar product", () => {
   assert.match(ordersPage, /sale_price_rmb:\s*context\.salePriceRmb/);
   assert.match(ordersPage, /air_sale_price_rmb:\s*context\.salePriceRmb/);
   assert.match(ordersPage, /Number\(displayItem\.saleAmount\) \/ Math\.max\(1, Number\(displayItem\.quantity \|\| 1\)\)/);
-  assert.match(ordersPage, /Number\(rule\.id\) === Number\(context\.logisticsRuleId\)/);
+  assert.match(ordersPage, /sourceRuleId: context\.logisticsRuleId/);
+  assert.match(ordersPage, /carrier: context\.logisticsCarrier/);
+  assert.match(ordersPage, /\.\.\.logisticsDefaults/);
   assert.match(service, /AS sku_logistics_rule_ids/);
   assert.match(ordersPage, /:create-endpoint="inventoryProductEditorCreateContext \? '\/api\/online-products\/create-product'/);
   assert.match(ordersPage, /@existing-selected="handleInventoryProductEditorExistingSelected"/);

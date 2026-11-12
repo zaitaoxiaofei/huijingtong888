@@ -170,10 +170,8 @@ test("orders show purchase time, allocated quantity, remaining batch and overdue
   assert.match(table, /查看采购内容/);
   assert.match(table, /v-if="row\.procurementState\.canRegisterOrderReceipt"/);
   assert.doesNotMatch(table, /row\.procurementState\.overdue && row\.procurementState\.inboundRecordId/);
-  const inventoryColumn = table.slice(
-    table.indexOf('label="库存信息"'),
-    table.indexOf('label="归类 / 具体原因"')
-  );
+  const inventoryStart = table.indexOf('<el-table-column label="库存信息"');
+  const inventoryColumn = table.slice(inventoryStart, table.indexOf('<el-table-column', inventoryStart + 1));
   assert.match(inventoryColumn, /orders-procurement-transparency/);
   assert.doesNotMatch(inventoryColumn, /预计: CNY/);
   assert.doesNotMatch(inventoryColumn, /真实:/);
