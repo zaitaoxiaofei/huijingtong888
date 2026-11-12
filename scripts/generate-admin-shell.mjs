@@ -164,8 +164,9 @@ ${modulePreloadTags}
         var hint = document.getElementById("adminStaticLoginHint");
         var fallbackTimer = 0;
         var fallbackWatchTimer = 0;
-        var chunkReloadKey = "ozon-admin-shell-chunk-reload";
+        var chunkReloadKey = "ozon-admin-shell-chunk-reload:${adminEntry.file}";
         var maxChunkReloads = 2;
+        var chunkReloadScheduled = false;
         function errorMessage(event) {
           var reason = event && (event.reason || event.error || event.message || event);
           return String(reason && (reason.message || reason) || "");
@@ -201,7 +202,29 @@ ${modulePreloadTags}
             || message.indexOf("static asset not found") >= 0;
         }
         function isChunkLoadError(event) {
-          return isAppAssetError(event);
+          if (isExtensionError(event)) return false;
+          var target = event && event.target;
+          var tag = String(target && target.tagName || "").toUpperCase();
+          function isChunkUrl(source, extension) {
+            try {
+              var url = new URL(source, window.location.href);
+              return url.origin === window.location.origin
+                && url.pathname.indexOf("/vue-apps/assets/") === 0
+                && url.pathname.endsWith(extension);
+            } catch (_) { return false; }
+          }
+          if (tag === "SCRIPT") return isChunkUrl(target.src, ".js");
+          if (tag === "LINK") {
+            var rel = String(target.rel || "").toLowerCase();
+            return (rel === "stylesheet" && isChunkUrl(target.href, ".css"))
+              || (rel === "modulepreload" && isChunkUrl(target.href, ".js"));
+          }
+          // Images, fonts and ordinary runtime errors do not mean a stale chunk.
+          if (tag) return false;
+          var message = errorMessage(event);
+          return message.indexOf("Failed to fetch dynamically imported module") >= 0
+            || message.indexOf("Importing a module script failed") >= 0
+            || message.indexOf("Unable to preload CSS") >= 0;
         }
         function shouldShowFatalError(event) {
           if (!shouldShowFallback()) return false;
@@ -212,9 +235,15 @@ ${modulePreloadTags}
         }
         function reloadForChunkError(event) {
           if (!isChunkLoadError(event)) return false;
-          var attempts = Number(sessionStorage.getItem(chunkReloadKey) || "0");
-          if (attempts >= maxChunkReloads) return false;
-          sessionStorage.setItem(chunkReloadKey, String(attempts + 1));
+          if (chunkReloadScheduled) return true;
+          var attempts;
+          try {
+            attempts = Number(sessionStorage.getItem(chunkReloadKey) || "0");
+            if (!Number.isSafeInteger(attempts) || attempts < 0) attempts = 0;
+            if (attempts >= maxChunkReloads) return false;
+            sessionStorage.setItem(chunkReloadKey, String(attempts + 1));
+          } catch (_) { return false; }
+          chunkReloadScheduled = true;
           window.clearTimeout(fallbackTimer);
           showFallback(true, false, true);
           window.setTimeout(function () {
@@ -247,7 +276,6 @@ ${modulePreloadTags}
           window.clearInterval(fallbackWatchTimer);
           fallback.classList.add("is-hidden");
           fallback.hidden = true;
-          sessionStorage.removeItem(chunkReloadKey);
         }
         function hideFallbackWhenAppMounted() {
           if (!shouldShowFallback()) hideFallback();

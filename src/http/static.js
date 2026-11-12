@@ -20,6 +20,12 @@ const CONTENT_TYPES = {
   ".webm": "video/webm"
 };
 
+// Build-owned files have no tenant data. Keep the public gate restricted to
+// fingerprinted files directly under Vite's assets directory.
+export function isVersionedVueAssetPath(pathname = "") {
+  return /^\/vue-apps\/assets\/[^/]+-[A-Za-z0-9_-]{6,}(?:-\d{12,13})?\.(?:js|css|png)$/i.test(String(pathname || ""));
+}
+
 function sendStaticNotFound(res, cleanPath) {
   const ext = path.extname(cleanPath);
   const contentType = CONTENT_TYPES[ext] || "text/plain; charset=utf-8";
@@ -80,7 +86,7 @@ export function createStaticHandler(publicDir, options = {}) {
     const headers = { "Content-Type": CONTENT_TYPES[ext] || "application/octet-stream" };
     const isAiWorkbenchProxyAsset = /^\/ai-workbench-proxy\/assets\/.+\.(css|js)$/i.test(cleanPath);
     const isVueAppAsset = /\/vue-apps\/assets\/.+\.(css|js)$/i.test(cleanPath);
-    const isVersionedAsset = /\/vue-apps\/assets\/.+-[a-z0-9_-]{6,}\.(css|js)$/i.test(cleanPath);
+    const isVersionedAsset = isVersionedVueAssetPath(cleanPath);
     const isMutableEntryAsset = /\/vue-apps\/assets\/(admin-view|config-view|admin|config)\.(js|css)$/i.test(cleanPath);
     const isListingMediaAsset = /^\/uploads\/listing-media\/[^/]+$/i.test(cleanPath);
     if (cleanPath === "/admin.html" || cleanPath === "/release.json" || ext === ".html") {
