@@ -43,7 +43,7 @@ test('creation filters before pagination and preserves enterprise isolation', {s
   try {
     await q("INSERT INTO tenants(id,slug,name) VALUES(1,'default','Default'),(2,'a','A'),(3,'b','B')");
     // The wanted product is older than more than 30 unrelated products.
-    await q("INSERT INTO products(id,tenant_id,name,inventory_category,vehicle_brand,vehicle_model,accessory_name,color,material,surface_process) VALUES(200,2,'标准库存','门槛条','ESTEO','VR7','普通款','银色/黑色','不锈钢/ABS塑料','拉丝'),(201,2,'另一型号','门槛条','ESTEO','VR70','普通款','银色','不锈钢','拉丝'),(300,3,'其他企业','门槛条','ESTEO','VR7','普通款','银色','不锈钢','拉丝')");
+    await q("INSERT INTO products(id,tenant_id,name,inventory_category,vehicle_brand,vehicle_model,accessory_name,color,material,surface_process) VALUES(200,2,'标准库存','门槛条','ESTEO','VR7','LOGO定制款','银色/黑色','不锈钢/ABS塑料','拉丝'),(201,2,'另一型号','门槛条','ESTEO','VR70','普通款','银色','不锈钢','拉丝'),(300,3,'其他企业','门槛条','ESTEO','VR7','普通款','银色','不锈钢','拉丝')");
     for (let id = 400; id < 435; id++) await q("INSERT INTO products(id,tenant_id,name,inventory_category,vehicle_brand,vehicle_model,accessory_name) VALUES(?,2,'门槛条 FORD','门槛条','FORD','Focus','普通款')", [id]);
     const find = async item => {
       const query = {...Object.fromEntries(inventoryCreationSearchParams(item)), bindableOnly:'1'};
@@ -56,7 +56,8 @@ test('creation filters before pagination and preserves enterprise isolation', {s
     assert.deepEqual(await find(item), [201,200]);
     item.vehicle_models = ['VR7'];
     assert.deepEqual(await find(item), [200]);
-    Object.assign(item, {accessory:'普通款', colors:['银色','黑色'], materials:['不锈钢','ABS塑料'], process:'拉丝'});
+    assert.deepEqual(await find({...item, accessory:'普通款'}), []);
+    Object.assign(item, {accessory:'LOGO定制款', colors:['银色','黑色'], materials:['不锈钢','ABS塑料'], process:'拉丝'});
     assert.deepEqual(await find(item), [200]);
     const apiQuery = {...Object.fromEntries(inventoryCreationSearchParams(item)), bindableOnly:'1', paged:'1', pageSize:5};
     const result = await productsMysql(apiQuery, 2);
@@ -72,4 +73,17 @@ test('creation filters before pagination and preserves enterprise isolation', {s
     await closeMysqlPool();
     await f.cleanup();
   }
+});
+
+
+test('new creation and category changes do not silently constrain style to ordinary', () => {
+  const source = readFileSync(new URL('../frontend/admin/components/inventory/ProductCreateEditDialog.vue', import.meta.url), 'utf8');
+  const defaults = source.slice(source.indexOf('function createDefaultForm()'), source.indexOf('function resetForm()'));
+  const form = Function(`${defaults}; return createDefaultForm();`)();
+  assert.equal(form.structured_naming.accessory, '');
+  const change = source.slice(source.indexOf('async function handleCategoryChange('), source.indexOf('async function handleVehicleBrandChange('));
+  assert.match(change, /form\.structured_naming\.accessory = ""/);
+  const query = inventoryCreationSearchParams({...form.structured_naming, category:'门槛条', vehicle_brand:'ESTEO'});
+  assert.equal(query.has('accessoryName'), false);
+  assert.equal(inventoryCreationSearchParams({...form.structured_naming, accessory:'普通款'}).get('accessoryName'), '普通款');
 });

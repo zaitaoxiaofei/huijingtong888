@@ -190,7 +190,7 @@ test("naming options are controlled while car brand and model reuse the AI catal
   assert.match(namingService, /ORDER BY usage_count DESC, last_used_at DESC/);
   assert.match(dialog, /handleCategoryChange/);
   assert.match(dialog, /handleVehicleModelsChange/);
-  assert.match(dialog, /form\.structured_naming\.accessory = "普通款"/);
+  assert.match(dialog, /form\.structured_naming\.accessory = ""/);
   assert.match(dialog, /vehicleBrandOptions/);
   assert.match(dialog, /vehicleModelOptions/);
   assert.match(namingService, /'material', 'process'/);
