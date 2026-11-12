@@ -2,6 +2,7 @@ import { calculatePricing, calculateProfit } from './pricing-tool.js';
 
 const round = value => Math.round((value + Number.EPSILON) * 100) / 100;
 export function wbLogisticsQuote(rule, input) {
+  if (rule && (rule.platform !== 'wb' || !rule.tariffVersion || rule.ruleKey !== `wb:${rule.tariffVersion}:${rule.id}`)) throw new Error('WB 计算器只接受带版本的 WB 揽收仓报价，不能使用 Ozon 服务商规则');
   if (!rule) throw new Error('请选择 WB 物流渠道及揽收仓');
   const weight = Number(input.weight);
   const dimensions = ['length', 'width', 'height'].map(key => Number(input[key]));
@@ -11,7 +12,7 @@ export function wbLogisticsQuote(rule, input) {
   if (!rule.maxSideCm || !rule.maxSumCm) throw new Error('该线路缺少官方尺寸限制，暂不能自动报价');
   if (Math.max(...dimensions) > rule.maxSideCm || dimensions.reduce((a,b) => a+b,0) > rule.maxSumCm) throw new Error(`包裹超出该仓限制：单边≤${rule.maxSideCm}cm，三边和≤${rule.maxSumCm}cm`);
   const [perKg, perTicket] = chargeableWeightG <= 300 ? rule.light : rule.heavy;
-  return { chargeableWeightG, perKg, perTicket, freight: round(chargeableWeightG / 1000 * perKg + perTicket) };
+  return { platform: 'wb', warehouseId: rule.id, tariffVersion: rule.tariffVersion, ruleKey: rule.ruleKey, sourceSha256: rule.sourceSha256, chargeableWeightG, perKg, perTicket, freight: round(chargeableWeightG / 1000 * perKg + perTicket) };
 }
 export function calculateWbQuote(mode, input, rule) {
   const shipping = wbLogisticsQuote(rule, input);

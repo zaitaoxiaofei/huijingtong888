@@ -258,3 +258,14 @@ test("default logistics matching and historical version selection cannot choose 
   assert.match(service, /WHERE selected\.id = \?[\s\S]*?AND \(selected\.tenant_id <=> \? OR \(selected\.tenant_id IS NULL AND selected\.carrier = 'OGL'\)\)/);
   assert.match(service, /AND candidate\.tenant_id <=> selected\.tenant_id/);
 });
+
+test('Ozon logistics writes reject WB warehouses and carriers before reaching the storage service', async () => {
+  const services={createLogisticsRule:async()=>assert.fail('WB data reached Ozon storage'),updateLogisticsRule:async()=>assert.fail('WB data reached Ozon storage')};
+  const readJson=async req=>req.body;
+  const routes=createOperationsRoutes({services,readJson});
+  for(const body of [{platform:'wb',carrier:'OGL'},{carrier:'DPX'},{carrier:'WB Standard'},{carrier:'CEL',wb_warehouse_id:382855}]) {
+    const req={_session:{platform_role:'super_admin'},body};
+    await assert.rejects(routes['POST /api/logistics-rules'](req),e=>e.statusCode===400&&e.message.includes('Ozon'));
+    await assert.rejects(handleOperationsRestRoute({req:{...req,method:'PUT'},parts:['api','logistics-rules','12'],services,readJson,json:(_res,data)=>data}),e=>e.statusCode===400);
+  }
+});

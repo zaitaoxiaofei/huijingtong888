@@ -1,0 +1,847 @@
+{
+  "version": "2026-09-01",
+  "sourceUrl": "https://static-basket-02.wbbasket.ru/vol20/China/warehouse_and_tarrifs/0826.pdf",
+  "sha256": "397d947fd2efc42b5f6b9452cddb26ef6a8d8af602344792493c90361345a42d",
+  "rows": [
+    {
+      "id": 325994,
+      "product": "特快",
+      "name": "325994-香港-时效10天-承运普货和带电商品",
+      "location": "香港",
+      "light": [
+        89.0,
+        17.0
+      ],
+      "heavy": [
+        89.0,
+        17.0
+      ],
+      "maxSumCm": 90,
+      "maxSideCm": 60,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过90 厘米，单面不超过60厘米",
+      "service": "WB Express",
+      "nameEn": "325994-Hong Kong-10Days-Air-Standard goods & with li-batteries"
+    },
+    {
+      "id": 325999,
+      "product": "标准",
+      "name": "325999-广州市-时效15到30天-承运-陆运-所有的商品",
+      "location": "广州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "325999-Guangzhou-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 326005,
+      "product": "标准",
+      "name": "326005-深圳市-时效15到30天-承运-陆运-所有的商品",
+      "location": "深圳市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "326005-Shenzhen-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 326018,
+      "product": "标准",
+      "name": "326018-揭阳市-时效15到30天-承运-陆运-所有的商品",
+      "location": "揭阳市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "326018-Jieyang-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 326027,
+      "product": "标准",
+      "name": "326027-义乌市-时效15到30天-承运-陆运-所有的商品",
+      "location": "义乌市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "326027-Yiwu-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 326031,
+      "product": "标准",
+      "name": "326031-保定市-时效15到30天-承运-陆运-所有的商品",
+      "location": "保定市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "326031-Baoding-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 326032,
+      "product": "标准",
+      "name": "326032-潍坊市-时效15到30天-承运-陆运-所有的商品",
+      "location": "潍坊市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "326032-Weifang-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 326033,
+      "product": "标准",
+      "name": "326033-滨州市-时效15到30天-承运-陆运-所有的商品",
+      "location": "滨州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Standard",
+      "nameEn": "326033-Binzhou-15to30Days-Truck-All goods"
+    },
+    {
+      "id": 357322,
+      "product": "特快",
+      "name": "357322-东莞-时效10天-承运承运普货",
+      "location": "东莞",
+      "light": [
+        122.0,
+        19.0
+      ],
+      "heavy": [
+        122.0,
+        19.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 100,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过100厘米",
+      "service": "WB Express",
+      "nameEn": "357322-Dongguan-10Days-Air-Standard goods"
+    },
+    {
+      "id": 382818,
+      "product": "超级经济",
+      "name": "382818-东莞-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "东莞市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382818-Dongguan-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382822,
+      "product": "超级经济",
+      "name": "382822-深圳-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "深圳市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382822-Shenzhen-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382823,
+      "product": "超级经济",
+      "name": "382823-广州-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "广州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382823-Guangzhou-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382828,
+      "product": "超级经济",
+      "name": "382828-上海-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "上海市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382828-Shanghai-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382830,
+      "product": "超级经济",
+      "name": "382830-义乌-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "义乌市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382830-Yiwu-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382833,
+      "product": "超级经济",
+      "name": "382833-宁波-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "宁波",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382833-Ningbo-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382835,
+      "product": "超级经济",
+      "name": "382835-泉州-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "泉州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382835-Quanzhou-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382839,
+      "product": "超级经济",
+      "name": "382839-郑州-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "郑州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382839-Zhengzhou-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382841,
+      "product": "超级经济",
+      "name": "382841-厦门-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "厦门市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382841-Xiamen-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382843,
+      "product": "超级经济",
+      "name": "382843-龙岩-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "龙岩市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382843-Longyan-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382844,
+      "product": "超级经济",
+      "name": "382844-莆田-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "莆田市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382844-Putian-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382845,
+      "product": "超级经济",
+      "name": "382845-福州-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "福州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382845-Fuzhou-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382848,
+      "product": "超级经济",
+      "name": "382848-长沙-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "长沙市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382848-Changsha-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382850,
+      "product": "超级经济",
+      "name": "382850-成都市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "成都市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382850-Chengdu-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382851,
+      "product": "超级经济",
+      "name": "382851-哈尔滨-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "哈尔滨",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382851-Harbin-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382853,
+      "product": "超级经济",
+      "name": "382853-武汉-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "武汉市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382853-Wuhan-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382854,
+      "product": "超级经济",
+      "name": "382854-青岛市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "青岛市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382854-Qingdao-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382855,
+      "product": "超级经济",
+      "name": "382855-合肥-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "合肥市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382855-Hefei-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 382857,
+      "product": "超级经济",
+      "name": "382857-西安-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "西安市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "382857-Xian-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50064816,
+      "product": "特快",
+      "name": "50064816-香港-时效10天-承运普货和带电商品",
+      "location": "香港",
+      "light": [
+        89.0,
+        17.0
+      ],
+      "heavy": [
+        89.0,
+        17.0
+      ],
+      "maxSumCm": 90,
+      "maxSideCm": 60,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过90 厘米，单面不超过60厘米",
+      "service": "WB Express",
+      "nameEn": "50064816-Hong Kong-10Days-Air-Standard goods & with li-batteries"
+    },
+    {
+      "id": 50072222,
+      "product": "特快",
+      "name": "50072222-WB Plus 珲春市-时效7天-承运-陆运+空运-所有的商品",
+      "location": "珲春市",
+      "light": [
+        48.0,
+        9.0
+      ],
+      "heavy": [
+        48.0,
+        9.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Plus",
+      "nameEn": "50072222-WB Plus Hunchun-7Days-truck+air-All goods"
+    },
+    {
+      "id": 50088698,
+      "product": "超级经济",
+      "name": "50088698-潍坊市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "潍坊市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50088698-Weifang-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50095406,
+      "product": "超级经济",
+      "name": "50095406 -滨州市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "滨州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50095406-Binzhou-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50131977,
+      "product": "特快",
+      "name": "50131977-WB Plus 东莞市-时效7天-承运-Air-承运普货",
+      "location": "东莞市",
+      "light": [
+        48.0,
+        9.0
+      ],
+      "heavy": [
+        48.0,
+        9.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Plus",
+      "nameEn": "50131977-WB Plus Dongguan-7Days-Air-Standard goods"
+    },
+    {
+      "id": 50146638,
+      "product": "超级经济",
+      "name": "50146638-杭州市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "杭州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50146638-Hangzhou-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50199671,
+      "product": "特快",
+      "name": "50199671-WB Plus 东宁-时效6天-承运-陆运+空运-所有的商品",
+      "location": "东宁",
+      "light": [
+        48.0,
+        9.0
+      ],
+      "heavy": [
+        48.0,
+        9.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 120,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200 厘米，单面不超过120 厘米",
+      "service": "WB Plus",
+      "nameEn": "50199671-WB Plus Dongning-6Days-Air-All goods"
+    },
+    {
+      "id": 50197608,
+      "product": "超级经济",
+      "name": "50197608-揭阳市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "揭阳市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50197608-Jieyang-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50197612,
+      "product": "超级经济",
+      "name": "50197612-佛山市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "佛山市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50197612-Foshan-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50197615,
+      "product": "超级经济",
+      "name": "50197615-深圳市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "深圳市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50197615-Shenzhen-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50197618,
+      "product": "超级经济",
+      "name": "50197618-广州市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "广州市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50197618-Guangzhou-15to30Days-All type of transport-Allgoods"
+    },
+    {
+      "id": 50197620,
+      "product": "超级经济",
+      "name": "50197620-保定市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "保定市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50197620-Baoding-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50197698,
+      "product": "超级经济",
+      "name": "50197698-潍坊市-时效15到30天-所有的运输方式-承运所有的商品",
+      "location": "潍坊市",
+      "light": [
+        58.0,
+        2.0
+      ],
+      "heavy": [
+        43.0,
+        8.0
+      ],
+      "maxSumCm": 200,
+      "maxSideCm": 115,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过200厘米，单面不超过115 厘米",
+      "service": "WB Super Economy",
+      "nameEn": "50197698-Weifang-15to30Days-All type of transport-All goods"
+    },
+    {
+      "id": 50198277,
+      "product": "特快",
+      "name": "50198277-WB Plus 香港-时效13天-承运-空运-所有的商品",
+      "location": "香港",
+      "light": [
+        89.0,
+        17.0
+      ],
+      "heavy": [
+        89.0,
+        17.0
+      ],
+      "maxSumCm": 90,
+      "maxSideCm": 60,
+      "maxWeightG": 20000,
+      "restrictions": "长+宽+高不超过90 厘米，单面不超过60厘米",
+      "service": "WB Plus",
+      "nameEn": "50198277-WB Plus Hong Kong-13Days-Air-All goods"
+    }
+  ]
+}

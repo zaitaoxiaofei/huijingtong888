@@ -24,6 +24,11 @@ function platformLogisticsScope(req, body = null, url = null) {
   if (!isPlatformAdmin(req?._session)) {
     throw Object.assign(new Error("仅平台超级管理员可以管理共用物流规则"), { statusCode: 403 });
   }
+  const carrier = String(body?.carrier || '').trim().toUpperCase();
+  if ((body?.platform && String(body.platform).toLowerCase() !== 'ozon')
+    || Object.hasOwn(body || {}, 'wb_warehouse_id') || /^(DPX|WB)/.test(carrier)) {
+    throw Object.assign(new Error('此入口只维护 Ozon 物流服务商；WB 揽收仓报价请在“物流设置 → WB 揽收仓报价”按独立官方版本查看和更新，不能写入 Ozon 规则。'), { statusCode: 400 });
+  }
   const selectors = ["tenant_id", "tenantId"];
   const searchParams = url?.searchParams || new URL(req?.url || "/", "http://localhost").searchParams;
   if (selectors.some(key => searchParams.has(key) || Object.hasOwn(req?.query || {}, key) || Object.hasOwn(body || {}, key))) {

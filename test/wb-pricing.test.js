@@ -9,7 +9,9 @@ import { wbRoutePermission } from '../src/server/wb-paths.js';
 import { authorizeApiRequest } from '../src/server/authorization.js';
 import { tenantIsolationDecision } from '../src/server/tenant-isolation.js';
 const tariff = JSON.parse(readFileSync(new URL('../src/data/wb/logistics-2026-11-11.json', import.meta.url)));
-const hefei = tariff.rows.find(row => row.id === 382855);
+import { WB_LOGISTICS_VERSIONS, currentWbTariff, wbTariffVersion } from '../src/shared/wb-logistics-catalog.js';
+const current = wbTariffVersion(tariff.version);
+const hefei = current.rows.find(row => row.id === 382855);
 const input = { saleCny: 100, purchaseCost: 20, weight: 201, length: 20, width: 10, height: 5,
   commissionRate: 20, exchangeRate: 12.4, domesticCost: 2, adRate: 5, returnRate: 10,
   returnLoss: 15, otherRate: 1, targetMargin: 20, discountRate: 30 };
@@ -32,13 +34,13 @@ test('WB rounds actual weight up by 100g before selecting the fee band', () => {
   }
   assert.equal(wbLogisticsQuote(hefei, {...input,weight:25000}).freight,1083);
   assert.throws(() => wbLogisticsQuote(hefei,{...input,weight:25001}),/25 公斤/);
-  assert.throws(() => wbLogisticsQuote(tariff.rows.find(row=>row.id===357322),{...input,weight:20001}),/20 公斤/);
+  assert.throws(() => wbLogisticsQuote(current.rows.find(row=>row.id===357322),{...input,weight:20001}),/20 公斤/);
 });
 test('WB uses actual weight and enforces each warehouse dimensions', () => {
   assert.equal(wbLogisticsQuote(hefei,{...input,length:100,width:50,height:50}).chargeableWeightG,300);
   assert.throws(() => wbLogisticsQuote(hefei,{...input,length:116}),/单边≤115/);
   assert.throws(() => wbLogisticsQuote(hefei,{...input,length:100,width:60,height:41}),/三边和≤200/);
-  assert.throws(() => wbLogisticsQuote(tariff.rows[0],{...input,length:61}),/单边≤60/);
+  assert.throws(() => wbLogisticsQuote(current.rows[0],{...input,length:61}),/单边≤60/);
   for (const weight of [0,-1,NaN,Infinity]) assert.throws(() => wbLogisticsQuote(hefei,{...input,weight}),/实重/);
 });
 test('WB profit and reverse pricing retain shared fees and reach the same target margin', () => {
@@ -71,4 +73,33 @@ test('WB commissions use only kgvpChina, project safe fields, and share cached r
   assert.equal(requests,1); assert.deepEqual(a,b);
   assert.deepEqual(a.rows,[{id:1,category:'衣服',parent:'服装',rate:20},{id:4,category:'',parent:'',rate:0}]);
   assert.equal(JSON.stringify(a).includes('private'),false);
+});
+
+test('WB versions switch at Beijing midnight, preserve history and reject unknown dates', () => {
+  assert.equal(currentWbTariff('2026-11-10T15:59:59Z').version,'2026-09-01');
+  assert.equal(currentWbTariff('2026-11-10T16:00:00Z').version,'2026-11-11');
+  assert.throws(()=>currentWbTariff('2026-08-01T00:00:00Z'),/没有已登记/);
+  assert.throws(()=>wbTariffVersion('unknown'),/版本不存在/);
+  const old=wbTariffVersion('2026-09-01');
+  assert.equal(old.rows.length,42); assert.equal(current.rows.length,73);
+  const past=old.rows.find(row=>row.id===382855);
+  assert.equal(past.maxWeightG,20000); assert.equal(hefei.maxWeightG,25000);
+  assert.notEqual(past.ruleKey,hefei.ruleKey);
+  assert.throws(()=>wbLogisticsQuote(past,{...input,weight:21000}),/20 公斤/);
+  assert.equal(wbLogisticsQuote(hefei,{...input,weight:21000}).chargeableWeightG,21000);
+  assert.throws(()=>{past.heavy[0]=999;},TypeError);
+  for(const item of WB_LOGISTICS_VERSIONS) {
+    const pdf=readFileSync(new URL(`../public${item.downloadUrl}`,import.meta.url));
+    assert.equal(createHash('sha256').update(pdf).digest('hex'),item.sha256);
+  }
+});
+test('WB result records the exact warehouse, tariff version and source without mutating older quotes', () => {
+  const past=wbTariffVersion('2026-09-01').rows.find(row=>row.id===382855);
+  const old=calculateWbQuote('profit',input,past);
+  const next=calculateWbQuote('profit',input,hefei);
+  assert.equal(old.shipping.ruleKey,'wb:2026-09-01:382855');
+  assert.equal(next.shipping.ruleKey,'wb:2026-11-11:382855');
+  assert.equal(old.shipping.sourceSha256,wbTariffVersion('2026-09-01').sha256);
+  assert.throws(()=>wbLogisticsQuote({...hefei,platform:'ozon'},input),/不能使用 Ozon/);
+  assert.throws(()=>wbLogisticsQuote({...hefei,ruleKey:'ozon:1:1'},input),/不能使用 Ozon/);
 });

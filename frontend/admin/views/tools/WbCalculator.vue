@@ -3,7 +3,10 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { calculateWbQuote, wbLogisticsQuote } from '../../utils/wb-pricing.js';
-import tariff from '../../../../src/data/wb/logistics-2026-11-11.json';
+import { WB_LOGISTICS_VERSIONS, currentWbTariff, wbTariffVersion } from '../../../../src/shared/wb-logistics-catalog.js';
+const versionKey = ref(currentWbTariff().version);
+const tariff = computed(() => wbTariffVersion(versionKey.value));
+const historical = computed(() => versionKey.value !== currentWbTariff().version);
 
 const props = defineProps({ mode: { type: String, required: true } });
 const form = reactive({ saleCny: null, purchaseCost: null, commissionRate: null, weight: null,
@@ -22,9 +25,9 @@ const loading = ref(false);
 const error = ref('');
 const rateNote = ref('');
 const result = ref(null);
-const selectedRule = computed(() => tariff.rows.find(row => row.id === warehouseId.value));
-const products = [...new Set(tariff.rows.map(row => row.service))];
-const rules = computed(() => tariff.rows.filter(row => (!product.value || row.service === product.value)
+const selectedRule = computed(() => tariff.value.rows.find(row => row.id === warehouseId.value));
+const products = computed(() => [...new Set(tariff.value.rows.map(row => row.service))]);
+const rules = computed(() => tariff.value.rows.filter(row => (!product.value || row.service === product.value)
   && `${row.name} ${row.location} ${row.service} ${row.nameEn} ${row.id === 382855 ? 'DPX' : ''}`.toLowerCase().includes(search.value.trim().toLowerCase())));
 const fields = computed(() => [
   ...(props.mode === 'profit' ? [{ key: 'saleCny', label: '实际售价', unit: '元', precision: 2 }] : []),
@@ -49,7 +52,11 @@ const details = computed(() => result.value ? [
   ['尾程费（沿用 2.5%）', result.value.lastMile], ['提现费（沿用现有公式）', result.value.withdrawalFee],
   ['广告费', result.value.advertising], ['预期退货损失', result.value.expectedReturnLoss], ['其他费', result.value.other]
 ] : []);
-watch([form, warehouseId], () => { result.value = null; });
+watch([form, warehouseId, versionKey], () => { result.value = null; });
+watch(versionKey, () => {
+  product.value = ''; search.value = '';
+  if (!tariff.value.rows.some(row => row.id === warehouseId.value)) warehouseId.value = null;
+});
 function chooseCategory(id) {
   const row = commissions.value.find(row => row.id === id);
   form.commissionRate = row?.rate ?? null;
@@ -100,6 +107,7 @@ onMounted(async () => {
               <small>{{ commissionSource || '从已授权店铺读取 WB 官方中国跨境佣金，或按 WB 卖家后台确认的类目费率填写。' }}</small><small v-if="error" class="error">{{ error }}</small>
             </div>
           </el-form-item>
+          <el-form-item label="WB 报价版本"><el-select v-model="versionKey"><el-option v-for="item in WB_LOGISTICS_VERSIONS" :key="item.version" :value="item.version" :label="`${item.version} 生效${item.version === currentWbTariff().version ? '（当前）' : '（历史）'}`" /></el-select><small v-if="historical" class="error">历史报价，仅用于复核测算；不会替换当前费率。</small></el-form-item>
           <el-form-item label="物流产品"><el-select v-model="product" clearable placeholder="全部产品"><el-option v-for="item in products" :key="item" :value="item" :label="item" /></el-select></el-form-item>
           <el-form-item label="揽收仓及渠道" required><div class="commission-fields"><el-input v-model="search" placeholder="按城市、渠道或仓库编号筛选" clearable /><el-select v-model="warehouseId" filterable><el-option v-for="row in rules" :key="row.id" :value="row.id" :label="`${row.service} · ${row.id === 382855 ? 'DPX · ' : ''}${row.name}`" /></el-select><small v-if="selectedRule">已选 {{ selectedRule.service }} · {{ selectedRule.id === 382855 ? 'DPX · ' : '' }}{{ selectedRule.name }}</small></div></el-form-item>
           <el-form-item label="参考汇率" required><el-input-number v-model="form.exchangeRate" :controls="false" :min="0.0001" :precision="4" @change="rateNote = '手动汇率'" /><span class="unit">₽ / 元</span><small>{{ rateNote }}</small></el-form-item>
@@ -115,11 +123,11 @@ onMounted(async () => {
           <p v-if="shipping.quote">{{ shipping.quote.chargeableWeightG / 1000 }} kg × ¥{{ shipping.quote.perKg }}/kg + ¥{{ shipping.quote.perTicket }}/票</p>
           <p v-if="selectedRule">{{ selectedRule.restrictions }}；限重 {{ selectedRule.maxWeightG / 1000 }} kg。</p>
           <small>WB 官方费率 · {{ tariff.version }} 生效 · {{ tariff.rows.length }} 个揽收仓／渠道</small>
-          <p><a href="/reference/wb-logistics-2026-11-11.pdf" target="_blank" rel="noopener noreferrer">下载报价原表</a> · <a :href="tariff.sourceUrl" target="_blank" rel="noopener noreferrer">查看官方报价原表</a></p>
+          <p><a :href="tariff.downloadUrl" target="_blank" rel="noopener noreferrer">下载报价原表</a> · <a :href="tariff.sourceUrl" target="_blank" rel="noopener noreferrer">查看官方报价原表</a></p>
         </el-card>
         <el-card shadow="never">
           <template #header><strong>计算结果</strong></template>
-          <template v-if="result"><p v-if="mode === 'pricing'">建议售价 <b>¥ {{ money(result.saleCny) }}</b> · 参考 ₽{{ money(result.saleRub) }}</p><p v-if="mode === 'pricing'">建议划线价 ¥{{ money(result.listCny) }} · 参考 ₽{{ money(result.listRub) }}</p><p>预计净利润 <b>¥ {{ money(result.profit) }}</b> · 净利率 {{ result.margin }}%</p><div v-for="[label, value] in details" :key="label" class="detail"><span>{{ label }}</span><b>¥ {{ money(value) }}</b></div></template>
+          <template v-if="result"><small>WB 报价 {{ result.shipping.tariffVersion }} · 仓库 {{ result.shipping.warehouseId }}</small><p v-if="mode === 'pricing'">建议售价 <b>¥ {{ money(result.saleCny) }}</b> · 参考 ₽{{ money(result.saleRub) }}</p><p v-if="mode === 'pricing'">建议划线价 ¥{{ money(result.listCny) }} · 参考 ₽{{ money(result.listRub) }}</p><p>预计净利润 <b>¥ {{ money(result.profit) }}</b> · 净利率 {{ result.margin }}%</p><div v-for="[label, value] in details" :key="label" class="detail"><span>{{ label }}</span><b>¥ {{ money(value) }}</b></div></template>
           <el-empty v-else description="填写参数后计算" :image-size="80" />
         </el-card>
       </div>
