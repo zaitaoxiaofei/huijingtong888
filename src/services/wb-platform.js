@@ -1,3 +1,5 @@
+import { createWbListingWorkflow } from "./wb-listing-workflow.js";
+import { wbListingSource } from "../shared/wb-listing-source.js";
 import { resolveInventoryTenantScope, inventoryTenantSql } from "./inventory-tenant-scope.js";
 import { WB_REMOTE_WRITES_ENABLED, WB_REMOTE_WRITE_ACTIONS } from '../shared/wb-capabilities.js';
 import { randomUUID, createHash } from 'node:crypto';
@@ -13,7 +15,7 @@ const positiveId = value => {
 };
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
 
-export function createWbPlatform({ query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability }) {
+export function createWbPlatform({ query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability, loadSourceDraft }) {
   async function account(tenantId, shopId, allowUnchecked = false) {
     const rows = await query(`SELECT c.*, s.name FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id
       WHERE c.tenant_id=? AND s.tenant_id=? AND c.shop_id=? AND s.platform='wb' AND s.status='active'`,
@@ -416,7 +418,8 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
       WHERE r.product_id=? GROUP BY s.platform`,[product]);
     return {rows};
   }
-  return { account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  async function listingSource(tenantId,body){await account(tenantId,body.shop_id);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
+  return { listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
@@ -442,7 +445,13 @@ export async function wbPlatform(session, permission = 'operations', signal) {
         &&(!current[0].checked_at||current[0].seller_id!==a.seller_id))throw fail('WB 授权已变更，操作已停止；请先检查店铺授权再继续。',409);
       return wbRequest(current[0],service,path,{...options,signal:options?.signal||signal});
     },invalidate:invalidateWbOrderCachesMysql,
-    reconcileInventory:async(...args)=>{await authorize();return reconcileWbOrderInventoryMysql(...args);},loadAvailability:productInventoryAvailabilityMysql});
+    reconcileInventory:async(...args)=>{await authorize();return reconcileWbOrderInventoryMysql(...args);},loadAvailability:productInventoryAvailabilityMysql,loadSourceDraft:async id=>{
+      const current=await authorize(),key=current.tenant.slug==='default'?'admin':String(current.tenant.id);
+      const rows=await mysqlQuery(`SELECT * FROM listing_drafts WHERE id=? AND status<>'deleted' AND (tenant_id=?${key==='admin'?' OR tenant_id IS NULL':''}) LIMIT 1`,[id,key]);
+      if(!rows[0])throw fail('来源草稿不存在或不属于当前企业。',404);
+      const {assembleListingDraftStoredRow}=await import('./listing-frozen-content.js');
+      return assembleListingDraftStoredRow(mysqlQuery,{tenantId:key,row:rows[0]});
+    }});
   if(!WB_REMOTE_WRITES_ENABLED)for(const action of WB_REMOTE_WRITE_ACTIONS)platform[action]=async()=>{throw fail('当前先开放 WB 授权和数据拉取；上架、改价、平台库存及履约写操作需完成真实店铺联调后开放。',409);};
   return platform;
 }

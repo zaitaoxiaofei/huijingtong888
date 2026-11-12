@@ -1,5 +1,5 @@
-const reads = new Set(['shops', 'products', 'warehouses', 'categories', 'characteristics', 'publish-errors', 'supply', 'promotions', 'promotion-products', 'prices', 'price-result', 'inventory-usage', 'stocks']);
-const writes = new Set(['shops/save', 'check', 'warehouses/save', 'products/sync', 'publish', 'orders/sync', 'orders/prepare', 'orders/stickers', 'supply/action', 'products/bind', 'products/media', 'prices/set', 'promotions/enroll', 'stocks/set']);
+const reads = new Set(['listing-templates','listing-drafts','listing-source','shops', 'products', 'warehouses', 'categories', 'characteristics', 'publish-errors', 'supply', 'promotions', 'promotion-products', 'prices', 'price-result', 'inventory-usage', 'stocks']);
+const writes = new Set(['listing-templates/save','listing-drafts/save','listing-drafts/validate','shops/save', 'check', 'warehouses/save', 'products/sync', 'publish', 'orders/sync', 'orders/prepare', 'orders/stickers', 'supply/action', 'products/bind', 'products/media', 'prices/set', 'promotions/enroll', 'stocks/set']);
 export function wbRoutePermission(parts, method) {
   if (parts[0] !== 'api' || parts[1] !== 'wb') return null;
   const path = parts.slice(2).join('/');

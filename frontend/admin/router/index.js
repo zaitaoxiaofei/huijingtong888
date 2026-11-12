@@ -159,7 +159,7 @@ export const router = createRouter({
           ]
         },
         { path: "wb/online-products", name: "wb-online-products", component: () => import("../views/inventory/WbOnlineProductsView.vue"), meta: { title: "WB 在线商品", breadcrumb: ["商品运营", "WB 在线商品"] } },
-        { path: "wb/listing", name: "wb-listing", component: () => import("../views/inventory/WbOnlineProductsView.vue"), meta: { title: "WB 商品上架", breadcrumb: ["商品运营", "WB 商品上架"] } },
+        { path: "wb/listing", name: "wb-listing", component: () => import("../views/inventory/WbListingReviewView.vue"), meta: { title: "WB 商品上架", breadcrumb: ["商品运营", "WB 商品上架"] } },
         { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品运营", "在线商品"] } },
         { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵", breadcrumb: ["运营", "店铺矩阵"] } },
         { path: "asset-variant-center/create", name: "asset-variant-center-create", redirect: (to) => ({ name: "ai-variant-lab", query: to.query }) },
