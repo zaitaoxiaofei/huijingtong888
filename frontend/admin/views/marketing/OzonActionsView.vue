@@ -3,6 +3,7 @@ import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive,
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
+import { buildPromotionEnrollmentSummary } from "../../utils/promotionEnrollmentResult";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
 
 const MODE_ITEMS = [
@@ -127,6 +128,8 @@ const state = reactive({
   cleanupSavingStoreId: "",
   cleanupRunningStoreId: ""
 });
+
+const enrollmentSummary = computed(() => buildPromotionEnrollmentSummary(state.enrollmentResult));
 
 const selectedAction = computed(() => state.actions.find((row) => String(getActionId(row)) === String(state.selectedActionId)) || null);
 const currentPager = computed(() => state.productScope === "joined" ? state.productPagers.joined : state.productPagers.candidates);
@@ -1449,14 +1452,15 @@ onActivated(() => {
 
         <p v-if="state.mode === 'official'" class="product-hint">一键半价按上架价的 50% 填入统一活动限价（例如 200 → 100），不会再次折半或修改商品零售价；填入后需提交，且限价须符合入围上限。统一限价可能影响同商品的其他官方活动，实际库存请到“批量改库存”修改。</p>
 
-        <el-alert v-if="state.enrollmentResult" :type="state.enrollmentResult.success ? 'success' : 'warning'" :title="`本次报名已确认 ${state.enrollmentResult.count || 0} 个，待核对 ${state.enrollmentResult.failures?.length || 0} 个`" :closable="false" show-icon>
-          <p v-for="item in state.enrollmentResult.failures" :key="item.product_id">商品 {{ item.product_id }}：{{ item.reason }}</p>
-          <p v-for="(warning, index) in state.enrollmentResult.warnings" :key="index">{{ warning }}</p>
-        </el-alert>
-
-        <el-alert v-if="state.enrollmentResult" :type="state.enrollmentResult.success ? 'success' : 'warning'" :title="`本次报名已确认 ${state.enrollmentResult.count || 0} 个，待核对 ${state.enrollmentResult.failures?.length || 0} 个`" :closable="false" show-icon>
-          <p v-for="item in state.enrollmentResult.failures" :key="item.product_id">商品 {{ item.product_id }}：{{ item.reason }}</p>
-          <p v-for="(warning, index) in state.enrollmentResult.warnings" :key="index">{{ warning }}</p>
+        <el-alert v-if="enrollmentSummary" :type="enrollmentSummary.type" :title="enrollmentSummary.title" :closable="false" show-icon>
+          <p v-if="enrollmentSummary.message">{{ enrollmentSummary.message }}</p>
+          <details v-if="enrollmentSummary.groups.length || enrollmentSummary.warnings.length" class="enrollment-details">
+            <summary>查看商品明细与平台提示</summary>
+            <div class="enrollment-details-body">
+              <p v-for="group in enrollmentSummary.groups" :key="group.reason">{{ group.reason }}（{{ group.ids.length }} 件）：{{ group.ids.join('、') }}</p>
+              <p v-for="(warning, index) in enrollmentSummary.warnings" :key="index">{{ warning }}</p>
+            </div>
+          </details>
         </el-alert>
 
         <el-alert v-if="state.removalResult" :type="state.removalResult.type" :title="state.removalResult.summary" :closable="false" show-icon>
@@ -2000,4 +2004,10 @@ onActivated(() => {
   .cleanup-metrics { grid-template-columns: minmax(0, 1fr); }
   .ozon-actions-toolbar :where(.el-button, .el-select) { width: 100%; margin-left: 0; }
 }
+</style>
+
+<style scoped>
+.enrollment-details { margin-top: 6px; }
+.enrollment-details summary { cursor: pointer; }
+.enrollment-details-body { max-height: 220px; overflow: auto; overflow-wrap: anywhere; }
 </style>

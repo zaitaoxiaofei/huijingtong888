@@ -61,3 +61,22 @@ test("empty receipts, contradictions, read failures and changed prices cannot be
     assert.equal(result.failures.length, 1);
   }
 });
+
+
+test("22 accepted enrollment receipts remain pending, not rejected, after readback rate limiting", () => {
+  const products = Array.from({ length: 22 }, (_, i) => product(i + 1));
+  const outcome = promotionEnrollmentOutcome(products, { active_product_ids: products.map(p => p.product_id) }, [],
+    Object.assign(Error("You have reached request rate limit per second"), { status: 429 }));
+  assert.equal(outcome.count, 0); assert.equal(outcome.pendingProductIds.length, 22);
+  assert.equal(outcome.rejectedProductIds.length, 0);
+  assert.ok(outcome.failures.every(row => row.status === "pending" && row.code === "READBACK_RATE_LIMITED"));
+  assert.doesNotMatch(outcome.failures[0].reason, /\[object Object\]/);
+});
+test("explicit rejection and preflight failure stay distinct from pending verification", () => {
+  const outcome = promotionEnrollmentOutcome([product(1), product(2), product(3)], {
+    active_product_ids: [1], rejected: [{ product_id: 2, reason: "above maximum" }]
+  }, [], "rate limit", [{ product_id: 3, reason: "currency changed" }]);
+  assert.deepEqual(outcome.pendingProductIds, [1]); assert.deepEqual(outcome.rejectedProductIds, [2, 3]);
+  assert.equal(outcome.failures[1].reason, "above maximum");
+  assert.equal(outcome.failures[1].code, undefined);
+});
