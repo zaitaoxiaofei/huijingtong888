@@ -1,3 +1,5 @@
+import { createPerformanceReportCheckpoints } from "./ozon-performance-report-checkpoint.js";
+import { fetchDurablePerformanceReport } from "./ozon-performance-report.js";
 import { createPerformanceReadQueue, performanceResponseError, isPerformanceRateLimit } from "./ozon-performance-read-queue.js";
 import { normalizeAdvertisingBid, executeAdvertisingBid } from "./ozon-advertising-bid.js";
 import { advertisingTenantScope, advertisingTenantSql, advertisingShopSql, assertAdvertisingShop, isAdvertisingBusinessRequest } from './advertising-tenant-context.js';
@@ -1260,9 +1262,18 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
   const results = [];
   const errors = [];
 
+  const callerBeforeRequest = options.beforeRequest;
   for (const shop of shops) {
     await assertAdvertisingShop(shop.id);
-    options = { ...options, shop_id: shop.id };
+    options = { ...options, shop_id: shop.id, beforeRequest: async () => {
+      if (callerBeforeRequest) await callerBeforeRequest();
+      await assertAdvertisingShop(shop.id);
+      const [current] = await mysqlQuery('SELECT performance_client_id, performance_client_secret FROM shops WHERE id = ? AND status = ?', [shop.id, 'active']);
+      if (!current || String(current.performance_client_id) !== String(shop.performance_client_id)
+        || String(current.performance_client_secret) !== String(shop.performance_client_secret)) {
+        throw Object.assign(new Error("广告授权在同步期间发生变化，请检查店铺配置后重新同步"), { statusCode: 403 });
+      }
+    } };
     const clientId = String(shop.performance_client_id || "").trim();
     const clientSecret = String(shop.performance_client_secret || "").trim();
     await logAdvertisingSyncEvent(body, {
@@ -1300,7 +1311,11 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
       const campaigns = mergeAdvertisingCampaigns(historicalCampaigns, liveCampaigns);
       const forbiddenCampaigns = await forbiddenCampaignIdsMysql(shop.id);
       const availableCampaigns = campaigns.filter((campaign) => !forbiddenCampaigns.has(String(campaign.id || "")));
+      const reportCheckpoints = createPerformanceReportCheckpoints({ shop });
+      const savedReports = await reportCheckpoints.list();
+      const completedReports = [];
       const pendingCampaignIds = await pendingAdvertisingCampaignIdsMysql(shop.id, { from, to });
+      for (const saved of savedReports) for (const id of saved.payload.campaigns) pendingCampaignIds.add(id);
       const prioritizedCampaigns = pendingCampaignIds.size
         ? [...availableCampaigns].sort((left, right) => {
             const leftPending = pendingCampaignIds.has(String(left.id || "")) ? 1 : 0;
@@ -1375,13 +1390,23 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
         run_id: body.run_id || body.runId || 0,
         job_key: body.job_key || body.jobKey || "",
         report_stats: {},
+        report_checkpoints: reportCheckpoints,
+        saved_reports: savedReports,
+        completed_reports: completedReports,
+        beforeRequest: options.beforeRequest,
         signal: options.signal
       });
       const reportStats = reportRows.reportStats || {};
       const normalized = reportRows
         .map((row) => normalizePerformanceAdRow(row, shop, selectedCampaigns))
         .filter((row) => row.date_key && row.shop_id && row.ozon_sku && row.ozon_sku !== "0");
-      await settleReturnedAdvertisingReportsMysql(shop.id, reportStats.settledCampaignIds, { from, to });
+      if (reportRows.length && normalized.length !== reportRows.length) {
+        throw new Error("广告报表存在无法识别的每日商品行，已保留任务编号，请检查报表字段映射");
+      }
+      await options.beforeRequest();
+      for (const settled of reportStats.settledReports || []) {
+        await settleReturnedAdvertisingReportsMysql(shop.id, settled.campaigns, { from: settled.dateFrom, to: settled.dateTo });
+      }
       const placeholders = reportStats.retryLaterCampaigns > 0
         ? await buildPendingAdvertisingRowsMysql(shop, selectedCampaigns, { from, to, normalized })
         : [];
@@ -1395,7 +1420,9 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
         });
         imported += Number(result.total || rowsToUpsert.length);
       }
-      const shopStatus = reportStats.retryLaterCampaigns > 0 ? "report_pending" : "ok";
+      await options.beforeRequest();
+      for (const handle of completedReports) await reportCheckpoints.complete(handle);
+      const shopStatus = reportStats.retryLaterCampaigns > 0 || reportStats.recoveredPriorWindow > 0 ? "report_pending" : "ok";
       results.push({
         shop_id: shop.id,
         shop_name: shop.name,
@@ -1404,9 +1431,12 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
         fetched: reportRows.length,
         imported: rowsToUpsert.length,
         placeholder_rows: placeholders.length,
-        retry_later_campaigns: reportStats.retryLaterCampaigns || 0,
+        retry_later_campaigns: (reportStats.retryLaterCampaigns || 0) + (reportStats.recoveredPriorWindow || 0),
+        recovered_prior_window_campaigns: reportStats.recoveredPriorWindow || 0,
         status: shopStatus,
-        warning: shopStatus === "report_pending" ? "Ozon report is not ready; placeholder rows were written" : ""
+        warning: reportStats.recoveredPriorWindow > 0
+          ? "已恢复并导入原日期范围报表，当前范围将在下一轮同步继续补齐。"
+          : shopStatus === "report_pending" ? "Ozon 报表尚未完成，已保留任务，下次同步继续恢复。" : ""
       });
       await logAdvertisingSyncEvent(body, {
         stepKey: "shop_finish",
@@ -2184,88 +2214,106 @@ async function fetchPerformanceSkuStats(token, options = {}) {
   reportStats.settledCampaignIds = Array.isArray(reportStats.settledCampaignIds)
     ? reportStats.settledCampaignIds
     : [];
+  reportStats.settledReports = [];
+  const selectedIds = new Set(campaigns.map(campaign => String(campaign.id)));
+  const tasks = (options.saved_reports || []).filter(saved => saved.payload.campaigns.some(id => selectedIds.has(id)))
+    .map(saved => ({ restored: true, payload: saved.payload,
+      chunk: saved.payload.campaigns.map(id => campaigns.find(campaign => String(campaign.id) === id) || { id }) }));
+  const recoveringIds = new Set(tasks.flatMap(task => task.payload.campaigns));
   const windows = splitDateRange(options.from, options.to, 62);
   for (const window of windows) {
-    for (let index = 0; index < campaigns.length; index += campaignChunkSize) {
-      const chunk = campaigns.slice(index, index + campaignChunkSize);
-      try {
-        const report = await createAndFetchPerformanceReport(token, {
-          campaigns: chunk.map((campaign) => String(campaign.id)),
-          dateFrom: window.from,
-          dateTo: window.to,
-          groupBy: "DATE"
-        }, options);
-        rows.push(...flattenPerformanceReportRows(report, chunk));
-        reportStats.settledCampaignIds.push(...chunk.map((campaign) => String(campaign.id)));
-      } catch (error) {
-        if (chunk.length <= 1) {
-          const campaign = chunk[0];
-          if (isRetryablePerformanceReportError(error)) {
+    const freshCampaigns = campaigns.filter(campaign => !recoveringIds.has(String(campaign.id)));
+    for (let index = 0; index < freshCampaigns.length; index += campaignChunkSize) {
+      const chunk = freshCampaigns.slice(index, index + campaignChunkSize);
+      tasks.push({ chunk, payload: { campaigns: chunk.map(campaign => String(campaign.id)), dateFrom: window.from, dateTo: window.to, groupBy: "DATE" } });
+    }
+  }
+  for (const task of tasks) {
+    const { chunk } = task;
+    const window = { from: task.payload.dateFrom, to: task.payload.dateTo };
+    try {
+      const report = await createAndFetchPerformanceReport(token, {
+        campaigns: chunk.map((campaign) => String(campaign.id)),
+        dateFrom: window.from,
+        dateTo: window.to,
+        groupBy: "DATE"
+      }, options);
+      rows.push(...flattenPerformanceReportRows(report, chunk));
+      reportStats.settledCampaignIds.push(...chunk.map((campaign) => String(campaign.id)));
+      reportStats.settledReports.push(task.payload);
+      if (task.restored && (task.payload.dateFrom !== options.from || task.payload.dateTo !== options.to)) {
+        reportStats.recoveredPriorWindow = Number(reportStats.recoveredPriorWindow || 0) + chunk.length;
+      }
+    } catch (error) {
+      if (error.reportUuid && [401, 403].includes(Number(error.statusCode))) throw error;
+      if (chunk.length <= 1) {
+        const campaign = chunk[0];
+        if (isRetryablePerformanceReportError(error)) {
+          reportStats.retryLaterCampaigns += 1;
+          await logAdvertisingSyncEvent(options, {
+            stepKey: "campaign_retry_later",
+            status: "warning",
+            shopId: options.shop_id,
+            shopName: options.shop_name,
+            message: `Campaign report not ready ${campaign?.id || ""}`.trim(),
+            detail: { campaign_id: campaign?.id || "", reason: error.message || "report_not_ready" }
+          });
+          continue;
+        }
+        if (campaign && isCampaignReportUnavailableError(error)) {
+          reportStats.skippedCampaigns += 1;
+          await markForbiddenCampaignMysql(options.shop_id, campaign.id, error.message || "campaign_report_unavailable");
+          await logAdvertisingSyncEvent(options, {
+            stepKey: "campaign_skip",
+            status: "warning",
+            shopId: options.shop_id,
+            shopName: options.shop_name,
+            message: `Skipping unavailable campaign ${campaign.id}`,
+            detail: { campaign_id: campaign.id, reason: error.message || "campaign_report_unavailable" }
+          });
+          continue;
+        }
+        throw error;
+      }
+      if (error.reportUuid || (!isMissingReportError(error) && !isCampaignReportUnavailableError(error)) || chunk.length <= 1) throw error;
+      for (const campaign of chunk) {
+        try {
+          const report = await createAndFetchPerformanceReport(token, {
+            campaigns: [String(campaign.id)],
+            dateFrom: window.from,
+            dateTo: window.to,
+            groupBy: "DATE"
+          }, options);
+          rows.push(...flattenPerformanceReportRows(report, [campaign]));
+          reportStats.settledCampaignIds.push(String(campaign.id));
+          reportStats.settledReports.push({ ...task.payload, campaigns: [String(campaign.id)] });
+        } catch (singleError) {
+          if (isRetryablePerformanceReportError(singleError)) {
             reportStats.retryLaterCampaigns += 1;
             await logAdvertisingSyncEvent(options, {
               stepKey: "campaign_retry_later",
               status: "warning",
               shopId: options.shop_id,
               shopName: options.shop_name,
-              message: `Campaign report not ready ${campaign?.id || ""}`.trim(),
-              detail: { campaign_id: campaign?.id || "", reason: error.message || "report_not_ready" }
+              message: `Campaign report not ready ${campaign.id}`,
+              detail: { campaign_id: campaign.id, reason: singleError.message || "report_not_ready" }
             });
             continue;
           }
-          if (campaign && isCampaignReportUnavailableError(error)) {
+          if (isCampaignReportUnavailableError(singleError)) {
             reportStats.skippedCampaigns += 1;
-            await markForbiddenCampaignMysql(options.shop_id, campaign.id, error.message || "campaign_report_unavailable");
+            await markForbiddenCampaignMysql(options.shop_id, campaign.id, singleError.message || "campaign_report_unavailable");
             await logAdvertisingSyncEvent(options, {
               stepKey: "campaign_skip",
               status: "warning",
               shopId: options.shop_id,
               shopName: options.shop_name,
               message: `Skipping unavailable campaign ${campaign.id}`,
-              detail: { campaign_id: campaign.id, reason: error.message || "campaign_report_unavailable" }
+              detail: { campaign_id: campaign.id, reason: singleError.message || "campaign_report_unavailable" }
             });
             continue;
           }
-          throw error;
-        }
-        if ((!isMissingReportError(error) && !isCampaignReportUnavailableError(error)) || chunk.length <= 1) throw error;
-        for (const campaign of chunk) {
-          try {
-            const report = await createAndFetchPerformanceReport(token, {
-              campaigns: [String(campaign.id)],
-              dateFrom: window.from,
-              dateTo: window.to,
-              groupBy: "DATE"
-            }, options);
-            rows.push(...flattenPerformanceReportRows(report, [campaign]));
-            reportStats.settledCampaignIds.push(String(campaign.id));
-          } catch (singleError) {
-            if (isRetryablePerformanceReportError(singleError)) {
-              reportStats.retryLaterCampaigns += 1;
-              await logAdvertisingSyncEvent(options, {
-                stepKey: "campaign_retry_later",
-                status: "warning",
-                shopId: options.shop_id,
-                shopName: options.shop_name,
-                message: `Campaign report not ready ${campaign.id}`,
-                detail: { campaign_id: campaign.id, reason: singleError.message || "report_not_ready" }
-              });
-              continue;
-            }
-            if (isCampaignReportUnavailableError(singleError)) {
-              reportStats.skippedCampaigns += 1;
-              await markForbiddenCampaignMysql(options.shop_id, campaign.id, singleError.message || "campaign_report_unavailable");
-              await logAdvertisingSyncEvent(options, {
-                stepKey: "campaign_skip",
-                status: "warning",
-                shopId: options.shop_id,
-                shopName: options.shop_name,
-                message: `Skipping unavailable campaign ${campaign.id}`,
-                detail: { campaign_id: campaign.id, reason: singleError.message || "campaign_report_unavailable" }
-              });
-              continue;
-            }
-            throw singleError;
-          }
+          throw singleError;
         }
       }
     }
@@ -2279,113 +2327,16 @@ async function createAndFetchPerformanceReport(token, payload, options = {}) {
   const reportPollDelayMs = Math.max(3000, Number(options.report_poll_delay_ms || options.reportPollDelayMs || 5000));
   const reportInitialDelayMs = Math.max(2000, Number(options.report_initial_delay_ms || options.reportInitialDelayMs || 8000));
   const reportMissingRetryDelayMs = Math.max(reportPollDelayMs, Number(options.report_missing_retry_delay_ms || options.reportMissingRetryDelayMs || 5000));
-  const reportCreateAttempts = Math.max(1, Math.min(3, Number(options.report_create_attempts || options.reportCreateAttempts || 2)));
   const reportPollAttempts = Math.max(12, Math.min(120, Number(options.report_poll_attempts || options.reportPollAttempts || 60)));
-  const createPayload = {
-    campaigns: payload.campaigns,
-    dateFrom: payload.dateFrom,
-    dateTo: payload.dateTo,
-    groupBy: payload.groupBy
-  };
-  const createCandidates = [
-    "/api/client/statistics/json",
-    "/api/client/statistics/products/json"
-  ];
-  let lastError = null;
-  for (const path of createCandidates) {
-    for (let createAttempt = 0; createAttempt < reportCreateAttempts; createAttempt += 1) {
-      let createData = null;
-      await logAdvertisingSyncEvent(options, {
-        stepKey: "create_report",
-        status: "info",
-        shopId: options.shop_id,
-        shopName: options.shop_name,
-        attempt: createAttempt + 1,
-        message: `Creating performance report via ${path}`,
-        detail: {
-          campaigns: Array.isArray(payload.campaigns) ? payload.campaigns.slice(0, 10) : [],
-          from: payload.dateFrom,
-          to: payload.dateTo
-        }
-      });
-      for (let attempt = 0; attempt < 6; attempt += 1) {
-        try {
-          createData = await performanceRequest(path, createPayload, { ...options, token });
-          break;
-        } catch (error) {
-          lastError = error;
-          if (!isActiveReportLimitError(error)) break;
-          if (attempt < 5) await sleep(Math.max(reportRetryDelayMs + attempt * 5000, Number(error.retryAfterMs) || 0), options.signal);
-        }
-      }
-
-      if (!createData) {
-        if (isActiveReportLimitError(lastError)) throw lastError;
-        continue;
-      }
-      const uuid = createData.UUID || createData.uuid || createData.report_id || createData.result?.UUID || createData.result?.uuid;
-      if (!uuid) return createData;
-      await logAdvertisingSyncEvent(options, {
-        stepKey: "report_uuid",
-        status: "info",
-        shopId: options.shop_id,
-        shopName: options.shop_name,
-        attempt: createAttempt + 1,
-        message: `Created performance report ${uuid}`,
-        detail: { uuid }
-      });
-      if (reportInitialDelayMs > 0) await sleep(reportInitialDelayMs, options.signal);
-
-      let sawMissingReport = false;
-      for (let attempt = 0; attempt < reportPollAttempts; attempt += 1) {
-        let missingReportAttempt = false;
-        const pathCandidates = [
-          `/api/client/statistics/report?UUID=${encodeURIComponent(uuid)}`,
-          `/api/client/statistics/${encodeURIComponent(uuid)}`
-        ];
-        for (const reportPath of pathCandidates) {
-          try {
-            await logAdvertisingSyncEvent(options, {
-              stepKey: "poll_report",
-              status: "info",
-              shopId: options.shop_id,
-              shopName: options.shop_name,
-              attempt: attempt + 1,
-              message: `Polling performance report ${uuid}`,
-              detail: { uuid, reportPath }
-            });
-            const data = await performanceRequest(reportPath, null, { ...options, token, method: "GET" });
-            if (isReportReady(data)) return data;
-            missingReportAttempt = false;
-          } catch (error) {
-            lastError = error;
-            if (isPerformanceRateLimit(error)) {
-              error.reportUuid = uuid;
-              throw error;
-            }
-            if (isMissingReportError(error)) {
-              sawMissingReport = true;
-              missingReportAttempt = true;
-              continue;
-            }
-          }
-        }
-        if (missingReportAttempt) {
-          await sleep(reportMissingRetryDelayMs, options.signal);
-          continue;
-        }
-        await sleep(reportPollDelayMs, options.signal);
-      }
-
-      if (sawMissingReport) {
-        lastError = new Error(`Performance API report ${uuid} failed: report not found after ${reportPollAttempts} poll attempts`);
-        continue;
-      }
-      break;
-    }
-  }
-
-  throw lastError || new Error("无法创建 Ozon Performance 统计报表");
+  return fetchDurablePerformanceReport(payload, {
+    checkpoints: options.report_checkpoints,
+    completed: options.completed_reports,
+    request: (path, body, method) => performanceRequest(path, body, { ...options, token, method }),
+    wait: sleep, ready: isReportReady, activeLimit: isActiveReportLimitError, rateLimit: isPerformanceRateLimit,
+    log: event => logAdvertisingSyncEvent(options, { ...event, shopId: options.shop_id, shopName: options.shop_name }),
+    signal: options.signal, retryDelayMs: reportRetryDelayMs, initialDelayMs: reportInitialDelayMs,
+    pollDelayMs: reportPollDelayMs, missingDelayMs: reportMissingRetryDelayMs, pollAttempts: reportPollAttempts
+  });
 }
 
 function splitDateRange(from, to, maxDays = 62) {
@@ -2438,7 +2389,8 @@ function isReportEndpointUnavailableError(error) {
 }
 
 function isRetryablePerformanceReportError(error) {
-  return isMissingReportError(error)
+  return error?.code === "OZON_AD_REPORT_PENDING"
+    || isMissingReportError(error)
     || isReportEndpointUnavailableError(error)
     || isActiveReportLimitError(error);
 }
@@ -2450,6 +2402,7 @@ function isCampaignReportUnavailableError(error) {
 function classifyAdvertisingSyncError(error) {
   const message = String(error?.message || error || "Advertising sync failed").trim();
   const lower = message.toLowerCase();
+  if (error?.code === "OZON_AD_REPORT_PENDING") return { code: "report_pending", message };
   if (isPerformanceRateLimit(error)) return { code: "rate_limited", message: "Ozon 广告接口暂时限流，请稍后重试；已有广告数据保留。" };
   if (lower.includes("report not found")) return { code: "report_not_found", message };
   if (isReportEndpointUnavailableError(error)) return { code: "report_endpoint_unavailable", message };
