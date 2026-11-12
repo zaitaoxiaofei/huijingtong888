@@ -21,7 +21,7 @@ const dateRange = computed({
 });
 </script>
 <template>
-  <section class="inventory-toolbar inventory-search-toolbar" :class="{'is-compact-search':compactSearch}" aria-label="库存搜索">
+  <section class="inventory-toolbar inventory-search-toolbar" :class="{'is-compact-search':compactSearch,'has-secondary':!!$slots.secondary}" aria-label="库存搜索">
     <el-form label-position="top" class="inventory-search-form" @submit.prevent="emit('search')">
       <div class="inventory-search-fields">
         <slot v-if="compactSearch" />
@@ -35,6 +35,7 @@ const dateRange = computed({
         <el-form-item v-if="showQuery" :label="queryLabel" class="search-keyword">
           <el-input v-model="filters.query" :placeholder="searchPlaceholder" clearable aria-label="搜索内容" @keyup.enter.prevent.stop="emit('search')" />
         </el-form-item>
+        <slot name="after-search" />
         <el-form-item v-if="showShop" label="店铺" class="search-shop">
           <el-select v-model="filters.shopId" filterable aria-label="店铺"><el-option label="全部店铺" value="all" /><el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" /></el-select>
         </el-form-item>
@@ -54,11 +55,14 @@ const dateRange = computed({
         <slot name="actions" />
       </div>
 
-      <div v-if="compactSearch" class="inventory-toolbar-right"><slot name="right"/></div>
+      <div v-if="compactSearch&&$slots.right" class="inventory-toolbar-right"><slot name="right"/></div>
+      <div v-if="$slots.secondary" class="inventory-toolbar-secondary"><slot name="secondary"/></div>
     </el-form>
   </section>
 </template>
 <style scoped>
+.inventory-toolbar-secondary{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex:1 0 100%;min-width:0;flex-wrap:wrap}.inventory-search-fields :deep(.search-receipt-state){width:170px;flex:none}
+.is-compact-search.has-secondary .inventory-search-form{flex-wrap:wrap}.is-compact-search.has-secondary .inventory-search-fields{flex:1 1 auto;flex-wrap:wrap}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-receipt-state){width:170px}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-scope){width:110px}
 .is-compact-search .inventory-search-fields{flex:0 1 auto;flex-wrap:nowrap}.is-compact-search .inventory-search-fields :deep(.search-keyword){width:190px;flex:none}.is-compact-search .inventory-search-form{align-items:flex-end;flex-wrap:nowrap}.inventory-toolbar-right{display:flex;align-items:center;gap:8px;margin-left:auto;white-space:nowrap}.inventory-precise-fields :deep(.inventory-structured-search){display:flex;flex-wrap:wrap;gap:10px}.inventory-precise-fields :deep(.search-group){display:contents}.inventory-precise-fields :deep(.el-form-item){width:190px}.inventory-precise-fields :deep(.el-select){width:100%}@media(max-width:1250px){.is-compact-search .inventory-search-form{flex-wrap:wrap}.inventory-toolbar-right{flex-wrap:wrap;white-space:normal}}
 .inventory-search-toolbar { position: static; min-width: 0; padding: 12px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-search-form { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }

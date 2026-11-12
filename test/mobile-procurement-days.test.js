@@ -22,6 +22,23 @@ test('late mobile queue searches and previous-enterprise responses cannot replac
  sut.filters.query='old';const foreign=sut.load(true);h.scope='B';sut.reset();release({rows:[row(100)],days:[{date:'2020-01-01',open:1}],selected_day:'2020-01-01'});await foreign;assert.equal(sut.rows.value.length,0);assert.equal(sut.purchaseDays.value.length,0);assert.equal(sut.loading.value,false);
 });
 
+test('mobile receipt filters use pending for all states, preserve purchase dates and reset every filter',async()=>{
+ const h=await component('components/mobile/MobileWorkQueue.vue'),sut=h.definition.setup({warehouse:true},{expose(){},emit(){}});
+ assert.equal(sut.canStocktake({product_id:1,is_bundle:false}),true);assert.equal(sut.canStocktake({product_id:1,is_bundle:true,review_required:false}),false,'reviewed bundles still require stocktake of physical components');
+ sut.purchaseRange.start='2026-10-01';sut.purchaseRange.end='2026-10-31';sut.filters.query='1-3-1';await sut.load(true);let p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
+ assert.equal(p.get('status'),'pending');assert.equal(p.get('start_date'),'2026-10-01');assert.equal(p.get('end_date'),'2026-10-31');assert.equal(p.get('query'),'1-3-1');assert.equal(sut.queueFilters[0][1],'全部状态');
+ sut.queueStatus.value='arrived';await settle();sut.resetFilters();await settle();p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
+ assert.equal(p.get('status'),'pending');assert.equal(p.has('start_date'),false);assert.equal(p.has('end_date'),false);assert.equal(p.get('query'),'');assert.equal(sut.purchaseRange.start,'');assert.equal(sut.purchaseRange.end,'');assert.equal(sut.selected.value.length,0);
+ const count=h.calls.length;sut.purchaseRange.start='2026-11-10';sut.purchaseRange.end='2026-11-01';await sut.load(true);assert.equal(h.calls.length,count);assert.match(sut.error.value,/开始日期不能晚于结束日期/);assert.equal(sut.loading.value,false);sut.reset();
+});
+
+test('mobile warehouse completed receipts use received-only history without a recent purchase cutoff',async()=>{
+ const h=await component('components/mobile/MobileWorkQueue.vue',{auth:{user:{id:3,roles:['packing'],tenant:{id:2,role:'member'}}}}),sut=h.definition.setup({warehouse:false},{expose(){},emit(){}});
+ sut.queueMore('received');await settle();let p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
+ assert.equal(sut.tab.value,'received');assert.equal(p.get('status'),'received');assert.equal(p.has('recent'),false);assert.equal(p.has('day_mode'),false);assert.equal(sut.canBatch.value,false);assert.equal(sut.canPurchase.value,false);assert.equal(h.calls.some(call=>call.path.includes('status=all')),false);
+ sut.queueMore('pending');await settle();p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;assert.equal(p.get('status'),'pending');assert.equal(sut.tab.value,'pending');sut.reset();
+});
+
 test('mobile arrival supports 80 of 600 with optional notes and retries only failed batches using unchanged keys',async()=>{
  let failed=false;const events=[];
  const h=await component('components/mobile/MobilePurchaseBatchDialog.vue',{post:async(_url,body)=>{if(body.id===2&&!failed){failed=true;throw Error('响应暂不可用');}return{quantity:body.quantity,remaining_quantity:body.expected_quantity-body.quantity};}}),props=reactive({modelValue:true,status:'open',rows:[row(1),row(2,3)]}),sut=h.definition.setup(props,{expose(){},emit:(event,value)=>events.push({event,value})});
