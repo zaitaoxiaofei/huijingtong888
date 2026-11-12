@@ -128,6 +128,7 @@ export const router = createRouter({
       children: [
         { path: "", redirect: "/dashboard" },
         { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "任务系统", breadcrumb: ["任务系统"] } },
+        { path: "marketplace-demo", name: "marketplace-demo", component: () => import("../views/marketplace/MarketplaceDemoView.vue"), meta: { title: "多平台预览", breadcrumb: ["运营", "多平台预览"] } },
         { path: "dashboard", name: "dashboard", component: DashboardView, meta: { title: "经营首页", breadcrumb: ["经营首页"] } },
         { path: "ai-credits", name: "ai-credits", component: () => import("../views/AiCreditsView.vue"), meta: { title: "AI积分", breadcrumb: ["AI积分"] } },
         { path: "membership", name: "membership", component: MembershipView, meta: { title: "会员中心", breadcrumb: ["会员中心"] } },
