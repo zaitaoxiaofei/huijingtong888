@@ -22,9 +22,10 @@ import { addDefaultWorkflowBindings } from '../../../../src/shared/product-workf
 import WorkflowRunReview from '../../components/listing/WorkflowRunReview.vue';
 import { createWorkflowNode, keyCaseWorkflow, validateWorkflow, validateWorkflowVariants } from '../../../../src/shared/product-workflow.js';
 import { isWorkflowInput, workflowDefault, expandWorkflowVariants, refreshWorkflowCategory } from '../../../../src/shared/product-workflow-inputs.js';
+import { planWorkflowProductImport } from '../../utils/workflow-product-import.js';
 
 const productionName=ref('');
-const shops=ref([]),productionMode=ref('single'),fitmentMode=ref('shared');
+const shops=ref([]),productionMode=ref('batch'),fitmentMode=ref('shared');
 const route=useRoute(),router=useRouter(),tab=ref(['materials','results','tasks'].includes(route.query.tab)?route.query.tab:'library'),templates=ref([]),runs=ref([]),jobs=ref([]),listingTemplates=ref([]);
 const templateDocument=ref(null),definition=ref(blankWorkflow()),categoryId=ref(null),selectedCategoryKey=ref(''),selectedCategory=ref(null);
 const keyModelChoices=ref([]),editorOpen=ref(false),templateSearch=ref('');
@@ -35,6 +36,7 @@ const videoEnabled=computed(()=>definition.value.nodes.some(n=>n.type==='video')
 const keyLibraryOpen=ref(false),keyLibrarySeed=ref({}),keyLibraryRevision=ref(0),engineerArea=ref('images'),categoryExpanded=ref(false);
 const busy=ref(false),busyLabel=ref(''),importInput=ref(null),productionOpen=ref(false);
 const sharedValues=ref({}),variants=ref([]),runDocument=ref(null),reviewEditing=ref(false);
+const pendingProductCount=computed(()=>variants.value.filter(row=>!row.submittedId).length);
 let pollTimer,polling=false;
 const clone=value=>JSON.parse(JSON.stringify(value));
 const inputs=computed(()=>definition.value.nodes.filter(n=>isWorkflowInput(n)&&n.inputGroup!=='listing-final').map(n=>n.inputGroup==='fitment'?{...n,scope:fitmentMode.value==='individual'?'variant':'shared'}:n));
@@ -57,7 +59,7 @@ async function refreshLists(){const [,runRows,jobRows]=await Promise.all([loadTe
 onMounted(()=>{action(async()=>{await refreshLists();if(route.query.runId){runDocument.value=await apiClient.get('/api/product-workflows/runs?id='+encodeURIComponent(String(route.query.runId)),{noCache:true});tab.value='results';}listingTemplates.value=await apiClient.get('/api/listing/templates');shops.value=(await apiClient.get('/api/shops')).filter(s=>s.status!=='deleted');});pollTimer=setInterval(poll,4000);});
 onUnmounted(()=>{clearInterval(pollTimer);clearTimeout(searchTimer);templateSequence++;});
 async function poll(){if(polling||busy.value||reviewEditing.value||!['tasks','results'].includes(tab.value))return;polling=true;try{await refreshLists();if(runDocument.value)runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(runDocument.value.id)}`,{noCache:true});}catch{/* Explicit refresh reports failures; retain the last visible state on transient network errors. */}finally{polling=false;}}
-function resetMaterials(){productionName.value=definition.value.name;fitmentMode.value='shared';sharedValues.value=Object.fromEntries(sharedInputs.value.map(n=>[n.id,workflowDefault(n)]));variants.value=[freshVariant(0)];}
+function resetMaterials(){productionName.value=definition.value.name;productionMode.value='batch';fitmentMode.value='shared';sharedValues.value=Object.fromEntries(sharedInputs.value.map(n=>[n.id,workflowDefault(n)]));variants.value=[freshVariant(0)];}
 function freshVariant(index){return {requestId:crypto.randomUUID(),submittedId:null,id:`v_${crypto.randomUUID().replaceAll('-','')}`,label:`产品 ${index+1}`,values:Object.fromEntries(variantInputs.value.map(n=>[n.id,workflowDefault(n)])),promptOverrides:{}};}
 function addVariant(){if(variants.value.length>=20)return ElMessage.warning('每批最多 20 件产品／变体');variants.value.push(freshVariant(variants.value.length));}
 function newTemplate(){editorOpen.value=false;templateDocument.value=null;definition.value=blankWorkflow();categoryId.value=null;selectedCategoryKey.value='';selectedCategory.value=null;tab.value='engineer';}
@@ -69,10 +71,33 @@ async function createFromCategory(){await action(async()=>{templateDocument.valu
 function toggleVideo(enabled){if(enabled){const main=definition.value.nodes.find(n=>n.type==='image'&&n.role==='main');if(!main)return ElMessage.warning('请先配置一个主图生成节点');definition.value.nodes.push({...createWorkflowNode('video'),inputs:[main.id]});}else definition.value.nodes=definition.value.nodes.filter(n=>n.type!=='video');}
 async function changeReviewMode(mode){if(mode==='automatic'){try{await ElMessageBox.confirm('仅对已经验证稳定的模板开启。后续任务将跳过主图及整套人工检查，自动生成待上架草稿，可能产生图片与文本调用费用；不会自动发布商品。','启用自动审批',{confirmButtonText:'启用自动审批',cancelButtonText:'保留人工检查',type:'warning'});}catch{return;}}definition.value.reviewMode=mode;}
 const fileBatches=[];let importingFiles=false;
-async function importProductFiles(files){fileBatches.push([...files]);if(importingFiles)return;importingFiles=true;try{while(fileBatches.length)await importProductBatch(fileBatches.shift());}finally{importingFiles=false;}}
-async function importProductBatch(files){await action(async()=>{const images=[...files].filter(f=>/\.(png|jpe?g|webp)$/i.test(f.name));if(!images.length)throw new Error('文件夹中没有 JPG、PNG 或 WEBP 图片');if(images.length>20)throw new Error('一次最多导入 20 张产品图，请拆分文件夹');const node=definition.value.nodes.find(n=>n.id==='product'&&n.type==='images')||definition.value.nodes.find(n=>n.type==='images'&&n.scope!=='shared'&&n.referenceRole==='product');if(!node)throw new Error('模板尚未配置每件产品的产品图输入');const existing=variants.value.filter(v=>v.values[node.id]?.some(Boolean)||v.submissionStarted);if(existing.length+images.length>20)throw new Error('本批总数不能超过 20 件产品');variants.value=existing;if(productionMode.value!=='variants')productionMode.value='batch';for(const file of images){busyLabel.value=`导入 ${file.name}`;const result=await uploadListingMedia(file,{source_module:'product_workflow',role:'product'});const url=result.publishUrl||result.url||result.previewUrl;if(!url)throw new Error(`${file.name} 上传失败`);const row=freshVariant(variants.value.length);row.label=file.name.replace(/\.[^.]+$/,'');row.values[node.id][0]=url;variants.value.push(row);}ElMessage.success(`已导入 ${images.length} 件产品，${productionMode.value==='variants'?'将合并为多变体商品':'每张图片生成独立任务'}`);});}
+async function importProductFiles(files,options={}){
+  if(busy.value&&!importingFiles)return ElMessage.warning('请等待当前操作完成后再上传图片');
+  fileBatches.push({files:[...files],...options});if(importingFiles)return;
+  importingFiles=true;try{while(fileBatches.length)await importProductBatch(fileBatches.shift());}finally{importingFiles=false;}
+}
+async function importProductBatch({files,rowId,slot=0}){await action(async()=>{
+  if(variants.value.some(row=>row.submissionStarted))throw new Error('本批产品已开始提交，请新建一批生产后再添加图片');
+  const {node,placements}=planWorkflowProductImport({definition:definition.value,variants:variants.value,files,rowId,slot});
+  const failures=[];let imported=0;
+  for(const placement of placements){
+    const {file}=placement;busyLabel.value=`上传产品图片 ${imported+failures.length+1}/${placements.length} · ${file.name}`;
+    try{
+      const result=await uploadListingMedia(file,{source_module:'product_workflow',role:'product'});
+      const url=result.publishUrl||result.url||result.previewUrl;if(!url)throw new Error('上传没有返回图片地址');
+      const row=placement.rowId?variants.value.find(row=>row.id===placement.rowId):freshVariant(variants.value.length);
+      if(!Array.isArray(row.values[node.id]))row.values[node.id]=Array(node.count).fill('');
+      row.values[node.id][placement.slot]=url;
+      if(!placement.rowId){row.label=file.name.replace(/\.[^.]+$/,'');variants.value.push(row);}
+      else if(/^产品 \d+$/.test(row.label))row.label=file.name.replace(/\.[^.]+$/,'');
+      imported++;
+    }catch(error){failures.push(`${file.name}：${error.message||'上传失败'}`);}
+  }
+  if(imported)ElMessage.success(`已上传 ${imported} 张产品图，${productionMode.value==='variants'?'将合并为一份多变体草稿':`本批共 ${variants.value.length} 件产品，各自生成草稿`}`);
+  if(failures.length)ElMessage.error({message:`${failures.length} 张图片上传失败，其他成功图片已保留，请重新上传失败图片。${failures.join('；')}`,duration:8000});
+});}
 
-async function useTemplate(id){await action(async()=>{await loadTemplate(id);if(!category.value.templateId){editorOpen.value=true;tab.value='engineer';categoryExpanded.value=true;ElMessage.info('请先为示例选择官方类目并保存，再开始生产');return;}productionMode.value='single';resetMaterials();await loadDefaultKey();productionOpen.value=true;});}
+async function useTemplate(id){await action(async()=>{await loadTemplate(id);if(!category.value.templateId){editorOpen.value=true;tab.value='engineer';categoryExpanded.value=true;ElMessage.info('请先为示例选择官方类目并保存，再开始生产');return;}resetMaterials();await loadDefaultKey();productionOpen.value=true;});}
 async function loadDefaultKey(){if(!definition.value.defaultKeyModelId)return;try{const record=await apiClient.get(`/api/product-workflows/key-models?id=${encodeURIComponent(definition.value.defaultKeyModelId)}`,{noCache:true});if(record.payload.archived)throw new Error('默认适配资料已停用');if(!isReviewedMold(record))throw new Error('默认钥匙模具尚未核对');sharedValues.value.__fitments=(record.payload.bindings?.length?record.payload.bindings:[{brand:record.payload.brand,models:[record.payload.model]}]).flatMap(b=>(b.models||[]).filter(Boolean).map(model=>({brand:b.brand,model})));sharedValues.value.model=sharedValues.value.__fitments.map(f=>`${f.brand} ${f.model}`).join('；');applyKeyModel(sharedValues.value,record,definition.value.nodes.find(n=>n.id==='key')?.count||8);}catch(error){ElMessage.warning(`${error.message}，请重新选择适配资料或上传钥匙图`);}}
 async function trialTemplate(){await action(async()=>{resetMaterials();await loadDefaultKey();productionOpen.value=true;});}
 async function loadKeyChoices(){try{keyModelChoices.value=(await apiClient.get('/api/product-workflows/key-models',{noCache:true})).filter(isReviewedMold);}catch(error){ElMessage.error(error.message);}}
@@ -115,7 +140,8 @@ function openKeyLibrary(seed={}){keyLibrarySeed.value=seed;keyLibraryOpen.value=
 async function upload(file,target,node,index){if(!file)return;await action(async()=>{busyLabel.value='上传产品材料';const result=await uploadListingMedia(file,{source_module:'product_workflow',role:node.referenceRole||'product'});const url=result.publishUrl||result.url||result.previewUrl;if(!url)throw new Error('上传没有返回图片地址');if(node.id==='key')delete target.__keyModelId;target[node.id][index]=url;});}
 async function submitProduction(){await action(async()=>{
   const snapshot=validateWorkflow({...withWorkflowFitmentMode(definition.value,fitmentMode.value),name:productionName.value.trim()});
-  const batches=productionMode.value==='batch'?variants.value.filter(v=>!v.submittedId).map(v=>[v]):[productionMode.value==='single'?[variants.value[0]]:variants.value];
+  const batches=productionMode.value==='variants'?[variants.value]:variants.value.filter(v=>!v.submittedId).map(v=>[v]);
+  if(!batches.length)throw new Error('本批产品已提交，请在生产任务中查看进度');
   for(const rows of batches)validateWorkflowVariants(snapshot,expandWorkflowVariants(snapshot,rows,sharedValues.value));
   for(const rows of batches){
     const first=rows[0];for(const row of rows)row.submissionStarted=true;busyLabel.value=`提交 ${first.label}`;
@@ -175,7 +201,7 @@ watch(tab,()=>{reviewEditing.value=false;});
     <el-dialog v-model="productionOpen" :title="definition.name" width="900px" top="5vh" class="production-dialog" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy">
       <template #header><div><small>本次生产名称（可编辑，不修改原模板名称）</small><el-input v-model="productionName" :disabled="busy" placeholder="本次生产名称，可自定义" aria-label="本次生产名称" maxlength="180" style="max-width:650px"/></div></template>
       <WorkflowProductionForm v-if="productionOpen" :busy="busy" :key-library-revision="keyLibraryRevision" :definition="definition" :shared-values="sharedValues" :variants="variants" v-model:production-mode="productionMode" v-model:fitment-mode="fitmentMode" @add="addVariant" @import-files="importProductFiles" @upload="upload" @manage-keys="openKeyLibrary"/>
-      <template #footer><el-button :disabled="busy" @click="productionOpen=false">取消</el-button><el-button type="primary" :loading="busy" @click="submitProduction">{{ productionMode==='single'?'开始生成':`开始生成 · ${variants.length} 件产品` }}</el-button></template>
+      <template #footer><el-button :disabled="busy" @click="productionOpen=false">取消</el-button><el-button type="primary" :loading="busy" @click="submitProduction">{{ productionMode==='variants'?`开始生成 · 1 份草稿 / ${variants.length} 个变体`:`开始生成 · ${pendingProductCount} 份草稿` }}</el-button></template>
     </el-dialog>
   </div>
 </template>
