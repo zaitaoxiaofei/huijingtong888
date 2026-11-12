@@ -3,6 +3,7 @@ import { computed, KeepAlive, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { calculateProfit } from "../../utils/pricing-tool.js";
 import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote, logisticsRuleMismatchReasons } from "../../utils/logistics-quote.js";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionRateForRub } from "../../utils/rfbs-commission.js";
 import WbCalculator from "./WbCalculator.vue";
@@ -94,7 +95,7 @@ function calculate() {
   else { ElMessage.warning(outdatedQuoteNote.value || "当前售价、重量和尺寸没有匹配的有效物流渠道；请核对货值（卢布）、计费重和包裹尺寸"); return; }
   form.commissionRate = selectedCommission.value;
   try {
-    result.value = calculateProfit(form);
+    result.value = { ...calculateProfit(form), logisticsSnapshot: { ...activeQuote.value } };
   } catch (error) {
     result.value = null;
     ElMessage.warning(error.message);
@@ -146,6 +147,7 @@ function calculate() {
         </el-card>
         <el-card v-if="result" shadow="never">
           <template #header><strong>费用明细（人民币 / 件）</strong></template>
+          <p class="hint">Ozon 运费版本组 {{ result.logisticsSnapshot.versionGroupId }} · 规则 #{{ result.logisticsSnapshot.id }} · 生效 {{ result.logisticsSnapshot.effectiveFrom ? shanghaiDateTimeText(result.logisticsSnapshot.effectiveFrom) : '历史起点' }}</p>
           <div class="detail-row"><span>采购成本</span><b>¥ {{ money(form.purchaseCost) }}</b></div>
           <div class="detail-row"><span>平台佣金</span><b>¥ {{ money(result.commission) }}</b></div>
           <div class="detail-row"><span>跨境物流费</span><b>¥ {{ money(activeQuote?.transportCny ?? form.freight) }}</b></div>

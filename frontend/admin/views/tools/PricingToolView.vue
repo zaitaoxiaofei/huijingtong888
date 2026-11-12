@@ -4,6 +4,7 @@ import { ElMessage } from "element-plus";
 import { calculatePricing } from "../../utils/pricing-tool.js";
 import { channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../../utils/logistics-quote.js";
 import { pricingLogisticsCandidates } from "../../utils/pricing-logistics-candidates.js";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionBandLabel } from "../../utils/rfbs-commission.js";
 import WbCalculator from "./WbCalculator.vue";
@@ -78,7 +79,7 @@ function calculate() {
   if (activeQuote.value) selectQuote(activeQuote.value);
   else { ElMessage.warning("三档佣金与当前成本、重量和尺寸未找到有效物流报价，请调整参数或切换服务商"); return; }
   try {
-    result.value = calculatePricing(form);
+    result.value = { ...calculatePricing(form), logisticsSnapshot: { ...activeQuote.value } };
   } catch (error) {
     result.value = null;
     ElMessage.warning(error.message);
@@ -131,6 +132,7 @@ const money = (value) => Number(value || 0).toFixed(2);
         </el-card>
         <el-card v-if="result" shadow="never">
           <template #header><strong>费用明细（人民币 / 件）</strong></template>
+          <p class="hint">Ozon 运费版本组 {{ result.logisticsSnapshot.versionGroupId }} · 规则 #{{ result.logisticsSnapshot.id }} · 生效 {{ result.logisticsSnapshot.effectiveFrom ? shanghaiDateTimeText(result.logisticsSnapshot.effectiveFrom) : '历史起点' }}</p>
           <div class="detail-row"><span>采购成本</span><b>¥ {{ money(form.purchaseCost) }}</b></div>
           <div class="detail-row"><span>平台佣金</span><b>¥ {{ money(result.commission) }}</b></div>
           <div class="detail-row"><span>跨境物流费</span><b>¥ {{ money(activeQuote?.transportCny ?? form.freight) }}</b></div>

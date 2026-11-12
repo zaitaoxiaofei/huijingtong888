@@ -5,9 +5,11 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { isPlatformAdmin } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { apiClient } from "../../utils/api";
+import WbLogisticsCatalog from "./WbLogisticsCatalog.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date";
 const props = defineProps({ section: { type: String, default: "cancel" } });
+const logisticsPlatform = ref("ozon");
 const activeSection = computed(() => props.section === "logistics" ? "logistics" : "cancel");
 const auth = useAuthStore();
 const canEdit = computed(() => isPlatformAdmin(auth.user));
@@ -16,7 +18,7 @@ const logisticsDialogVisible = ref(false), logisticsDialogSubmitting = ref(false
 const cancellationDialogVisible = ref(false), cancellationDialogSubmitting = ref(false), cancellationFormRef = ref();
 const reasonReview = reactive({ from: shanghaiDateDaysAgo(89), to: shanghaiDateKey(), pending: [], classified: [], types: [], loading: false, truncated: false, visible: false, saving: false, form: { original: "", reason_id: "", reason_code: "", note: "" } });
 const state = reactive({ logisticsRules: [], cancellationRules: [], filters: { logisticsQuery: "", logisticsStatus: "all", logisticsVersionStatus: "all", logisticsPage: 1, logisticsPageSize: 20, cancellationQuery: "", cancellationStatus: "all", cancellationPage: 1, cancellationPageSize: 10 } });
-const currentSectionMeta = computed(() => activeSection.value === "logistics" ? { title: "物流设置", description: "平台统一维护运费版本，企业成员可查看当前可用规则。" } : { title: "取消规则设置", description: "核查未收录原因并人工归类，保留原始原因，不重算历史利润。" });
+const currentSectionMeta = computed(() => activeSection.value === "logistics" ? { title: "Ozon 物流服务商设置", description: "Ozon 运费按版本组和生效时间维护，独立于 WB 揽收仓报价。" } : { title: "取消规则设置", description: "核查未收录原因并人工归类，保留原始原因，不重算历史利润。" });
 const logisticsDialog = reactive({ mode: "create", form: createDefaultLogisticsForm() });
 const cancellationDialog = reactive({ mode: "create", form: createDefaultCancellationForm() });
 const logisticsFormRules = { name: [{ required: true, message: "请输入规则名称", trigger: "blur" }] };
@@ -336,7 +338,9 @@ function resetCancellationFilters() {
     <el-tab-pane :label="`已归类 ${reasonReview.classified.length}`"><el-table :data="reasonReview.classified" max-height="320" border empty-text="暂无人工归类"><el-table-column prop="original" label="Ozon 原始原因" min-width="300" /><el-table-column prop="classification.reason_label" label="已核对类型" min-width="200" /><el-table-column prop="order_count" label="订单数" width="90" /></el-table></el-tab-pane>
   </el-tabs>
 </el-card>
-<el-card v-if="activeSection === 'logistics'" shadow="never" class="page-card settings-list-card">
+<el-radio-group v-if="activeSection === 'logistics'" v-model="logisticsPlatform" aria-label="物流配置平台"><el-radio-button value="ozon">Ozon 物流服务商</el-radio-button><el-radio-button value="wb">WB 揽收仓报价</el-radio-button></el-radio-group>
+<WbLogisticsCatalog v-if="activeSection === 'logistics' && logisticsPlatform === 'wb'" />
+<el-card v-if="activeSection === 'logistics' && logisticsPlatform === 'ozon'" shadow="never" class="page-card settings-list-card">
           <template #header>
             <div class="page-card-header">
               <div>

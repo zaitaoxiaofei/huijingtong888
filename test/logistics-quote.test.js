@@ -136,3 +136,12 @@ test("OGL warehouse without a service class selects the matching lowest priced t
   assert.equal(selectOglOrderRule(rules, input)?.id, 70);
   assert.equal(selectOglOrderRule(rules, { ...input, parcelValueRub: 0 }), null);
 });
+
+test('Ozon calculator rejects WB rules even when IDs and carrier text coincide and records Ozon version identity', () => {
+  const params = {carrier:'GUOO',priceRub:1000,weightG:200,length:20,width:10,height:5,exchangeRate:12.4};
+  assert.deepEqual(quoteLogisticsRules([{...rule,platform:'wb'}],params,at),[]);
+  assert.deepEqual(quoteLogisticsRules([{...rule,carrier:'DPX'}],{...params,carrier:'DPX'},at),[]);
+  const quote=quoteLogisticsRules([rule],params,at)[0];
+  assert.equal(quote.platform,'ozon'); assert.equal(quote.ruleKey,'ozon:1:1');
+  assert.equal(quote.versionGroupId,1); assert.equal(quote.effectiveFrom,rule.effective_from);
+});

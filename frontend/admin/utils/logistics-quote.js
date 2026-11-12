@@ -75,6 +75,7 @@ export function quoteLogisticsRules(rules, { carrier, priceRub, weightG, length,
   const weight = Number(weightG);
   if (![price, weight].every((value) => Number.isFinite(value) && value > 0)) return [];
   return currentEffectiveLogisticsRules(rules, at)
+    .filter((rule) => (!rule.platform || rule.platform === 'ozon') && ['GUOO', 'CEL', 'OGL'].includes(String(rule.carrier || '').toUpperCase()))
     .filter((rule) => String(rule.carrier || "").toUpperCase() === String(carrier || "").toUpperCase())
     .flatMap((rule) => {
       if (String(rule.mode || "") !== "per_gram") return [];
@@ -96,6 +97,8 @@ export function quoteLogisticsRules(rules, { carrier, priceRub, weightG, length,
       const serviceFeeRub = ogl ? oglElectronicServiceFeeRub(price) : 0;
       const serviceFeeCny = serviceFeeRub && Number(exchangeRate) > 0 ? round(serviceFeeRub / Number(exchangeRate)) : 0;
       return [{
+        platform: 'ozon', ruleKey: `ozon:${rule.version_group_id || rule.id}:${rule.id}`,
+        versionGroupId: rule.version_group_id || rule.id, effectiveTo: rule.effective_to,
         id: rule.id, name: rule.name, carrier: rule.carrier, channel: rule.channel,
         priceCny: round(transportCny + serviceFeeCny), transportCny, serviceFeeRub, serviceFeeCny,
         chargeableWeightG: round(chargeableWeightG),
