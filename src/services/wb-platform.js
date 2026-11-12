@@ -1,3 +1,4 @@
+import { createWbCategoryCatalog } from "./wb-category-catalog.js";
 import { createWbListingWorkflow } from "./wb-listing-workflow.js";
 import { wbListingSource } from "../shared/wb-listing-source.js";
 import { resolveInventoryTenantScope, inventoryTenantSql } from "./inventory-tenant-scope.js";
@@ -418,8 +419,9 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
       WHERE r.product_id=? GROUP BY s.platform`,[product]);
     return {rows};
   }
-  async function listingSource(tenantId,body){await account(tenantId,body.shop_id);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
-  return { listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  const catalog=createWbCategoryCatalog({query,request,account});
+  async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
+  return { ...catalog, listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
