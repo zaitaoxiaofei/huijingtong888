@@ -39,6 +39,7 @@ export default defineConfig({
           if (!id.includes("node_modules")) return undefined;
           // Spreadsheet exports must not join Vue's shared first-paint vendor.
           if (id.includes("/exceljs/")) return "vendor-exceljs";
+          if (id.includes("/pdf-lib/") || id.includes("/@pdf-lib/")) return "vendor-pdf";
           if (id.includes("element-plus")) return "vendor-element-plus";
           if (id.includes("@element-plus/icons-vue")) return "vendor-element-plus-icons";
           if (id.includes("vue-router")) return "vendor-vue-router";

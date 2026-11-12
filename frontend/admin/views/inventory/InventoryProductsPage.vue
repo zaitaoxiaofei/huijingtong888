@@ -5,7 +5,8 @@ import InventoryCompositionBadge from "../../components/inventory/InventoryCompo
 import InventoryProductHistoryAction from "../../components/inventory/InventoryProductHistoryAction.vue";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
-import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { inventoryValuation } from "../../utils/inventory-valuation.js";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { View } from "@element-plus/icons-vue";
@@ -32,6 +33,8 @@ import {
   percent
 } from "./inventory-utils.js";
 
+const InventoryLabelPrintDialog = defineAsyncComponent(() => import("../../components/inventory/InventoryLabelPrintDialog.vue"));
+
 const INVENTORY_LIST_CACHE_TTL_MS = 30 * 1000;
 const INVENTORY_LIST_CACHE_MAX_ENTRIES = 30;
 const inventoryListCache = new Map();
@@ -47,7 +50,6 @@ function cacheInventoryList(requestUrl, result) {
 const authStore = useAuthStore();
 const isTenantScoped = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user?.tenant?.slug !== "default"));
 const canWriteInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
-const canManageProductComponents = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canProcure = computed(() => hasPermission(authStore.user, "procurement"));
 const canSubmitProcurementRequest = computed(() => Boolean(authStore.user?.tenant?.id));
 const canOutbound = computed(() => hasPermission(authStore.user, "packing") || hasPermission(authStore.user, "inventory.write"));
@@ -124,6 +126,12 @@ const compositionDialogVisible = ref(false);
 const compositionDialogProduct = ref(null);
 const compositionDialogRefreshKey = ref(0);
 const selectedRows = ref([]);
+const labelPrintVisible = ref(false);
+const labelPrintProducts = ref([]);
+function openLabelPrint(rows) {
+  labelPrintProducts.value = Array.isArray(rows) ? rows : [rows];
+  if (labelPrintProducts.value.length) labelPrintVisible.value = true;
+}
 const ledgerVisible = ref(false);
 const ledgerInitialAction = ref("");
 function openInventoryLedger(row, action = "") { ledgerProductId.value = Number(row.id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
@@ -589,14 +597,6 @@ function totalProductStock(row) {
 
 function productUnit(row) {
   return row?.stock_unit || "个";
-}
-
-function stockForInventoryValue(row) {
-  return row.physical_stock!=null&&row.fbp_stock_known!=null?Number(row.physical_stock)+Number(row.fbp_stock_known):null;
-}
-
-function productInventoryValue(row) {
-  const quantity=stockForInventoryValue(row);return quantity==null?null:quantity * getInventoryPurchaseCost(row);
 }
 
 function averageOrderAmount(row) {
@@ -1895,6 +1895,7 @@ onActivated(() => {
       <el-form-item label="库存类型"><el-select v-model="state.filters.inventoryType"><el-option label="全部库存" value="all" /><el-option label="单品" value="single" /><el-option label="套装" value="combo" /><el-option label="配件" value="accessory" /><el-option label="耗材" value="consumable" /></el-select></el-form-item>
       <template #actions>
         <el-badge v-if="requestSummary.enabled.value" :value="requestSummary.pending.value" :hidden="!requestSummary.pending.value" type="danger" class="inventory-request-entry"><el-button type="primary" plain @click="router.push('/inventory/product-requests')">库存申请</el-button></el-badge>
+        <el-button :disabled="!selectedRows.length" @click="openLabelPrint(selectedRows)">打印标签{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-button>
         <el-button v-if="canWriteInventory" type="primary" @click="openCreateDialog">新增库存</el-button>
         <el-button v-if="canWriteInventory" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-button>
         <el-dropdown trigger="click"><el-button>更多</el-button><template #dropdown><el-dropdown-menu>
@@ -1912,28 +1913,24 @@ onActivated(() => {
         v-loading="loading"
         :data="pagedRows"
         stripe
-        border
         class="erp-data-table"
         @selection-change="handleSelectionChange"
         @sort-change="handleTableSortChange"
       >
-        <el-table-column v-if="canWriteInventory || canSubmitProcurementRequest" type="selection" width="48" fixed="left" />
-        <el-table-column label="库存编号" prop="inventory_number" width="125" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }"><strong :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || "待补核心品名" }}</strong></template>
-        </el-table-column>
-        <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column type="selection" width="48" fixed="left" />
+        <el-table-column label="产品信息" prop="product" min-width="390" fixed="left" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row, $index }">
             <div class="product-cell">
               <ProductImagePreview :src="inventoryProductImageUrl(row, true)" :preview-list="[inventoryProductImageUrl(row)]" :load-delay="Math.min($index, 12) * 120" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
-                <span class="muted-text" :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
+                <strong class="product-inventory-number" :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</strong>
                 <div class="product-type-tags">
                   <InventoryCompositionBadge :product="row"/>
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>
                 </div>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
-                <span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span>
+                <div class="product-info-bottom"><span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span><el-button link type="primary" size="small" @click.stop="openInventoryLedger(row)">库存明细</el-button></div>
               </div>
             </div>
           </template>
@@ -1943,7 +1940,7 @@ onActivated(() => {
             <div class="inventory-stock-cell">
               <div class="stock-summary-list">
                 <span class="local-stock-line">
-                  本地库存 {{ row.physical_stock==null?'待核对':integer(row.physical_stock) }} {{ productUnit(row) }}
+                  <span class="stock-label">本地库存</span><strong>{{ row.physical_stock == null ? '—' : integer(row.physical_stock) }} {{ productUnit(row) }}</strong>
                   <el-popover
                     v-if="hasProductComponents(row)"
                     placement="left"
@@ -1983,8 +1980,8 @@ onActivated(() => {
                     </div>
                   </el-popover>
                 </span>
-                <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free==null?'待核对':integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div>
-                <el-button size="small" plain @click="openInventoryLedger(row)">库存明细</el-button>
+                <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free == null ? '—' : integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div>
+                <div class="fbp-stock-line"><span>FBP 库存</span><strong>{{ row.fbp_stock_known == null ? '未完整同步' : `${integer(row.fbp_stock_known)} ${productUnit(row)}` }}</strong></div>
               </div>
             </div>
           </template>
@@ -2032,33 +2029,40 @@ onActivated(() => {
             </el-button>
           </template>
         </el-table-column>
-        <el-table-column label="库存货值" prop="inventory_value" min-width="150" align="right" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column label="库存货值" min-width="185" align="right">
           <template #default="{ row }">
-            <div class="cell-stack cell-align-end">
-              <strong>{{ productInventoryValue(row)==null?'待核对':`¥${money(productInventoryValue(row))}` }}</strong>
-              <span class="muted-text">本地＋FBP库存 × 采购成本</span>
+            <div class="inventory-value-cell">
+              <strong>{{ inventoryValuation(row).total == null ? '—' : `¥${money(inventoryValuation(row).total)}` }}</strong>
+              <span>本地 {{ inventoryValuation(row).local == null ? '—' : `¥${money(inventoryValuation(row).local)}` }}</span>
+              <span>FBP {{ inventoryValuation(row).fbp == null ? '—' : `¥${money(inventoryValuation(row).fbp)}` }}</span>
+              <el-tooltip v-if="inventoryValuation(row).reason" :content="`${inventoryValuation(row).reason}。可在库存明细中核查本地和 FBP 库存。`"><span class="valuation-incomplete">{{ inventoryValuation(row).reason }}</span></el-tooltip>
             </div>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }"><div class="inventory-actions">
-            <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openEditDialog(row)">编辑</el-button>
-            <InventoryProductHistoryAction :product-id="Number(row.id)"/>
-            <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
-            <el-button size="small" plain type="primary" @click="openInventoryLedger(row)">库存明细</el-button>
+            <div class="inventory-action-row">
+              <el-button size="small" plain type="primary" @click="openLabelPrint(row)">打印标签</el-button>
+              <el-button v-if="canWriteInventory" size="small" plain @click="openInventoryLedger(row, 'stocktake')">更新库存</el-button>
+              <InventoryProductHistoryAction :product-id="Number(row.id)"/>
+            </div>
+            <div class="inventory-action-row">
+              <el-button v-if="canWriteInventory" size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
+              <el-button v-if="canWriteInventory" size="small" link type="danger" @click="removeFromInventory(row)">删除</el-button>
             <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button size="small" plain>更多</el-button></template><div class="inventory-more-actions">
-              <el-button v-if="canManageProductComponents" class="inventory-more-button" size="small" plain type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
               <el-button v-if="canProcure" class="inventory-more-button" size="small" plain @click="openProcurement(row)">创建采购</el-button>
               <el-button v-if="canOutbound" class="inventory-more-button" size="small" plain type="warning" @click="openManualOutbound(row)">手动出库</el-button>
               <el-button class="inventory-more-button" size="small" plain @click="openManualOutboundRecords(row)">出库记录</el-button>
               <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
               <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
-              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="danger" @click="removeFromInventory(row)">删除</el-button>
             </div></el-popover>
+            </div>
           </div></template>
         </el-table-column>
       </el-table>
     </div>
+
+    <InventoryLabelPrintDialog v-if="labelPrintVisible" v-model="labelPrintVisible" :products="labelPrintProducts" />
 
     <PageFooterPagination
       :total="state.total"
@@ -2297,7 +2301,6 @@ onActivated(() => {
         :data="manualOutboundRecordsRows"
         height="480"
         stripe
-        border
         class="erp-data-table"
       >
         <el-table-column label="时间" width="170">
@@ -2833,6 +2836,17 @@ onActivated(() => {
 </template>
 
 <style scoped>
+.product-cell > .cell-stack { flex:1; min-width:0; gap:5px; }
+.product-inventory-number { font-size:14px; color:var(--el-text-color-primary); font-variant-numeric:tabular-nums; }
+.product-info-bottom { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.inventory-action-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.inventory-value-cell { display:flex; flex-direction:column; align-items:flex-end; gap:4px; font-size:12px; color:var(--el-text-color-secondary); }
+.inventory-value-cell > strong { color:var(--el-text-color-primary); font-size:16px; font-variant-numeric:tabular-nums; }
+.valuation-incomplete { max-width:170px; white-space:normal; color:var(--el-color-warning); font-size:11px; }
+.fbp-stock-line { display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:12px; color:var(--el-text-color-secondary); }
+.fbp-stock-line strong { font-weight:400; }
+.stock-label { color:var(--el-text-color-secondary); }
+
 .inventory-more-actions{display:flex;flex-direction:column;align-items:flex-start;gap:10px}.inventory-more-actions .el-button{margin-left:0}.product-header-actions { padding:4px 0 10px;display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .product-header-actions .el-button { margin-left: 0; height: 38px; min-width: 80px; font-size: 14px; }
 .product-header-actions .product-main-action { width: 128px; font-weight: 600; }
@@ -2958,10 +2972,10 @@ onActivated(() => {
   justify-content: flex-end;
   width: 100%;
   min-height: 64px;
-  padding: 8px 10px;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
-  background: var(--el-fill-color-blank);
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   text-align: right;
   transition: background 0.18s ease, border-color 0.18s ease;
 }
@@ -2983,8 +2997,7 @@ onActivated(() => {
 }
 
 .metric-cell-link:hover {
-  border-color: var(--erp-detail-primary-border, #bfdbfe);
-  background: var(--erp-detail-primary-faint, #f8fbff);
+  background: var(--el-fill-color-light);
 }
 
 .detail-filter-bar {
@@ -3022,11 +3035,9 @@ onActivated(() => {
 
 .inventory-actions {
   display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 4px 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .inventory-actions :deep(.el-button) {
