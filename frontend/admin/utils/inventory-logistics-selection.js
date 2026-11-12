@@ -31,6 +31,9 @@ export function inventoryLogisticsRulesForCarrier(rules = [], carrier, { selecte
   // An existing exact binding is still shown even when its version has ended.
   // Opening the editor must not migrate the product to a different rule ID.
   if (saved && inventoryLogisticsCarrier(saved) === carrier && !choices.some(rule => String(rule.id) === String(saved.id))) choices.push(saved);
-  return choices.sort((left, right) => String(left.name || "").localeCompare(String(right.name || ""), "zh-CN", { numeric: true })
+  return choices.sort((left, right) => Number(left.min_weight_g || 0) - Number(right.min_weight_g || 0)
+    || Number(left.max_weight_g || 0) - Number(right.max_weight_g || 0)
+    || Number(left.min_price_rub || 0) - Number(right.min_price_rub || 0)
+    || String(left.name || "").localeCompare(String(right.name || ""), "zh-CN", { numeric: true })
     || Number(left.id || 0) - Number(right.id || 0));
 }

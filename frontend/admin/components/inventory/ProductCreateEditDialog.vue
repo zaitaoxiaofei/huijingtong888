@@ -37,6 +37,7 @@ const authStore = useAuthStore();
 const router = useRouter();
 
 const formRef = ref();
+const logisticsRuleSelect = ref();
 const imageUploadLoading = ref(false);
 const submitting = ref(false);
 const creatingDraft = ref(false);
@@ -1454,6 +1455,11 @@ function syncAutomaticLogisticsRule() {
 }
 
 function handleLogisticsCarrierChange() {
+  const input = logisticsRuleSelect.value?.$el?.querySelector('[role="combobox"]');
+  if (input?.value) {
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
   manualLogisticsRule.value = false;
   form.logistics_rule_id = "";
   syncAutomaticLogisticsRule();
@@ -1945,18 +1951,17 @@ function submitAndCreateDraft() {
                   </el-select>
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
-                <el-form-item label="重量(g)">
-                  <el-input-number v-model="form.package_weight_g" :min="0" :precision="0" :step="10" controls-position="right" />
-                </el-form-item>
-              </el-col>
               <el-col v-show="showMobileSection('purchase')" :span="8">
                 <el-form-item label="物流规则">
                   <div class="inventory-logistics-picker">
-                    <el-radio-group v-model="selectedLogisticsCarrier" size="small" aria-label="物流分类" @change="handleLogisticsCarrierChange">
-                      <el-radio-button v-for="carrier in INVENTORY_LOGISTICS_CARRIERS" :key="carrier.value" :value="carrier.value">{{ carrier.label }}</el-radio-button>
-                    </el-radio-group>
-                    <el-select v-model="form.logistics_rule_id" filterable :placeholder="`选择${selectedLogisticsCarrierLabel}具体方式`" aria-label="具体物流方式" @change="handleLogisticsRuleChange">
+                    <el-select ref="logisticsRuleSelect" v-model="form.logistics_rule_id" filterable :placeholder="`选择${selectedLogisticsCarrierLabel}具体方式`" aria-label="具体物流方式" popper-class="inventory-logistics-dropdown" :popper-style="{ width: 'min(440px, calc(100vw - 24px))', maxWidth: 'calc(100vw - 24px)' }" @change="handleLogisticsRuleChange">
+                      <template #header>
+                        <div class="inventory-logistics-dropdown-header" @mousedown.prevent @click.stop>
+                          <el-radio-group v-model="selectedLogisticsCarrier" size="small" aria-label="物流分类" @change="handleLogisticsCarrierChange">
+                            <el-radio-button v-for="carrier in INVENTORY_LOGISTICS_CARRIERS" :key="carrier.value" :value="carrier.value">{{ carrier.label }}</el-radio-button>
+                          </el-radio-group>
+                        </div>
+                      </template>
                       <el-option v-if="savedLogisticsRuleMissing" :label="value?.logistics_rule_name || `已保存规则 #${form.logistics_rule_id}`" :value="form.logistics_rule_id" disabled />
                       <el-option
                         v-for="rule in logisticsRuleOptions"
@@ -1967,24 +1972,29 @@ function submitAndCreateDraft() {
                       />
                     </el-select>
                     <small v-if="savedLogisticsRuleMissing" class="inventory-logistics-hint">已保留原规则；规则资料暂不可用，请刷新物流配置后核对。</small>
-                    <small v-else-if="selectedLogisticsRule" class="inventory-logistics-hint">已选：{{ selectedLogisticsRule.name }}{{ isLogisticsRuleEffective(selectedLogisticsRule) ? '' : '（已保存，当前不可用）' }}</small>
-                    <small v-else class="inventory-logistics-hint">{{ selectedLogisticsCarrierLabel }}暂无符合当前货值、重量和尺寸的规则；请补齐或调整参数，也可在本类中手动选择。</small>
+                    <small v-else-if="selectedLogisticsRule && !isLogisticsRuleEffective(selectedLogisticsRule)" class="inventory-logistics-hint">已保存规则当前不可用；保留原选择，请核对物流配置。</small>
+                    <small v-else-if="!selectedLogisticsRule" class="inventory-logistics-hint">{{ selectedLogisticsCarrierLabel }}暂无符合当前货值、重量和尺寸的规则；请补齐或调整参数，也可在本类中手动选择。</small>
                   </div>
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
                 <el-form-item label="长(cm)">
                   <el-input-number v-model="form.length_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
                 <el-form-item label="宽(cm)">
                   <el-input-number v-model="form.width_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
                 <el-form-item label="高(cm)">
                   <el-input-number v-model="form.height_cm" :min="0" :precision="0" :step="1" controls-position="right" />
+                </el-form-item>
+              </el-col>
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
+                <el-form-item label="重量(g)">
+                  <el-input-number v-model="form.package_weight_g" :min="0" :precision="0" :step="10" controls-position="right" />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -2393,9 +2403,27 @@ function submitAndCreateDraft() {
   min-width: 0;
 }
 
-.inventory-logistics-picker :deep(.el-radio-group) {
+.inventory-logistics-dropdown-header :deep(.el-radio-group) {
   display: flex;
-  flex-wrap: wrap;
+  width: 100%;
+}
+
+.inventory-logistics-dropdown-header :deep(.el-radio-button) {
+  flex: 1;
+}
+
+.inventory-logistics-dropdown-header :deep(.el-radio-button__inner) {
+  width: 100%;
+  padding-inline: 8px;
+}
+
+:global(.inventory-logistics-dropdown .el-select-dropdown__item) {
+  height: auto;
+  min-height: 34px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  white-space: normal;
+  line-height: 1.5;
 }
 
 .inventory-logistics-hint {

@@ -41,3 +41,13 @@ test("opening a saved historical rule preserves its exact ID alongside the curre
   assert.equal(resolveInventoryLogisticsRule([old, current], "10"), old);
   assert.deepEqual(inventoryLogisticsRulesForCarrier([old, current], "CEL", { at }).map(item => item.id), [11]);
 });
+
+test("carrier methods sort by increasing weight and value bands before name", () => {
+  const rules = [
+    rule(1, "OGL", { name: "A heavy", min_weight_g: 501, max_weight_g: 1000 }),
+    rule(2, "OGL", { name: "A broad", min_weight_g: 1, max_weight_g: 1000 }),
+    rule(3, "OGL", { name: "A higher value", min_weight_g: 1, max_weight_g: 500, min_price_rub: 1501 }),
+    rule(4, "OGL", { name: "Z lower value", min_weight_g: 1, max_weight_g: 500, min_price_rub: 1 })
+  ];
+  assert.deepEqual(inventoryLogisticsRulesForCarrier(rules, "OGL", { at }).map(item => item.id), [4, 3, 2, 1]);
+});
