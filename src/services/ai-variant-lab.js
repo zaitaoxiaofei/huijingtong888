@@ -3329,16 +3329,13 @@ function sourceListingTitle(body = {}) {
 function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
   const dna = buildCopyProductDna(analysis, fallback);
   const cleanedTarget = cleanText(target);
-  const maker = cleanedTarget.split(/\s+/)[0] || "";
-  const modelTail = cleanedTarget.split(/\s+/).slice(1).join("_");
   const subject = dna.subject;
   const subjectTags = productSubjectTagCandidates(subject);
   const isSillPlate = isSillPlateProduct(analysis, fallback);
   const candidates = [
     cleanedTarget,
     cleanedTarget.replace(/\s+/g, ""),
-    maker ? `для ${maker}` : "",
-    modelTail ? `для ${modelTail}` : "",
+    ...ozonVariantWrapperTags(cleanedTarget),
     subject,
     ...subjectTags,
     "автоаксессуары",
@@ -3374,6 +3371,12 @@ function buildOzonVariantTags(target, analysis = {}, fallback = {}) {
     .filter((tag) => !hasVariantSourceLeak(tag, target, analysis, fallback))
     .filter((tag) => !hasForbiddenCategoryLeak(tag, analysis))
     .slice(0, 25);
+}
+
+function ozonVariantWrapperTags(value) {
+  const parts = cleanText(value).split(/\s+/);
+  return [parts[0] ? normalizeOzonVariantTag(`для ${parts[0]}`) : "",
+    parts.length > 1 ? normalizeOzonVariantTag(`для ${parts.slice(1).join("_")}`) : ""];
 }
 
 function normalizeOzonVariantTag(value) {
@@ -3530,6 +3533,13 @@ function isValidOzonVariantDescription(text, target, analysis = {}, fallback = {
 function hasVariantSourceLeak(text, target, analysis = {}, fallback = {}) {
   const targetText = cleanText(target).toLowerCase();
   const identityKey = (value) => cleanText(value).toLowerCase().replace(/[\s_]+/g, "");
+  const wrapperIdentityKey = (value) => vehicleTagReferenceParts(value).join("").toLowerCase();
+  const targetWrappers = new Set(ozonVariantWrapperTags(target).filter(Boolean).map((tag) => tag.toLowerCase()));
+  const fullSourceWrappers = new Set([fallback.sourceVariantValue, analysis.source_variant_value]
+    .map(cleanText).filter((ref) => ref.split(/\s+/).length > 1 && wrapperIdentityKey(ref) !== wrapperIdentityKey(targetText))
+    .flatMap(ozonVariantWrapperTags).filter(Boolean).map((tag) => tag.toLowerCase())
+    .filter((tag) => !targetWrappers.has(tag)));
+  if ([...String(text).matchAll(/#[\p{L}\p{N}_-]+/gu)].some(([tag]) => fullSourceWrappers.has(tag.toLowerCase()))) return true;
   const sourceAliases = sourceTitleVehicleAliases(fallback.sourceTitle, fallback.sourceVariantValue || analysis.source_variant_value);
   const sourceAliasKeys = new Set(sourceAliases.map((item) => item.toLowerCase()));
   const explicitSourceRefs = uniqueStrings([

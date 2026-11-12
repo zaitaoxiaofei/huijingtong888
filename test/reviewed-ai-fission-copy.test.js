@@ -199,3 +199,127 @@ test("durable private backups preserve complete rows and never overwrite previou
     if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o077, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+function fixedRich(image) {
+  return { content: [{ widgetName: "raShowcase", type: "billboard", blocks: [{ imgLink: "", img: { src: image, srcMobile: image, alt: "人工审核标题 F7", position: "width_full", positionMobile: "width_full", widthMobile: 1024, heightMobile: 1536 },
+    title: { items: [{ type: "text", content: "人工审核标题 F7" }], size: "size4", align: "left", color: "color1" },
+    text: { size: "size2", align: "left", color: "color1", items: [{ type: "text", content: "人工审核描述，保留所有文字" }] } }] }], version: 0.3 };
+}
+function imageSyncFixture(mutate = () => {}) {
+  const f = fixture(), main = "https://example.com/new.png", old = fixedRich("https://example.com/old.png"), next = clone(old);
+  next.content[0].blocks[0].img.src = main; next.content[0].blocks[0].img.srcMobile = main;
+  mutate(old, next);
+  const before = JSON.stringify(old), after = JSON.stringify(next), payload = JSON.parse(f.state.drafts[0].template_payload_json);
+  payload.editable_payload.variants[0].rich_content_json = before;
+  f.state.drafts[0].template_payload_json = JSON.stringify(payload);
+  const values = [{ value: before, dictionary_value_id: 0, metadata: "preserve" }];
+  f.state.templates[0].attributes_json = JSON.stringify([{ attribute_id: 11254, values }]);
+  f.manifest.drafts[0].expected_main_image = main;
+  f.manifest.drafts[0].changes = [{ column: "template_payload_json", operations: [{ path: ["editable_payload", "variants", "0", "rich_content_json"], before_value: before, after_value: after }] }];
+  f.manifest.templates[0].expected_main_image = main;
+  f.manifest.templates[0].changes = [{ column: "attributes_json", operations: [{ path: ["0", "values"], before_value: values, after_value: [{ ...values[0], value: after }] }] }];
+  return f;
+}
+
+test("reviewed fixed-rich image mode changes only two URLs to current draft-owned SKU main and is idempotent", async () => {
+  const f = imageSyncFixture(), before = clone(f.state), manifest = await audit(f); let backups = 0;
+  const save = async () => { backups++; return "/private/image-backup.json"; };
+  assert.equal((await applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup: save })).changed_rows, 2);
+  const payload = JSON.parse(f.state.drafts[0].template_payload_json), expected = JSON.parse(before.drafts[0].template_payload_json);
+  expected.editable_payload.variants[0].rich_content_json = JSON.stringify(fixedRich("https://example.com/new.png"));
+  assert.deepEqual(payload, expected);
+  assert.deepEqual(JSON.parse(f.state.templates[0].attributes_json)[0].values, [{ value: JSON.stringify(fixedRich("https://example.com/new.png")), dictionary_value_id: 0, metadata: "preserve" }]);
+  assert.equal((await applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup: save })).changed_rows, 0); assert.equal(backups, 1);
+});
+
+test("image opt-in refuses arbitrary URLs, copy changes, custom/multiple-image layouts and metadata edits", async () => {
+  for (const mutate of [
+    (_old, next) => { next.content[0].blocks[0].img.src = "https://example.com/arbitrary.png"; },
+    (_old, next) => { next.content[0].blocks[0].img.srcMobile = "https://example.com/arbitrary.png"; },
+    (_old, next) => { next.content[0].blocks[0].title.items[0].content = "changed title"; },
+    (_old, next) => { next.content[0].blocks[0].text.items[0].content = "changed description"; },
+    (_old, next) => { next.content[0].blocks[0].img.alt = "changed alt"; },
+    (old, next) => { old.content[0].blocks[0].text.size = "custom"; next.content[0].blocks[0].text.size = "custom"; },
+    (old, next) => { old.content[0].blocks.push(clone(old.content[0].blocks[0])); next.content[0].blocks.push(clone(next.content[0].blocks[0])); },
+    (old, next) => { old.link = "https://example.com/keep"; next.link = old.link; }
+  ]) await assert.rejects(audit(imageSyncFixture(mutate)), /Rich/);
+  const f = imageSyncFixture(); f.manifest.templates[0].changes[0].operations[0].after_value[0].metadata = "changed";
+  await assert.rejects(audit(f), /Rich/);
+});
+
+test("image mode requires actual first SKU image and never falls back to common/template images", async () => {
+  for (const mutate of [
+    f => { f.manifest.templates[0].expected_main_image = "https://example.com/template-shared.png"; },
+    f => { const p = JSON.parse(f.state.drafts[0].template_payload_json); p.editable_payload.variants[0].images = []; p.editable_payload.images = [f.manifest.drafts[0].expected_main_image]; f.state.drafts[0].template_payload_json = JSON.stringify(p); },
+    f => { f.state.drafts[0].tenant_id = "3"; },
+    f => { f.manifest.templates[0].draft_id = 10; },
+    f => { f.manifest.drafts[0].expected_main_image = ""; }
+  ]) { const f = imageSyncFixture(); mutate(f); await assert.rejects(audit(f)); }
+});
+
+test("reviewed image hash rejects a later SKU main change before any write", async () => {
+  const f = imageSyncFixture(), manifest = await audit(f), payload = JSON.parse(f.state.drafts[0].template_payload_json);
+  payload.editable_payload.variants[0].images[0] = "https://example.com/later.png"; f.state.drafts[0].template_payload_json = JSON.stringify(payload);
+  await assert.rejects(applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup }));
+  assert.ok(f.calls.every(sql => !sql.startsWith("UPDATE")));
+});
+
+test("default copy review still rejects fixed-rich image changes without explicit row opt-in", async () => {
+  const f = imageSyncFixture(); delete f.manifest.drafts[0].expected_main_image; delete f.manifest.templates[0].expected_main_image;
+  await assert.rejects(audit(f), /Rich/);
+});
+
+test("image mode accepts only a unique valid URL on the actual first image object and preserves its metadata", async () => {
+  for (const image of [
+    { url: "https://example.com/new.png", media_id: "keep", manual: true },
+    { image_url: "https://example.com/new.png", media_id: "keep" },
+    { imageUrl: "https://example.com/new.png", media_id: "keep" },
+    { url: "https://example.com/new.png", image_url: "https://example.com/new.png", imageUrl: "" }
+  ]) {
+    const f = imageSyncFixture(), p = JSON.parse(f.state.drafts[0].template_payload_json);
+    p.editable_payload.variants[0].images[0] = image; f.state.drafts[0].template_payload_json = JSON.stringify(p);
+    const manifest = await audit(f); await applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup });
+    assert.deepEqual(JSON.parse(f.state.drafts[0].template_payload_json).editable_payload.variants[0].images[0], image);
+  }
+  for (const image of [{ url: "https://example.com/new.png", image_url: "https://example.com/conflict.png" }, { src: "https://example.com/new.png" }, { url: "javascript:invalid" }, { imageUrl: 123 }]) {
+    const f = imageSyncFixture(), p = JSON.parse(f.state.drafts[0].template_payload_json);
+    p.editable_payload.variants[0].images[0] = image; p.editable_payload.variants[0].images[1] = "https://example.com/new.png";
+    f.state.drafts[0].template_payload_json = JSON.stringify(p); await assert.rejects(audit(f), /first-SKU main image/);
+  }
+});
+
+test("template-only image sync derives authority from its reviewed locked draft, never template common images", async () => {
+  const f = imageSyncFixture(); delete f.manifest.drafts[0].expected_main_image; f.manifest.drafts[0].changes = [];
+  const templatePayload = JSON.parse(f.state.templates[0].editable_payload_json); templatePayload.images = ["https://example.com/template-shared.png"];
+  f.state.templates[0].editable_payload_json = JSON.stringify(templatePayload);
+  const manifest = await audit(f); assert.equal((await applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup })).changed_rows, 1);
+  assert.equal(JSON.parse(f.state.templates[0].editable_payload_json).images[0], "https://example.com/template-shared.png");
+});
+
+test("image mode rejects lock-time main edits and rolls back a later template write failure", async () => {
+  const f = imageSyncFixture(), manifest = await audit(f), begin = f.db.beginTransaction;
+  f.db.beginTransaction = async () => {
+    const p = JSON.parse(f.state.drafts[0].template_payload_json); p.editable_payload.variants[0].images[0] = "https://example.com/concurrent.png";
+    f.state.drafts[0].template_payload_json = JSON.stringify(p); await begin();
+  };
+  await assert.rejects(applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup }), /first-SKU main image/);
+  assert.ok(f.calls.every(sql => !sql.startsWith("UPDATE")));
+  const rollback = imageSyncFixture(), before = clone(rollback.state), reviewed = await audit(rollback); rollback.db.failUpdate = 2;
+  await assert.rejects(applyReviewedAiFissionCopy(rollback.db, reviewed, "/private", { backup }), /simulated SQL failure/);
+  assert.deepEqual(rollback.state, before); assert.equal(rollback.calls.at(-1), "rollback");
+});
+
+test("image mode synchronizes repeated canonical value/label/display documents while preserving all metadata", async () => {
+  const f = imageSyncFixture(), op = f.manifest.templates[0].changes[0].operations[0];
+  for (const key of ["label", "display_value_zh", "displayValueZh"]) {
+    op.before_value[0][key] = op.before_value[0].value; op.after_value[0][key] = op.after_value[0].value;
+  }
+  op.before_value[0].metadata = op.before_value[0].value; op.after_value[0].metadata = op.before_value[0].metadata;
+  f.state.templates[0].attributes_json = JSON.stringify([{ attribute_id: 11254, values: op.before_value }]);
+  const manifest = await audit(f); await applyReviewedAiFissionCopy(f.db, manifest, "/private", { backup });
+  assert.deepEqual(JSON.parse(f.state.templates[0].attributes_json)[0].values, op.after_value);
+  const invalid = imageSyncFixture(); invalid.manifest.templates[0].changes = clone(f.manifest.templates[0].changes);
+  invalid.manifest.templates[0].changes[0].operations[0].after_value[0].metadata = op.after_value[0].value;
+  invalid.state.templates[0].attributes_json = JSON.stringify([{ attribute_id: 11254, values: op.before_value }]);
+  await assert.rejects(audit(invalid), /Rich/);
+});

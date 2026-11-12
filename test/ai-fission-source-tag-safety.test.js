@@ -123,3 +123,41 @@ test("hyphenated prefix targets remain valid after tag normalization while indep
   assert.ok(tags.includes("#для_H3_Pro"));
   assert.equal(ctx.hasVariantSourceLeak(tags.join(" "), target, { ...analysis, source_vehicle_model: "H3" }, fallback), false);
 });
+
+test("generated maker/model wrappers follow an evidenced full source identity across brands", () => {
+  const ctx = fixture(), facts = { ...analysis, source_variant_value: "BELGEE X70" }, options = { sourceVariantValue: "BELGEE X70" };
+  const oldTags = Array.from(ctx.buildOzonVariantTags("BELGEE X70", facts, options));
+  assert.ok(oldTags.includes("#для_BELGEE")); assert.ok(oldTags.includes("#для_X70"));
+  for (const tag of ["#для_BELGEE", "#для_X70", "#для_x70"]) assert.equal(ctx.hasVariantSourceLeak(tag, "UAZ Profi", facts, options), true, tag);
+  const generic = ["#для_X700", "#для_OTHER_X70", "#для_BELGEE_аксессуары", "#X70", "#BELGEE", "#салон"];
+  for (const tag of [...generic, "BELGEE", "X70"]) assert.equal(ctx.hasVariantSourceLeak(tag, "UAZ Profi", facts, options), false, tag);
+  for (const tags of [ctx.normalizeOzonVariantTags([...oldTags, ...generic], "UAZ Profi", facts, options),
+    ctx.buildOzonVariantTags("UAZ Profi", facts, { ...options, extraTags: ["#для_BELGEE", "#для_X70", "#салон"] })]) {
+    const result = Array.from(tags);
+    assert.ok(result.includes("#для_UAZ")); assert.ok(result.includes("#для_Profi")); assert.ok(result.includes("#салон"));
+    assert.ok(!result.includes("#для_BELGEE")); assert.ok(!result.includes("#для_X70"));
+    assert.equal(ctx.hasVariantSourceLeak(result.join(" "), "UAZ Profi", facts, options), false);
+  }
+});
+
+test("canonical wrappers preserve shared maker/model tails and complete longer target wrappers", () => {
+  const ctx = fixture();
+  for (const [sourceModel, target, retained, removed] of [
+    ["HAVAL H3", "HAVAL F7", ["#для_HAVAL", "#для_F7"], ["#для_H3"]],
+    ["HAVAL H3", "HAVAL H3 Pro", ["#для_HAVAL", "#для_H3_Pro"], ["#для_H3"]],
+    ["HAVAL H3", "HAVAL H3Pro", ["#для_HAVAL", "#для_H3Pro"], ["#для_H3"]],
+    ["BELGEE X70", "UAZ X70", ["#для_UAZ", "#для_X70"], ["#для_BELGEE"]],
+    ["BELGEE X70", "BELGEE X700", ["#для_BELGEE", "#для_X700"], ["#для_X70"]],
+    ["MAZDA CX-3", "MAZDA CX-30", ["#для_MAZDA", "#для_CX_30"], ["#для_CX_3"]]
+  ]) {
+    const facts = { ...analysis, source_variant_value: sourceModel }, options = { sourceVariantValue: sourceModel };
+    for (const tag of retained) assert.equal(ctx.hasVariantSourceLeak(tag, target, facts, options), false, `${sourceModel}→${target}: ${tag}`);
+    for (const tag of removed) assert.equal(ctx.hasVariantSourceLeak(tag, target, facts, options), true, `${sourceModel}→${target}: ${tag}`);
+    const tags = Array.from(ctx.normalizeOzonVariantTags([...retained, ...removed], target, facts, options));
+    retained.forEach(tag => assert.ok(tags.includes(tag), tag)); removed.forEach(tag => assert.ok(!tags.includes(tag), tag));
+  }
+  assert.equal(ctx.hasVariantSourceLeak("#для_BELGEE #для_X70", "UAZ Profi", { source_vehicle_model: "BELGEE X70" }), false, "Do not infer wrappers from arbitrary source aliases");
+  for (const [sourceModel, target, tags] of [["HAVAL H3", "HAVALH3", "#для_HAVAL #для_H3"], ["MAZDA CX-3", "MAZDACX3", "#для_MAZDA #для_CX_3"]]) {
+    assert.equal(ctx.hasVariantSourceLeak(tags, target, { source_variant_value: sourceModel }), false, "Same complete vehicle identity stays unchanged");
+  }
+});
