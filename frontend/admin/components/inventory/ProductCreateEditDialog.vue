@@ -6,7 +6,8 @@ import { ElDialog, ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { invalidateInventoryNamingOptions, invalidateInventoryVehicleCatalog, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
-import { currentEffectiveLogisticsRules, resolveCurrentLogisticsRule } from "../../utils/effective-logistics-rules";
+import { INVENTORY_LOGISTICS_CARRIERS, inventoryLogisticsCarrier, initialInventoryLogisticsCarrier, inventoryLogisticsRulesForCarrier, resolveInventoryLogisticsRule } from "../../utils/inventory-logistics-selection";
+import { isLogisticsRuleEffective } from "../../utils/effective-logistics-rules";
 import { quoteLogisticsRules } from "../../utils/logistics-quote";
 import { oglRuleFreightCny } from "../../../../src/ogl-rates.js";
 import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/inventory-similarity";
@@ -36,6 +37,7 @@ const authStore = useAuthStore();
 const router = useRouter();
 
 const formRef = ref();
+const logisticsRuleSelect = ref();
 const imageUploadLoading = ref(false);
 const submitting = ref(false);
 const creatingDraft = ref(false);
@@ -68,6 +70,7 @@ function newRequestKey() {
 }
 const requestKey = ref(newRequestKey());
 const manualLogisticsRule = ref(false);
+const selectedLogisticsCarrier = ref("OGL");
 const manualPackagingFee = ref(false);
 const componentQuery = ref("");
 const componentSelectId = ref("");
@@ -159,17 +162,9 @@ const dialogTitle = computed(() => {
 });
 
 const availableLogisticsRules = computed(() => props.logisticsRules?.length ? props.logisticsRules : fallbackLogisticsRules.value);
-const logisticsRuleOptions = computed(() => currentEffectiveLogisticsRules(availableLogisticsRules.value).sort((a, b) => {
-  const heat = Number(b.usage_count || 0) - Number(a.usage_count || 0);
-  if (heat) return heat;
-  const celA = String(a.carrier || "").toUpperCase() === "CEL" ? 1 : 0;
-  const celB = String(b.carrier || "").toUpperCase() === "CEL" ? 1 : 0;
-  if (celA !== celB) return celB - celA;
-  const airA = isAirLandLogisticsRule(a) ? 1 : 0;
-  const airB = isAirLandLogisticsRule(b) ? 1 : 0;
-  if (airA !== airB) return airB - airA;
-  return Number(a.min_weight_g || 0) - Number(b.min_weight_g || 0) || Number(a.id || 0) - Number(b.id || 0);
-}));
+const logisticsRuleOptions = computed(() => inventoryLogisticsRulesForCarrier(availableLogisticsRules.value, selectedLogisticsCarrier.value, { selectedRuleId: form.logistics_rule_id }));
+const selectedLogisticsCarrierLabel = computed(() => INVENTORY_LOGISTICS_CARRIERS.find(item => item.value === selectedLogisticsCarrier.value)?.label || "所选物流");
+const savedLogisticsRuleMissing = computed(() => Boolean(form.logistics_rule_id) && !resolveInventoryLogisticsRule(availableLogisticsRules.value, form.logistics_rule_id));
 
 const selectedLogisticsRule = computed(() => resolveSelectedLogisticsRule(form));
 const oglRuleMismatch = computed(() => String(selectedLogisticsRule.value?.carrier || "").toUpperCase() === "OGL"
@@ -251,10 +246,11 @@ function resetForm() {
   form.owner_person_id = props.people[0]?.id ? String(props.people[0].id) : "";
   form.product_type = isInventoryTarget.value ? "main" : "selection";
   form.selection_status = isInventoryTarget.value ? "listed" : "draft";
+  selectedLogisticsCarrier.value = "OGL";
+  manualLogisticsRule.value = false;
   const nextRule = resolveSelectedLogisticsRule(form);
   form.logistics_rule_id = nextRule?.id || "";
   form.shipping_method = nextRule?.channel || "air_land";
-  manualLogisticsRule.value = false;
   manualPackagingFee.value = false;
   componentQuery.value = "";
   componentSelectId.value = "";
@@ -268,9 +264,10 @@ function resetForm() {
 
 function fillFormFromValue(value = {}) {
   resetForm();
+  const { preferred_logistics_carrier, ...editableValue } = value;
   Object.assign(form, {
     ...createDefaultForm(),
-    ...value,
+    ...editableValue,
     supplier_id: value.supplier_id || "",
     owner_person_id: (value.owner_person_id || props.people[0]?.id)
       ? String(value.owner_person_id || props.people[0]?.id)
@@ -325,11 +322,10 @@ function fillFormFromValue(value = {}) {
     gift_contents: savedNaming.gift_contents || value.gift_contents || ""
   });
   manualLogisticsRule.value = Boolean(value.logistics_rule_id);
-  if (manualLogisticsRule.value) {
-    const currentRule = resolveCurrentLogisticsRule(availableLogisticsRules.value, value.logistics_rule_id);
-    form.logistics_rule_id = currentRule?.id || form.logistics_rule_id;
-    form.shipping_method = currentRule?.channel || form.shipping_method;
-  }
+  selectedLogisticsCarrier.value = initialInventoryLogisticsCarrier(availableLogisticsRules.value, value.logistics_rule_id, value.logistics_rule_carrier || preferred_logistics_carrier);
+  const savedRule = resolveInventoryLogisticsRule(availableLogisticsRules.value, value.logistics_rule_id);
+  if (savedRule) form.logistics_rule_id = savedRule.id;
+  if (!manualLogisticsRule.value) syncAutomaticLogisticsRule();
   manualPackagingFee.value = true;
 }
 
@@ -361,7 +357,7 @@ async function loadFallbackLogisticsRules() {
   if (props.logisticsRules?.length || fallbackLogisticsRules.value.length) return;
   try {
     const rows = await apiClient.get("/api/logistics-rules", { noCache: true });
-    fallbackLogisticsRules.value = Array.isArray(rows) ? rows.filter((item) => Number(item.enabled) !== 0) : [];
+    fallbackLogisticsRules.value = Array.isArray(rows) ? rows : [];
   } catch {
     fallbackLogisticsRules.value = [];
   }
@@ -916,12 +912,18 @@ async function deleteCoreNameOption(option) {
 }
 
 watch(
-  () => [form.package_weight_g, form.listing_price_rub, form.sale_price_rmb, form.air_sale_price_rmb],
+  () => [form.package_weight_g, form.listing_price_rub, form.sale_price_rmb, form.air_sale_price_rmb, form.exchange_rate, form.length_cm, form.width_cm, form.height_cm, availableLogisticsRules.value],
   () => {
-    if (props.visible && !manualLogisticsRule.value) {
-      const nextRule = resolveSelectedLogisticsRule(form);
-      form.logistics_rule_id = nextRule?.id || form.logistics_rule_id || "";
-      form.shipping_method = nextRule?.channel || form.shipping_method || "air_land";
+    if (props.visible) {
+      if (manualLogisticsRule.value) {
+        const savedRule = resolveInventoryLogisticsRule(availableLogisticsRules.value, form.logistics_rule_id);
+        if (savedRule) {
+          selectedLogisticsCarrier.value = inventoryLogisticsCarrier(savedRule);
+          form.logistics_rule_id = savedRule.id;
+        }
+      } else {
+        syncAutomaticLogisticsRule();
+      }
     }
     if (!Number(form.sale_price_rmb || 0) && Number(form.air_sale_price_rmb || 0)) {
       form.sale_price_rmb = Number(form.air_sale_price_rmb || 0);
@@ -940,11 +942,6 @@ watch(
 
 function normalizeText(value) {
   return String(value || "").trim().toLowerCase();
-}
-
-function isAirLandLogisticsRule(rule) {
-  const text = normalizeText(`${rule?.name || ""} ${rule?.channel || ""} ${rule?.filter_keywords || ""}`);
-  return text.includes("陆空") || text.includes("air") || text.includes("standard") || text.includes("express");
 }
 
 function money(value) {
@@ -1431,7 +1428,7 @@ function estimateCurrentSaleRow(row, logisticsRule) {
 
 function resolveSelectedLogisticsRule(row) {
   if (manualLogisticsRule.value && row?.logistics_rule_id) {
-    return resolveCurrentLogisticsRule(availableLogisticsRules.value, row.logistics_rule_id);
+    return resolveInventoryLogisticsRule(availableLogisticsRules.value, row.logistics_rule_id);
   }
   const weight = Number(row?.package_weight_g || 0);
   const saleRmb = Number(row?.sale_price_rmb || row?.air_sale_price_rmb || 0) || (Number(row?.listing_price_rub || 0) / Number(row?.exchange_rate || 11.32));
@@ -1440,15 +1437,38 @@ function resolveSelectedLogisticsRule(row) {
     carrier: "OGL", priceRub: Number(row?.listing_price_rub || 0) || saleRmb * exchangeRate,
     weightG: weight, length: row?.length_cm, width: row?.width_cm, height: row?.height_cm, exchangeRate
   });
-  const matched = logisticsRuleOptions.value.find((rule) => {
-    if (String(rule.carrier || "").toUpperCase() === "OGL") return oglQuotes.some((quote) => Number(quote.id) === Number(rule.id));
+  if (!(weight > 0) || !(saleRmb > 0) || !(exchangeRate > 0)) return null;
+  if (selectedLogisticsCarrier.value === "OGL") return logisticsRuleOptions.value.find(rule => Number(rule.id) === Number(oglQuotes[0]?.id)) || null;
+  return logisticsRuleOptions.value.find((rule) => {
     const minWeight = Number(rule.min_weight_g || 0);
     const maxWeight = Number(rule.max_weight_g || Infinity);
     const minPrice = Number(rule.min_price_rub || 0);
     const maxPrice = Number(rule.max_price_rub || Infinity);
     return weight >= minWeight && weight <= maxWeight && saleRmb * Number(row?.exchange_rate || 11.32) >= minPrice && saleRmb * Number(row?.exchange_rate || 11.32) <= maxPrice;
-  });
-  return matched || logisticsRuleOptions.value[0] || null;
+  }) || null;
+}
+
+function syncAutomaticLogisticsRule() {
+  const nextRule = resolveSelectedLogisticsRule(form);
+  form.logistics_rule_id = nextRule?.id || "";
+  form.shipping_method = nextRule?.channel || "";
+}
+
+function handleLogisticsCarrierChange() {
+  const input = logisticsRuleSelect.value?.$el?.querySelector('[role="combobox"]');
+  if (input?.value) {
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  manualLogisticsRule.value = false;
+  form.logistics_rule_id = "";
+  syncAutomaticLogisticsRule();
+}
+
+function handleLogisticsRuleChange() {
+  manualLogisticsRule.value = Boolean(form.logistics_rule_id);
+  const rule = resolveInventoryLogisticsRule(availableLogisticsRules.value, form.logistics_rule_id);
+  if (rule) form.shipping_method = rule.channel || "";
 }
 
 function buildSelectionPreview(row, logisticsRule) {
@@ -1931,36 +1951,50 @@ function submitAndCreateDraft() {
                   </el-select>
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
-                <el-form-item label="重量(g)">
-                  <el-input-number v-model="form.package_weight_g" :min="0" :precision="0" :step="10" controls-position="right" />
-                </el-form-item>
-              </el-col>
               <el-col v-show="showMobileSection('purchase')" :span="8">
                 <el-form-item label="物流规则">
-                  <el-select v-model="form.logistics_rule_id" filterable placeholder="优先热度高的规则" @change="manualLogisticsRule = true">
-                    <el-option
-                      v-for="rule in logisticsRuleOptions"
-                      :key="rule.id"
-                      :label="`${rule.name} · ${rule.carrier}/${rule.channel} · ${numberText(rule.min_weight_g, 1)}-${numberText(rule.max_weight_g, 1)}g`"
-                      :value="rule.id"
-                    />
-                  </el-select>
+                  <div class="inventory-logistics-picker">
+                    <el-select ref="logisticsRuleSelect" v-model="form.logistics_rule_id" filterable :placeholder="`选择${selectedLogisticsCarrierLabel}具体方式`" aria-label="具体物流方式" popper-class="inventory-logistics-dropdown" :popper-style="{ width: 'min(440px, calc(100vw - 24px))', maxWidth: 'calc(100vw - 24px)' }" @change="handleLogisticsRuleChange">
+                      <template #header>
+                        <div class="inventory-logistics-dropdown-header" @mousedown.prevent @click.stop>
+                          <el-radio-group v-model="selectedLogisticsCarrier" size="small" aria-label="物流分类" @change="handleLogisticsCarrierChange">
+                            <el-radio-button v-for="carrier in INVENTORY_LOGISTICS_CARRIERS" :key="carrier.value" :value="carrier.value">{{ carrier.label }}</el-radio-button>
+                          </el-radio-group>
+                        </div>
+                      </template>
+                      <el-option v-if="savedLogisticsRuleMissing" :label="value?.logistics_rule_name || `已保存规则 #${form.logistics_rule_id}`" :value="form.logistics_rule_id" disabled />
+                      <el-option
+                        v-for="rule in logisticsRuleOptions"
+                        :key="rule.id"
+                        :label="`${rule.name}${isLogisticsRuleEffective(rule) ? '' : '（已保存，当前不可用）'} · ${rule.channel} · ${numberText(rule.min_weight_g, 1)}-${numberText(rule.max_weight_g, 1)}g`"
+                        :value="rule.id"
+                        :disabled="!isLogisticsRuleEffective(rule)"
+                      />
+                    </el-select>
+                    <small v-if="savedLogisticsRuleMissing" class="inventory-logistics-hint">已保留原规则；规则资料暂不可用，请刷新物流配置后核对。</small>
+                    <small v-else-if="selectedLogisticsRule && !isLogisticsRuleEffective(selectedLogisticsRule)" class="inventory-logistics-hint">已保存规则当前不可用；保留原选择，请核对物流配置。</small>
+                    <small v-else-if="!selectedLogisticsRule" class="inventory-logistics-hint">{{ selectedLogisticsCarrierLabel }}暂无符合当前货值、重量和尺寸的规则；请补齐或调整参数，也可在本类中手动选择。</small>
+                  </div>
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
                 <el-form-item label="长(cm)">
                   <el-input-number v-model="form.length_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
                 <el-form-item label="宽(cm)">
                   <el-input-number v-model="form.width_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
-              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="8">
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
                 <el-form-item label="高(cm)">
                   <el-input-number v-model="form.height_cm" :min="0" :precision="0" :step="1" controls-position="right" />
+                </el-form-item>
+              </el-col>
+              <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
+                <el-form-item label="重量(g)">
+                  <el-input-number v-model="form.package_weight_g" :min="0" :precision="0" :step="10" controls-position="right" />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -2360,6 +2394,42 @@ function submitAndCreateDraft() {
 .procurement-section :deep(.el-input-number),
 .procurement-section :deep(.el-select) {
   width: 100%;
+}
+
+.inventory-logistics-picker {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.inventory-logistics-dropdown-header :deep(.el-radio-group) {
+  display: flex;
+  width: 100%;
+}
+
+.inventory-logistics-dropdown-header :deep(.el-radio-button) {
+  flex: 1;
+}
+
+.inventory-logistics-dropdown-header :deep(.el-radio-button__inner) {
+  width: 100%;
+  padding-inline: 8px;
+}
+
+:global(.inventory-logistics-dropdown .el-select-dropdown__item) {
+  height: auto;
+  min-height: 34px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.inventory-logistics-hint {
+  color: var(--el-text-color-secondary);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .naming-fields-grid {

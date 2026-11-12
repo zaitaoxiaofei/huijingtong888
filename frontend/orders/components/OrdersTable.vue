@@ -447,36 +447,6 @@ function canEditCollaborationNote(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="店铺" min-width="128">
-        <template #default="{ row }">
-          <div class="orders-cell-stack">
-            <div class="orders-cell-title">{{ row.shop_name || "--" }}</div>
-          </div>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="状态" width="180" align="center">
-        <template #default="{ row }">
-          <div class="orders-cell-stack orders-cell-center orders-status-cell">
-            <el-tag effect="light" :type="statusTagType(row.statusColor)" :title="row.statusHint || ''">{{ row.statusLabel }}</el-tag>
-            <div
-              v-if="row.statusDeadlineHint"
-              class="orders-status-deadline"
-              :class="{ 'is-danger': row.statusDeadlineDanger || row.statusDeadlineHint.startsWith('超时') }"
-            >
-              {{ row.statusDeadlineHint }}
-            </div>
-            <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" title="查看此运货单的已保存详情" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">运货单 {{ row.ogl_dispatch.official_carriage_id || row.ogl_dispatch.batch_number || '待获取' }}</el-button>
-            <el-tag v-if="row.ogl_dispatch?.bound || row.ogl_dispatch?.dispatched" size="small" :type="row.ogl_dispatch.awaiting_print ? 'warning' : row.ogl_dispatch.association_type === 'official' ? 'primary' : 'info'" :title="row.ogl_dispatch.awaiting_print ? row.statusHint : ''">{{ row.ogl_dispatch.awaiting_print ? '已加入发运单 · 待打印' : row.ogl_dispatch.association_label || (row.ogl_dispatch.official_member ? 'Ozon' : '系统') }}</el-tag>
-            <el-tag v-if="row.ogl_dispatch?.stage === 'bound'" size="small" type="info" :title="row.statusHint">已绑定发运单 · 未交运</el-tag>
-            <el-tag v-if="row.dispatchHold" size="small" type="warning" :title="row.statusHint">人工标记待处理</el-tag>
-            <el-tag v-if="row.ogl_dispatch?.manually_marked" size="small" type="warning">人工标记</el-tag>
-            <small v-if="row.ogl_dispatch?.tracking_assignment" class="orders-cell-subtext">{{row.ogl_dispatch.tracking_assignment.tracking_number}} · {{row.ogl_dispatch.tracking_assignment.cargo_type==='special'?'特殊货物':'普通货物'}} · 系统关联</small>
-            <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
-          </div>
-        </template>
-      </el-table-column>
-
       <el-table-column label="商品信息" min-width="300">
         <template #default="{ row }">
           <div class="orders-goods-list">
@@ -521,6 +491,127 @@ function canEditCollaborationNote(row) {
                 </div>
               </div>
             </div>
+          </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="库存信息" min-width="360">
+        <template #header>
+          <span>库存信息</span>
+          <el-popover trigger="click" placement="bottom" :width="340">
+            <template #reference><el-button link type="primary" size="small">数量说明</el-button></template>
+            <p><strong>本单需求</strong>只表示这一笔订单。同一商品两单各需 1 件，合计需求是 2 件。</p>
+            <p><strong>账面余额</strong>是系统已记账出入库后的余额，包含已记账的订单扣减。同一商品会在多行重复展示这一余额，不能相加，也不要再减一次已扣订单的需求。</p>
+            <p><strong>现货推算</strong>加回待发订单已提前扣账的数量，不含采购在途；负数显示为待核差异，不当成负的实物。请从“明细 → 核对现货”填写仓库实际数量。</p>
+            <p><strong>商品总在途</strong>是商品全部待入库数量；<strong>已占用</strong>是已按时间分给更早订单的数量；<strong>当前可分配</strong>才是还能给新订单使用的在途数量。</p>
+            <p><strong>账面分配</strong>是系统分配给本单的数量；<strong>在途分配</strong>是已采购未入库、分配给本单的数量。它们与账面余额的口径不同。</p>
+            <p>例如，两单各扣 1 件后账面还剩 1 件，这个 1 是扣后余额，不能再算成 1 − 2。</p>
+            <p><strong>账面可覆盖不等于实物已核实。</strong>若实际找不到货，请核对入库、退货和盘点记录。组合商品按子产品数量换算。</p>
+          </el-popover>
+        </template>
+        <template #default="{ row }">
+          <div class="inventory-compact">
+            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
+              <template #actions="{ parent }">
+
+                <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
+                  <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
+                  <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>
+                  <el-dropdown v-else-if="canUpdateInventory && parentInventoryItems(parent).length > 1" trigger="click" @command="id => openParentInventoryLedger(row, parent, 'stocktake', id)">
+                    <el-button link type="primary" size="small">更新本地库存</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                  <el-button v-if="parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
+                  <el-dropdown v-else-if="parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
+                    <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                  <el-button v-if="parent.productId > 0" link type="primary" size="small" :icon="EditPen" @click="emit('edit-inventory-product', parent.productId)">修改库存</el-button>
+                  <el-dropdown v-else-if="parentInventoryItems(parent).length" trigger="click" @command="id => emit('edit-inventory-product', id)">
+                    <el-button link type="primary" size="small" :icon="EditPen">修改子产品库存 ▾</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                </div>
+              </template>
+            </InventoryIdentity>
+            <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
+              <div class="inventory-compact-heading">
+                <strong><el-tag size="small" type="info" class="inventory-fallback-type">类型待核</el-tag>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
+                <span>本单 {{ inventoryViews.get(row.id).items[0].quantity ?? '待核对' }} {{ inventoryViews.get(row.id).items[0].stock_unit || '件' }}</span>
+              </div>
+              <strong class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name || '库存名称待核对' }}</strong>
+              <small>可用：{{ inventoryViews.get(row.id).items[0].local_available ?? '待核对' }} · 实物：{{ inventoryViews.get(row.id).items[0].physical_estimate ?? '待核对' }} · FBP：待同步</small>
+              <small v-if="inventoryViews.get(row.id).active">现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
+            </template>
+            <template v-else-if="inventoryViews.get(row.id)?.items.length">
+              <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
+              <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
+            </template>
+            <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">库存已变更，正在核对或等待重试</small>
+            <small v-if="row.inventoryBindingNotRequired && row.productDisplayRows?.some(item => item.unbound)">订单已取消／退回，无需补绑库存</small>
+            <div v-for="item in row.ignoredBindingItems" :key="`ignored-binding-${row.id}-${item.sku}`" class="orders-inline-actions">
+              <small>SKU {{ item.sku }} · 已忽略本单绑定提醒</small>
+              <el-button v-if="canManageOrderNotes && !row.inventoryBindingNotRequired" link size="small" type="primary" :disabled="!!bindingIgnoreBusy" :loading="bindingIgnoreBusy === `${row.id}:${item.sku}`" @click="emit('set-binding-ignore', row.id, item.sku, false)">恢复提醒</el-button>
+            </div>
+            <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
+            <div class="orders-inventory-quick-actions">
+              <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button v-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
+              <el-dropdown v-else-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
+                <el-button link type="primary" size="small">更新本地库存</el-button>
+                <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+              </el-dropdown>
+              <div v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  @click="emit('open-bind-product-from-order', row.id, item.sku)"
+                >
+                  绑定库存
+                </el-button>
+                <el-button
+                  size="small"
+                  class="orders-inline-accent-button orders-inline-accent-button-primary"
+                  @click="emit('open-create-product-from-order', row.id, item.sku)"
+                >
+                  创建库存
+                </el-button>
+                <el-tooltip v-if="canManageOrderNotes" content="仅忽略本单该 SKU 的绑定提醒，其他订单不受影响；发货仍需完成库存绑定。" placement="top">
+                  <el-button link size="small" :disabled="!!bindingIgnoreBusy" :loading="bindingIgnoreBusy === `${row.id}:${item.sku}`" @click="emit('set-binding-ignore', row.id, item.sku, true)">忽略本单</el-button>
+                </el-tooltip>
+              </div>
+              <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
+            </div>
+          </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="店铺" min-width="128">
+        <template #default="{ row }">
+          <div class="orders-cell-stack">
+            <div class="orders-cell-title">{{ row.shop_name || "--" }}</div>
+          </div>
+        </template>
+      </el-table-column>
+
+      <el-table-column label="状态" width="180" align="center">
+        <template #default="{ row }">
+          <div class="orders-cell-stack orders-cell-center orders-status-cell">
+            <el-tag effect="light" :type="statusTagType(row.statusColor)" :title="row.statusHint || ''">{{ row.statusLabel }}</el-tag>
+            <div
+              v-if="row.statusDeadlineHint"
+              class="orders-status-deadline"
+              :class="{ 'is-danger': row.statusDeadlineDanger || row.statusDeadlineHint.startsWith('超时') }"
+            >
+              {{ row.statusDeadlineHint }}
+            </div>
+            <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" title="查看此运货单的已保存详情" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">运货单 {{ row.ogl_dispatch.official_carriage_id || row.ogl_dispatch.batch_number || '待获取' }}</el-button>
+            <el-tag v-if="row.ogl_dispatch?.bound || row.ogl_dispatch?.dispatched" size="small" :type="row.ogl_dispatch.awaiting_print ? 'warning' : row.ogl_dispatch.association_type === 'official' ? 'primary' : 'info'" :title="row.ogl_dispatch.awaiting_print ? row.statusHint : ''">{{ row.ogl_dispatch.awaiting_print ? '已加入发运单 · 待打印' : row.ogl_dispatch.association_label || (row.ogl_dispatch.official_member ? 'Ozon' : '系统') }}</el-tag>
+            <el-tag v-if="row.ogl_dispatch?.stage === 'bound'" size="small" type="info" :title="row.statusHint">已绑定发运单 · 未交运</el-tag>
+            <el-tag v-if="row.dispatchHold" size="small" type="warning" :title="row.statusHint">人工标记待处理</el-tag>
+            <el-tag v-if="row.ogl_dispatch?.manually_marked" size="small" type="warning">人工标记</el-tag>
+            <small v-if="row.ogl_dispatch?.tracking_assignment" class="orders-cell-subtext">{{row.ogl_dispatch.tracking_assignment.tracking_number}} · {{row.ogl_dispatch.tracking_assignment.cargo_type==='special'?'特殊货物':'普通货物'}} · 系统关联</small>
+            <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
           </div>
         </template>
       </el-table-column>
@@ -614,97 +705,6 @@ function canEditCollaborationNote(row) {
                   <el-icon><CopyDocument /></el-icon>
                 </button>
               </el-tooltip>
-            </div>
-          </div>
-        </template>
-      </el-table-column>
-
-      <el-table-column label="库存信息" min-width="360">
-        <template #header>
-          <span>库存信息</span>
-          <el-popover trigger="click" placement="bottom" :width="340">
-            <template #reference><el-button link type="primary" size="small">数量说明</el-button></template>
-            <p><strong>本单需求</strong>只表示这一笔订单。同一商品两单各需 1 件，合计需求是 2 件。</p>
-            <p><strong>账面余额</strong>是系统已记账出入库后的余额，包含已记账的订单扣减。同一商品会在多行重复展示这一余额，不能相加，也不要再减一次已扣订单的需求。</p>
-            <p><strong>现货推算</strong>加回待发订单已提前扣账的数量，不含采购在途；负数显示为待核差异，不当成负的实物。请从“明细 → 核对现货”填写仓库实际数量。</p>
-            <p><strong>商品总在途</strong>是商品全部待入库数量；<strong>已占用</strong>是已按时间分给更早订单的数量；<strong>当前可分配</strong>才是还能给新订单使用的在途数量。</p>
-            <p><strong>账面分配</strong>是系统分配给本单的数量；<strong>在途分配</strong>是已采购未入库、分配给本单的数量。它们与账面余额的口径不同。</p>
-            <p>例如，两单各扣 1 件后账面还剩 1 件，这个 1 是扣后余额，不能再算成 1 − 2。</p>
-            <p><strong>账面可覆盖不等于实物已核实。</strong>若实际找不到货，请核对入库、退货和盘点记录。组合商品按子产品数量换算。</p>
-          </el-popover>
-        </template>
-        <template #default="{ row }">
-          <div class="inventory-compact">
-            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
-              <template #actions="{ parent }">
-
-                <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
-                  <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
-                  <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>
-                  <el-dropdown v-else-if="canUpdateInventory && parentInventoryItems(parent).length > 1" trigger="click" @command="id => openParentInventoryLedger(row, parent, 'stocktake', id)">
-                    <el-button link type="primary" size="small">更新本地库存</el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
-                  </el-dropdown>
-                  <el-button v-if="parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
-                  <el-dropdown v-else-if="parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
-                    <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
-                  </el-dropdown>
-                  <el-button v-if="parent.productId > 0" link type="primary" size="small" :icon="EditPen" @click="emit('edit-inventory-product', parent.productId)">修改库存</el-button>
-                  <el-dropdown v-else-if="parentInventoryItems(parent).length" trigger="click" @command="id => emit('edit-inventory-product', id)">
-                    <el-button link type="primary" size="small" :icon="EditPen">修改子产品库存 ▾</el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
-                  </el-dropdown>
-                </div>
-              </template>
-            </InventoryIdentity>
-            <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
-              <div class="inventory-compact-heading">
-                <strong><el-tag size="small" type="info" class="inventory-fallback-type">类型待核</el-tag>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
-                <span>本单 {{ inventoryViews.get(row.id).items[0].quantity ?? '待核对' }} {{ inventoryViews.get(row.id).items[0].stock_unit || '件' }}</span>
-              </div>
-              <strong class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name || '库存名称待核对' }}</strong>
-              <small>可用：{{ inventoryViews.get(row.id).items[0].local_available ?? '待核对' }} · 实物：{{ inventoryViews.get(row.id).items[0].physical_estimate ?? '待核对' }} · FBP：待同步</small>
-              <small v-if="inventoryViews.get(row.id).active">现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
-            </template>
-            <template v-else-if="inventoryViews.get(row.id)?.items.length">
-              <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
-              <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
-            </template>
-            <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">库存已变更，正在核对或等待重试</small>
-            <small v-if="row.inventoryBindingNotRequired && row.productDisplayRows?.some(item => item.unbound)">订单已取消／退回，无需补绑库存</small>
-            <div v-for="item in row.ignoredBindingItems" :key="`ignored-binding-${row.id}-${item.sku}`" class="orders-inline-actions">
-              <small>SKU {{ item.sku }} · 已忽略本单绑定提醒</small>
-              <el-button v-if="canManageOrderNotes && !row.inventoryBindingNotRequired" link size="small" type="primary" :disabled="!!bindingIgnoreBusy" :loading="bindingIgnoreBusy === `${row.id}:${item.sku}`" @click="emit('set-binding-ignore', row.id, item.sku, false)">恢复提醒</el-button>
-            </div>
-            <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
-            <div class="orders-inventory-quick-actions">
-              <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
-              <el-button v-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
-              <el-dropdown v-else-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
-                <el-button link type="primary" size="small">更新本地库存</el-button>
-                <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
-              </el-dropdown>
-              <div v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
-                <el-button
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
-                  @click="emit('open-bind-product-from-order', row.id, item.sku)"
-                >
-                  绑定库存
-                </el-button>
-                <el-button
-                  size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-primary"
-                  @click="emit('open-create-product-from-order', row.id, item.sku)"
-                >
-                  创建库存
-                </el-button>
-                <el-tooltip v-if="canManageOrderNotes" content="仅忽略本单该 SKU 的绑定提醒，其他订单不受影响；发货仍需完成库存绑定。" placement="top">
-                  <el-button link size="small" :disabled="!!bindingIgnoreBusy" :loading="bindingIgnoreBusy === `${row.id}:${item.sku}`" @click="emit('set-binding-ignore', row.id, item.sku, true)">忽略本单</el-button>
-                </el-tooltip>
-              </div>
-              <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
           </div>
         </template>
