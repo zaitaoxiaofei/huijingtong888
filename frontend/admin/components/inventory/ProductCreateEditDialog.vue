@@ -10,7 +10,8 @@ import { INVENTORY_LOGISTICS_CARRIERS, inventoryLogisticsCarrier, initialInvento
 import { isLogisticsRuleEffective } from "../../utils/effective-logistics-rules";
 import { quoteLogisticsRules } from "../../utils/logistics-quote";
 import { oglRuleFreightCny } from "../../../../src/ogl-rates.js";
-import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/inventory-similarity";
+import { buildShortInventoryName } from "../../utils/inventory-similarity";
+import { inventoryCreationSearchParams } from "../../utils/inventory-creation-search.js";
 import { useAuthStore } from "../../stores/auth";
 import { useRouter } from "vue-router";
 import ProductImagePreview from "../ProductImagePreview.vue";
@@ -416,64 +417,38 @@ watch(
   { deep: true }
 );
 
-const similarProductQuery = computed(() => {
-  const item = form.structured_naming;
-  return [item.category, item.vehicle_brand, ...(item.vehicle_models || []), item.accessory, ...(item.materials || []), item.process, ...(item.colors || [])]
-    .map((value) => String(value || "").trim())
-    .filter((value) => value && value !== "无品牌")
-    .join(" ");
-});
-
-function similarityResult(row = {}) {
-  const item = form.structured_naming;
-  return scoreInventorySimilarity(row, {
-    coreName: item.category,
-    brand: item.vehicle_brand,
-    vehicleModel: (item.vehicle_models || []).join("/"),
-    colors: item.colors,
-    feature: item.accessory,
-    quantity: item.quantity,
-    packageMode: item.package_mode,
-    includedAccessories: item.included_accessories,
-    giftContents: item.gift_contents
-  });
-}
+const similarProductQuery = computed(() => inventoryCreationSearchParams(form.structured_naming).toString());
+let similarProductsRequest = 0;
 
 async function loadSimilarProducts() {
+  const request = ++similarProductsRequest;
   if (!props.visible) return;
-  const query = similarProductQuery.value;
-  if (!query || !String(form.structured_naming.category || "").trim()) {
+  if (!String(form.structured_naming.category || "").trim()) {
     similarProducts.value = [];
+    similarProductsLoading.value = false;
     return;
   }
   similarProductsLoading.value = true;
   try {
-    const exactParams = new URLSearchParams({ paged: "1", page: "1", pageSize: "20", query });
-    const broadParams = new URLSearchParams({ paged: "1", page: "1", pageSize: "30", query, matchMode: "any" });
-    const coreParams = new URLSearchParams({ paged: "1", page: "1", pageSize: "30", query: form.structured_naming.category });
-    const [coreResult, exactResult, broadResult] = await Promise.all([
-      apiClient.get(`/api/products?${coreParams.toString()}`, { noCache: true }),
-      apiClient.get(`/api/products?${exactParams.toString()}`, { noCache: true }),
-      apiClient.get(`/api/products?${broadParams.toString()}`, { noCache: true })
-    ]);
-    const candidates = [...(coreResult?.rows || []), ...(exactResult?.rows || []), ...(broadResult?.rows || [])]
-      .filter((row) => Number(row.id) !== Number(form.id || 0))
-      .filter((row) => Number(row.active ?? 1) !== 0 && String(row.selection_status || "") !== "merged")
-      .filter((row) => Number(row.parent_product_id || 0) === 0)
-      .filter((row, index, rows) => rows.findIndex((item) => Number(item.id) === Number(row.id)) === index);
-    similarProducts.value = candidates
-      .map((row) => ({ ...row, similarity: similarityResult(row) }))
-      .filter((row) => row.similarity && row.similarity.score >= 45)
-      .sort((left, right) => right.similarity.score - left.similarity.score)
-      .slice(0, 5);
+    const params = new URLSearchParams(similarProductQuery.value);
+    params.set("paged", "1");
+    params.set("page", "1");
+    params.set("pageSize", "5");
+    params.set("bindableOnly", "1");
+    if (form.id) params.set("excludeProductId", String(form.id));
+    const result = await apiClient.get(`/api/products?${params.toString()}`, { noCache: true });
+    if (request !== similarProductsRequest || !props.visible) return;
+    similarProducts.value = result?.rows || [];
   } catch {
-    similarProducts.value = [];
+    if (request === similarProductsRequest) similarProducts.value = [];
   } finally {
-    similarProductsLoading.value = false;
+    if (request === similarProductsRequest) similarProductsLoading.value = false;
   }
 }
 
 function scheduleSimilarProducts() {
+  ++similarProductsRequest;
+  similarProducts.value = [];
   if (similarProductsTimer) window.clearTimeout(similarProductsTimer);
   similarProductsTimer = window.setTimeout(loadSimilarProducts, 320);
 }
@@ -499,9 +474,10 @@ async function createDraftForProduct(product, { reusedInventory = false } = {}) 
   }
 }
 
-watch(similarProductQuery, scheduleSimilarProducts);
+watch(similarProductQuery, scheduleSimilarProducts, { flush: "sync" });
 
 onBeforeUnmount(() => {
+  ++similarProductsRequest;
   if (similarProductsTimer) window.clearTimeout(similarProductsTimer);
 });
 
@@ -2193,7 +2169,7 @@ function submitAndCreateDraft() {
         <aside v-show="showMobileSection('components') && (!mobile || mobileComponentsExpanded)" class="similar-products-panel" v-loading="componentSearchActive ? componentLoading : similarProductsLoading">
           <div class="similar-products-head">
             <strong>{{ componentSearchActive ? '高匹配子产品' : '已有相似库存' }}</strong>
-            <span>{{ componentSearchActive ? '随并列条件实时筛选，可直接添加为当前组成或赠品。' : '随建品字段实时检索，发现已有商品可直接使用。' }}</span>
+            <span>{{ componentSearchActive ? '随并列条件实时筛选，可直接添加为当前组成或赠品。' : '按核心品名、品牌、型号和已填规格逐级筛选，可直接选用已有库存。' }}</span>
           </div>
           <template v-if="componentSearchActive">
             <el-empty
@@ -2232,7 +2208,7 @@ function submitAndCreateDraft() {
           <template v-else>
           <el-empty
             v-if="!similarProducts.length"
-            :description="similarProductQuery ? '暂未发现相似库存' : '填写核心品名后开始检索'"
+            :description="form.structured_naming.category ? '当前已填属性下没有匹配库存' : '填写核心品名后开始检索'"
             :image-size="72"
           />
           <div v-else class="similar-product-list">
@@ -2240,19 +2216,13 @@ function submitAndCreateDraft() {
               <ProductImagePreview :src="row.image_url" size="square" />
               <div class="similar-product-body">
                 <div class="similar-product-title">
-                  <el-tag :type="row.similarity.level === 'duplicate' ? 'danger' : 'warning'" size="small" effect="light">
-                    {{ row.similarity.levelLabel }} {{ row.similarity.score }}分
-                  </el-tag>
+                  <el-tag type="success" size="small" effect="light">已填属性匹配</el-tag>
                   <strong>{{ row.name }}</strong>
                 </div>
                 <span>{{ row.inventory_number || row.inventory_id || row.code || `#${row.id}` }}</span>
                 <div class="similar-product-reasons">
-                  <el-tag v-for="reason in row.similarity.matches" :key="reason" size="small" type="success" effect="light">{{ reason }}相同</el-tag>
                   <el-tag size="small" effect="plain">库存 {{ Number(row.stock || 0) }}</el-tag>
                 </div>
-                <span v-if="row.similarity.differences.length" class="similar-product-differences">
-                  差异：{{ row.similarity.differences.join("、") }}
-                </span>
                 <el-tooltip content="不重复创建库存商品，直接选用这条库存主档" placement="left"><el-button type="primary" plain size="small" @click="selectExistingProduct(row)">选用</el-button></el-tooltip>
               </div>
             </article>

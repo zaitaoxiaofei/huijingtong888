@@ -26,6 +26,19 @@ export function inventoryProductSearch(query, scope, alias = 'p') {
   }
   const color = String(query.color || '').trim();
   if (color) add(`CONCAT(',', REPLACE(REPLACE(COALESCE(${alias}.color, ''), '，', ','), '/', ','), ',') LIKE ? ESCAPE '='`, inventoryNamePattern(','+color+','));
+  // Creation narrows by every selected standard value, before LIMIT is applied.
+  for (const [key, column] of [['requiredModels', 'vehicle_model'], ['requiredColors', 'color'], ['requiredMaterials', 'material']]) {
+    const values = String(query[key] || '').split(',').map(value => value.trim()).filter(Boolean);
+    for (const value of new Set(values)) {
+      add(`CONCAT(',', REPLACE(REPLACE(COALESCE(${alias}.${column}, ''), '，', ','), '/', ','), ',') LIKE ? ESCAPE '='`, inventoryNamePattern(',' + value + ','));
+    }
+  }
+  if (String(query.bindableOnly || '') === '1') {
+    add(`COALESCE(${alias}.selection_status, '') != 'merged'`);
+    add(`COALESCE(${alias}.parent_product_id, 0) = 0`);
+  }
+  const excludeProductId = Number(query.excludeProductId || 0);
+  if (Number.isSafeInteger(excludeProductId) && excludeProductId > 0) add(`${alias}.id != ?`, excludeProductId);
   const inventoryType=String(query.inventoryType || query.inventory_type || 'all').trim().toLowerCase();
   if (inventoryType==='consumable') add(`${alias}.is_consumable=1`);
   if (['normal','single','combo','accessory'].includes(inventoryType)) {

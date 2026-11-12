@@ -16,8 +16,8 @@ test("standard inventory creation offers existing similar products", () => {
   const inventoryPage = read("frontend/admin/views/inventory/InventoryProductsPage.vue");
 
   assert.match(dialog, /已有相似库存/);
-  assert.match(dialog, /matchMode:\s*"any"/);
-  assert.match(dialog, /query:\s*form\.structured_naming\.category/);
+  assert.match(dialog, /inventoryCreationSearchParams\(form\.structured_naming\)/);
+  assert.doesNotMatch(dialog.slice(dialog.indexOf("async function loadSimilarProducts"), dialog.indexOf("function selectExistingProduct")), /matchMode|coreParams|broadParams/);
   assert.match(dialog, /emit\("existing-selected", row\)/);
   assert.match(inventoryPage, /@existing-selected="handleExistingProductSelected"/);
 });
@@ -175,8 +175,10 @@ test("inventory editor loads logistics rules independently and hides merged reco
 
   assert.match(dialog, /loadFallbackLogisticsRules/);
   assert.match(dialog, /apiClient\.get\("\/api\/logistics-rules", \{ noCache: true \}\)/);
-  assert.match(dialog, /String\(row\.selection_status \|\| ""\) !== "merged"/);
-  assert.match(dialog, /Number\(row\.parent_product_id \|\| 0\) === 0/);
+  assert.match(dialog, /params\.set\("bindableOnly", "1"\)/);
+  const search = read("src/services/inventory-product-search.js");
+  assert.match(search, /selection_status/);
+  assert.match(search, /parent_product_id/);
   assert.match(service, /p\.product_type, p\.selection_status, p\.parent_product_id/);
 });
 
