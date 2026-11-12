@@ -1,16 +1,18 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, KeepAlive, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { calculatePricing } from "../../utils/pricing-tool.js";
 import { channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../../utils/logistics-quote.js";
 import { pricingLogisticsCandidates } from "../../utils/pricing-logistics-candidates.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionBandLabel } from "../../utils/rfbs-commission.js";
+import WbCalculator from "./WbCalculator.vue";
 import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
 const props = defineProps({ embedded: { type: Boolean, default: false } });
+const platform = ref("ozon");
 const form = reactive({
-  category: "", purchaseCost: null, weight: null, length: null, width: null, height: null, carrier: "GUOO",
+  category: "", purchaseCost: null, weight: null, length: null, width: null, height: null, carrier: "OGL",
   commissionRate: null, freight: null, exchangeRate: null, domesticCost: 0,
   adRate: 0, otherRate: 0, returnRate: 0, returnLoss: 0, targetMargin: 20, discountRate: 0
 });
@@ -87,6 +89,9 @@ const money = (value) => Number(value || 0).toFixed(2);
 
 <template>
   <div class="pricing-page" :class="{ 'is-embedded': props.embedded }">
+    <el-radio-group v-model="platform" aria-label="计算平台"><el-radio-button value="ozon">Ozon</el-radio-button><el-radio-button value="wb">WB</el-radio-button></el-radio-group>
+    <KeepAlive><WbCalculator v-if="platform === 'wb'" mode="pricing" /></KeepAlive>
+    <template v-if="platform === 'ozon'">
     <el-alert type="info" :closable="false" show-icon title="物流按售价、重量和尺寸匹配本地最新规则；佣金按 Ozon 中国 rFBS 费率表计算。" />
     <div class="pricing-grid">
       <el-card shadow="never" class="pricing-form">
@@ -99,7 +104,7 @@ const money = (value) => Number(value || 0).toFixed(2);
           <el-form-item label="包裹尺寸" required>
             <div class="dimensions"><el-input-number :controls="false" v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
-          <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedQuoteKey = ''"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /><el-option label="OGL（陆运）" value="OGL" /></el-select></el-form-item>
+          <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedQuoteKey = ''"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /><el-option label="OGL" value="OGL" /></el-select></el-form-item>
           <el-form-item label="目标净利率"><el-input-number :controls="false" v-model="form.targetMargin" :min="0" :max="99" :precision="1" /> <span class="unit">%</span></el-form-item>
           <el-form-item label="划线价折扣"><el-input-number :controls="false" v-model="form.discountRate" :min="0" :max="99" :precision="1" /> <span class="unit">%，0 表示不设置</span></el-form-item>
           <el-form-item label="参考汇率" required><el-input-number :controls="false" v-model="form.exchangeRate" :min="0.0001" :precision="4" @update:model-value="editExchangeRate" /><span class="unit">₽ / 元</span><span v-if="rateLoading" class="unit">获取中</span><span v-else-if="rateSourceDate" class="unit">俄罗斯央行 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
@@ -141,6 +146,7 @@ const money = (value) => Number(value || 0).toFixed(2);
         </el-card>
       </div>
     </div>
+    </template>
   </div>
 </template>
 

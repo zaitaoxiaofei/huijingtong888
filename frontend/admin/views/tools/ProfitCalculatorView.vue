@@ -1,15 +1,17 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, KeepAlive, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { calculateProfit } from "../../utils/pricing-tool.js";
 import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote, logisticsRuleMismatchReasons } from "../../utils/logistics-quote.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionRateForRub } from "../../utils/rfbs-commission.js";
+import WbCalculator from "./WbCalculator.vue";
 import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
 const props = defineProps({ embedded: { type: Boolean, default: false } });
+const platform = ref("ozon");
 const form = reactive({
-  category: "", saleCny: null, purchaseCost: null, commissionRate: null, carrier: "GUOO",
+  category: "", saleCny: null, purchaseCost: null, commissionRate: null, carrier: "OGL",
   weight: null, length: null, width: null, height: null, freight: null, exchangeRate: null,
   domesticCost: 0, adRate: 0, otherRate: 0, returnRate: 0, returnLoss: 0
 });
@@ -102,6 +104,9 @@ function calculate() {
 
 <template>
   <div class="profit-page" :class="{ 'is-embedded': props.embedded }">
+    <el-radio-group v-model="platform" aria-label="计算平台"><el-radio-button value="ozon">Ozon</el-radio-button><el-radio-button value="wb">WB</el-radio-button></el-radio-group>
+    <KeepAlive><WbCalculator v-if="platform === 'wb'" mode="profit" /></KeepAlive>
+    <template v-if="platform === 'ozon'">
     <el-alert type="info" :closable="false" show-icon title="佣金按 Ozon 中国 rFBS 费率表匹配；物流按售价、重量和尺寸匹配本地规则，退货损失按退货率分摊。" />
     <div class="profit-grid">
       <el-card shadow="never">
@@ -115,7 +120,7 @@ function calculate() {
           <el-form-item label="包裹尺寸" required>
             <div class="dimensions"><el-input-number :controls="false" v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
-          <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /><el-option label="OGL（陆运）" value="OGL" /></el-select></el-form-item>
+          <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /><el-option label="OGL" value="OGL" /></el-select></el-form-item>
           <el-form-item label="参考汇率" required><el-input-number :controls="false" v-model="form.exchangeRate" :min="0.0001" :precision="4" @update:model-value="editExchangeRate" /><span class="unit">₽ / 元</span><span v-if="rateLoading" class="unit">获取中</span><span v-else-if="rateSourceDate" class="unit">俄罗斯央行 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number :controls="false" v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
@@ -156,6 +161,7 @@ function calculate() {
         </el-card>
       </div>
     </div>
+    </template>
   </div>
 </template>
 
