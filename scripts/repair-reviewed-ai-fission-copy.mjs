@@ -4,6 +4,8 @@ import mysql from "mysql2/promise";
 import { inspectReviewedAiFissionCopy, applyReviewedAiFissionCopy } from "./lib/reviewed-ai-fission-copy.mjs";
 
 // Explicit local administrator socket; never load application credentials or .env.
+// Optional reviewed row.expected_main_image enables only fixed-rich image sync;
+// the library rechecks that URL against the locked draft-owned first SKU image.
 let db;
 try {
   const options = new Map();

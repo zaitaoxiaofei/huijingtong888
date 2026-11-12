@@ -81,3 +81,29 @@ test("bare-brand expansion keeps hashtag identities with an unknown model suffix
   assert.equal(ctx.replaceSpecificVariantText("#JAECOO #для_JAECOO #JAECOO_J7 #JAECOO_J60 #JAECOO-J60 #для_JAECOO_J7 #JAECOO_J6 #салон", "JAECOO", "JAECOO J6"),
     "#JAECOOJ6 #для_JAECOOJ6 #JAECOO_J7 #JAECOO_J60 #JAECOO-J60 #для_JAECOO_J7 #JAECOO_J6 #салон");
 });
+
+test("target changes map only complete canonical maker/model wrappers from a full source identity", () => {
+  const ctx = fixture();
+  const text = "Для BELGEE X70 #BELGEE_X70 #для_BELGEE #для_X70 #для_x70 #для_UAZ #для_Profi #для_X700 #для_OTHER_X70 #для_BELGEE_аксессуары #X70 #BELGEE #салон";
+  const expected = "Для UAZ Profi #UAZ_Profi #для_UAZ #для_Profi #для_Profi #для_UAZ #для_Profi #для_X700 #для_OTHER_X70 #для_BELGEE_аксессуары #X70 #BELGEE #салон";
+  const result = ctx.replaceSpecificVariantText(text, "BELGEE X70", "UAZ Profi");
+  assert.equal(result, expected); assert.equal(ctx.replaceSpecificVariantText(result, "BELGEE X70", "UAZ Profi"), expected);
+  assert.equal(ctx.replaceSpecificVariantText("#для_BELGEE #для_X70", "BELGEE_X70", "UAZ Profi"), "#для_BELGEE #для_X70", "Do not infer builder wrappers from a non-builder identity spelling");
+});
+
+test("canonical wrapper target changes keep shared identities and protect prefix targets", () => {
+  const ctx = fixture();
+  for (const [sourceModel, target, before, expected] of [
+    ["HAVAL H3", "HAVAL F7", "#для_HAVAL #для_H3 #для_F7", "#для_HAVAL #для_F7 #для_F7"],
+    ["HAVAL H3", "HAVAL H3 Pro", "#для_HAVAL #для_H3 #для_H3_Pro", "#для_HAVAL #для_H3_Pro #для_H3_Pro"],
+    ["HAVAL H3", "HAVAL H3Pro", "#для_HAVAL #для_H3 #для_H3Pro", "#для_HAVAL #для_H3Pro #для_H3Pro"],
+    ["BELGEE X70", "UAZ X70", "#для_BELGEE #для_X70 #для_UAZ", "#для_UAZ #для_X70 #для_UAZ"],
+    ["BELGEE X70", "BELGEE X700", "#для_BELGEE #для_X70 #для_X700", "#для_BELGEE #для_X700 #для_X700"],
+    ["MAZDA CX-3", "MAZDA CX-30", "#для_MAZDA #для_CX_3 #для_CX_30 #для_CX_300", "#для_MAZDA #для_CX_30 #для_CX_30 #для_CX_300"],
+    ["MAZDA CX-3", "MAZDACX3", "#для_MAZDA #для_CX_3", "#для_MAZDA #для_CX_3"]
+  ]) {
+    const result = ctx.replaceSpecificVariantText(before, sourceModel, target);
+    assert.equal(result, expected, `${sourceModel}→${target}`);
+    assert.equal(ctx.replaceSpecificVariantText(result, sourceModel, target), expected, `${sourceModel}→${target} repeated`);
+  }
+});

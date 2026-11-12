@@ -96,8 +96,48 @@ function guardRich(before, after) {
   };
   if (!equal(envelope(before), envelope(after))) fail("Rich selected-value metadata must remain unchanged");
 }
-function guardCopyValue(before, after, attributeId, key) {
-  if (attributeId === 11254) return guardRich(before, after);
+function httpImage(value) {
+  if (typeof value !== "string" || !value || value !== value.trim()) return false;
+  try { const parsed = new URL(value); return ["http:", "https:"].includes(parsed.protocol) && Boolean(parsed.hostname); } catch { return false; }
+}
+function draftMainImage(row, expected) {
+  const first = json(row.template_payload_json).editable_payload?.variants?.[0]?.images?.[0];
+  const candidates = typeof first === "string" ? [first] : object(first)
+    ? [first.url, first.image_url, first.imageUrl].filter(value => value !== undefined && value !== null && value !== "") : [];
+  if (!candidates.length || candidates.some(value => !httpImage(value)) || new Set(candidates).size !== 1 || candidates[0] !== expected) fail("Reviewed current first-SKU main image changed or is unavailable");
+  return candidates[0];
+}
+function fixedRichDocument(document) {
+  const block = document?.content?.[0]?.blocks?.[0], img = block?.img;
+  const title = block?.title?.items?.[0]?.content, text = block?.text?.items?.[0]?.content;
+  if (!httpImage(img?.src) || img.src !== img.srcMobile || [img?.alt, title, text].some(value => typeof value !== "string")) fail("Rich image mode requires the known fixed single-image builder");
+  const expected = { content: [{ widgetName: "raShowcase", type: "billboard", blocks: [{ imgLink: "", img: { src: img.src, srcMobile: img.srcMobile, alt: img.alt, position: "width_full", positionMobile: "width_full", widthMobile: 1024, heightMobile: 1536 },
+    title: { items: [{ type: "text", content: title }], size: "size4", align: "left", color: "color1" },
+    text: { size: "size2", align: "left", color: "color1", items: [{ type: "text", content: text }] } }] }], version: 0.3 };
+  if (!equal(document, expected)) fail("Rich image mode refuses custom or multiple-image layouts");
+  return clone(document);
+}
+function guardRichMainImage(before, after, main) {
+  const envelope = (value, rewrite, count) => {
+    const document = node => {
+      const result = fixedRichDocument(node); count.documents++;
+      if (rewrite) { result.content[0].blocks[0].img.src = main; result.content[0].blocks[0].img.srcMobile = main; }
+      return result;
+    };
+    if (typeof value === "string") {
+      let parsed; try { parsed = JSON.parse(value); } catch {}
+      return object(parsed) && Array.isArray(parsed.content) ? ["rich-json-string", document(parsed)] : value;
+    }
+    if (Array.isArray(value)) return value.map(item => envelope(item, rewrite, count));
+    if (object(value)) return Array.isArray(value.content) ? document(value) : Object.fromEntries(Object.entries(value).map(([key, item]) => [key, valueKeys.has(key) ? envelope(item, rewrite, count) : item]));
+    return value;
+  };
+  const previous = { documents: 0 }, next = { documents: 0 };
+  const expected = envelope(before, true, previous), actual = envelope(after, false, next);
+  if (!previous.documents || previous.documents !== next.documents || !equal(expected, actual)) fail("Rich image mode may only synchronize src/srcMobile; copy and metadata must remain exact");
+}
+function guardCopyValue(before, after, attributeId, key, main) {
+  if (attributeId === 11254) return main ? guardRichMainImage(before, after, main) : guardRich(before, after);
   const text = value => typeof value === "string" || Array.isArray(value) && value.every(item => typeof item === "string");
   if (!attributeId || !["values", "selected_values", "selectedValues"].includes(key)) {
     if (!text(before) || !text(after)) fail("Reviewed copy must remain text or a text list");
@@ -126,6 +166,7 @@ function validate(manifest, applying) {
       if (!validId(item.id) || seen.has(item.id) || !Array.isArray(item.changes) || item.changes.length > 6) fail("Invalid or duplicate reviewed row");
       seen.add(item.id);
       if (kind === "drafts" ? !validId(item.template_id) || !Number.isSafeInteger(item.parent_draft_id) || item.parent_draft_id < 0 : !validId(item.draft_id)) fail("Reviewed draft/template identities required");
+      if (Object.hasOwn(item, "expected_main_image") && !httpImage(item.expected_main_image)) fail("Reviewed image mode requires an explicit HTTP(S) main image");
       if (applying && (!validHash(item.sha256) || !validHash(item.unchanged_sha256))) fail("Apply requires audit-generated row and unchanged-field hashes");
       const columns = new Set();
       for (const change of item.changes) {
@@ -160,7 +201,7 @@ function planRow(row, item, definition, applying) {
       for (const op of change.operations) {
         const kind = copyPath(desired, change.column, op.path), current = at(desired, op.path);
         if (!equal(current, op.before_value) && !equal(current, op.after_value)) fail("Reviewed copy path changed after preparation");
-        guardCopyValue(op.before_value, op.after_value, kind, op.path.at(-1));
+        guardCopyValue(op.before_value, op.after_value, kind, op.path.at(-1), item.expected_main_image);
         allAfter &&= equal(current, op.after_value);
         set(desired, op.path, op.after_value); set(masked, op.path, "<reviewed-copy>");
       }
@@ -175,7 +216,7 @@ function planRow(row, item, definition, applying) {
 
 export async function inspectReviewedAiFissionCopy(db, manifest, { lock = false, applying = lock } = {}) {
   validate(manifest, applying);
-  const suffix = lock ? " FOR UPDATE" : "", planned = { drafts: [], templates: [] }, snapshots = [];
+  const suffix = lock ? " FOR UPDATE" : "", planned = { drafts: [], templates: [] }, snapshots = [], ownedDrafts = new Map();
   for (const kind of ["drafts", "templates"]) for (const item of [...manifest[kind]].sort((a, b) => a.id - b.id)) {
     const definition = definitions[kind], [row] = await query(db, `SELECT * FROM ${definition.table} WHERE id = ?${suffix}`, [item.id]);
     if (!row || String(row.tenant_id ?? "admin") !== manifest.tenant_id || row.status === "deleted") fail("Reviewed row ownership or status changed");
@@ -183,6 +224,7 @@ export async function inspectReviewedAiFissionCopy(db, manifest, { lock = false,
     if (kind === "drafts") {
       if (row.status !== "draft" || Number(row.template_id) !== item.template_id || Number(row.parent_draft_id || 0) !== item.parent_draft_id) fail("Reviewed draft identity changed");
       json(row.template_payload_json);
+      ownedDrafts.set(item.id, row);
       if (item.parent_draft_id) {
         const [parent] = await query(db, `SELECT id, tenant_id FROM listing_drafts WHERE id = ?${suffix}`, [item.parent_draft_id]);
         if (!parent || String(parent.tenant_id ?? "admin") !== manifest.tenant_id) fail("Reviewed parent belongs to another tenant");
@@ -194,6 +236,7 @@ export async function inspectReviewedAiFissionCopy(db, manifest, { lock = false,
     const references = await query(db, `SELECT id, tenant_id FROM listing_drafts WHERE template_id = ?${suffix}`, [templateId]);
     const expectedDraft = kind === "drafts" ? item.id : item.draft_id;
     if (kind === "templates" && (references.length !== 1 || Number(references[0].id) !== expectedDraft || String(references[0].tenant_id ?? "admin") !== manifest.tenant_id)) fail("Reviewed template is shared or foreign");
+    if (item.expected_main_image) draftMainImage(kind === "drafts" ? row : ownedDrafts.get(item.draft_id), item.expected_main_image);
     const result = planRow(row, item, definition, applying);
     planned[kind].push(result); snapshots.push({ table: definition.table, row });
   }

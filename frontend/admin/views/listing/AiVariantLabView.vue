@@ -2026,6 +2026,20 @@ function replaceSpecificVariantText(value, source, target) {
   const sourceParts = from.match(/[\p{L}\p{N}]+/gu) || [];
   const targetParts = to.match(/[\p{L}\p{N}]+/gu) || [];
   if (!sourceParts.length || !targetParts.length) return text;
+  const wrapperTags = (vehicle) => {
+    const words = vehicle.split(/\s+/);
+    return [words[0], words.slice(1).join("_")].map((part) => {
+      if (!part || /[\u3400-\u9fff]/.test(part) || !isBuyerFacingCopyText(part)) return "";
+      const body = `для_${part}`.replace(/[^\p{L}\p{N}_]+/gu, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 24).replace(/_+$/g, "");
+      return body ? `#${body}` : "";
+    });
+  };
+  const currentWrappers = wrapperTags(to), wrapperChanges = new Map();
+  if (from.split(/\s+/).length > 1 && sourceParts.join("").toLowerCase() !== targetParts.join("").toLowerCase()) {
+    wrapperTags(from).forEach((tag, index) => {
+      if (tag && !currentWrappers.some((current) => current.toLowerCase() === tag.toLowerCase())) wrapperChanges.set(tag.toLowerCase(), currentWrappers[index]);
+    });
+  }
   const tagIdentityPattern = sourceParts.map(escape).join("([_-]*)");
   const tagTargetPattern = targetParts.map(escape).join("[_-]*");
   const tagPattern = new RegExp(`^${tagIdentityPattern}$`, "iu");
@@ -2035,12 +2049,15 @@ function replaceSpecificVariantText(value, source, target) {
   // Process original tag/body segments independently so inserted text is never
   // matched again, and recognize complete targets before their source prefix.
   return text.split(/(#[\p{L}\p{N}_-]+)/gu).map((segment, index) => {
-    if (index % 2) return `#${segment.slice(1).replace(tagIdentity, (_match, prefix, vehicle) => {
-      if (completeTagTarget.test(vehicle)) return prefix + vehicle;
-      const separators = vehicle.match(tagPattern);
-      if (separators && sourceParts.length === targetParts.length) return prefix + targetParts.map((part, index) => (index ? separators[index] : "") + part).join("");
-      return prefix + targetParts.join(vehicle.includes("_") ? "_" : vehicle.includes("-") ? "-" : "");
-    })}`;
+    if (index % 2) {
+      if (wrapperChanges.has(segment.toLowerCase())) return wrapperChanges.get(segment.toLowerCase());
+      return `#${segment.slice(1).replace(tagIdentity, (_match, prefix, vehicle) => {
+        if (completeTagTarget.test(vehicle)) return prefix + vehicle;
+        const separators = vehicle.match(tagPattern);
+        if (separators && sourceParts.length === targetParts.length) return prefix + targetParts.map((part, index) => (index ? separators[index] : "") + part).join("");
+        return prefix + targetParts.join(vehicle.includes("_") ? "_" : vehicle.includes("-") ? "-" : "");
+      })}`;
+    }
     return segment.replace(matches, (_match, prefix, vehicle) => {
       if (completeBodyTarget.test(vehicle)) return prefix + vehicle;
       const replacement = vehicle.includes("_") ? to.replace(/[\s_]+/g, "_")
