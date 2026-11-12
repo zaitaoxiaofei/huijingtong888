@@ -26,7 +26,7 @@ import { ORDER_PROFIT_DAILY_FX_JOB, runOrderProfitDailyFxArchive } from "./servi
 import { backfillInventoryAlertSalesMysql, orderRowsByIdsMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
-import { createStaticHandler } from "./http/static.js";
+import { createStaticHandler, isVersionedVueAssetPath } from "./http/static.js";
 import { requestPublicImage, resolvePublicImageTarget } from "./http/public-image-request.js";
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
@@ -3680,10 +3680,6 @@ function resolveTeamAttachmentStaticRoots() {
   for (const root of resolveUploadSubdirRoots("team-attachments")) add(root);
   add(path.resolve("public", "uploads", "team-attachments"));
   return roots;
-}
-
-function isVersionedVueAssetPath(pathname = "") {
-  return /^\/vue-apps\/assets\/[^/]+-[A-Za-z0-9_-]{6,}(?:-\d{12,13})?\.(?:js|css)$/i.test(String(pathname || ""));
 }
 
 function isPublicAuthCallbackPath(req, parts = []) {

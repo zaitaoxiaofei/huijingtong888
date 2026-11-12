@@ -42,6 +42,12 @@ Migration target:
 
 ## Workflow Rule
 
+### Desktop image failures and reload recovery (2026-11-12)
+
+- Fingerprinted PNG files shipped under `/vue-apps/assets/` are public build assets, like JS/CSS. The same path predicate controls site-gate bypass and immutable caching; it does not cover uploads, private media, nested paths or APIs.
+- Missing marketplace images must never be classified as failed application chunks. A captured image error previously caused document reloads while app mounting reset the retry counter.
+- Generated shell recovery is limited to actual script/style loading failures and explicit dynamic-import/preload errors. Its bounded retry budget survives mounting and is scoped to the entry fingerprint.
+
 For future work:
 
 - Backend/API fixes should not touch UI files or generated frontend assets unless the task explicitly requires it.
