@@ -1,4 +1,5 @@
 <script setup>
+import WbCardLimits from "../../components/listing/WbCardLimits.vue";
 import { WB_REMOTE_WRITES_ENABLED } from "../../../../src/shared/wb-capabilities.js";
 import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -50,7 +51,7 @@ onBeforeUnmount(()=>window.removeEventListener('erp:auth-scope-changed',resetSco
 </script>
 <template>
   <div class="wb-products-page">
-    <div class="page-heading"><h2><MarketplaceBadge platform="wb"/> WB 在线商品</h2><div><el-button :loading="busy" :disabled="!shopId" @click="sync">同步商品</el-button><el-button type="primary" :disabled="!shopId" @click="router.push('/wb/listing')">模板与商品草稿</el-button></div></div>
+    <div class="page-heading"><h2><MarketplaceBadge platform="wb"/> WB 在线商品</h2><div><WbCardLimits :shops="shops" :shop-id="Number(shopId)||null"/><el-button :loading="busy" :disabled="!shopId" @click="sync">同步商品</el-button><el-button type="primary" :disabled="!shopId" @click="router.push('/wb/listing')">模板与商品草稿</el-button></div></div>
     <el-alert v-if="!shops.length" title="尚未配置 WB 店铺" description="请由企业管理员到“企业店铺 → 新增店铺”，选择 WB（中国主体），填写 API 授权并绑定卖家仓。这里会展示真实店铺数据。" type="info" :closable="false"/>
     <el-alert v-if="!WB_REMOTE_WRITES_ENABLED" title="当前开放店铺授权和真实数据拉取；WB 上架、改价及发货操作将在店铺联调后开放。" type="info" :closable="false"/>
     <el-alert v-if="notice" :title="notice" type="info" :closable="false"/>

@@ -41,6 +41,7 @@ const hasDashboardLoaded = ref(false);
 const shopLimitsLoading = ref(false);
 const topInventoryLoading = ref(false);
 let overviewRequestSeq = 0;
+let shopLimitsRefreshTimer;
 const shopProductLimits = ref([]);
 const topInventoryRows = ref([]);
 const topInventoryError = ref("");
@@ -95,14 +96,17 @@ const availableLimitRows = computed(() => shopProductLimits.value.map((row) => {
   const total = row?.limit?.total || {};
   const dailyCreate = row?.limit?.daily_create || {};
   return {
+    platform: row.platform || "ozon",
+    refreshing: Boolean(row.limit?.refreshing),
+    error: row.error || row.limit?.usage_error || "",
     shop_id: row.shop_id,
     shop_name: row.shop_name || `店铺 ${row.shop_id || ""}`.trim(),
-    total_available: Number(total.remaining || 0),
-    total_limit: Number(total.limit || 0),
+    total_available: total.remaining ?? null,
+    total_limit: total.limit ?? null,
     today_available: Number(dailyCreate.remaining || 0),
     today_limit: Number(dailyCreate.limit || 0),
     today_usage: Number(dailyCreate.usage || 0),
-    ok: row.ok !== false && dailyCreate.remaining !== null && dailyCreate.remaining !== undefined
+    ok: row.ok !== false && (row.platform === "wb" ? total.limit !== null && total.limit !== undefined : dailyCreate.remaining !== null && dailyCreate.remaining !== undefined)
   };
 }));
 const maxAvailableLimit = computed(() => Math.max(1, ...availableLimitRows.value.map((row) => row.today_available)));
@@ -1011,6 +1015,9 @@ async function loadTopInventory(dateKey = selectedDate.value) {
 }
 
 function clearInventoryRanking() {
+  clearTimeout(shopLimitsRefreshTimer);
+  ++overviewRequestSeq;
+  shopProductLimits.value = [];
   ++rankingRequestSeq;
   topInventoryRows.value = [];
   topInventoryHasMore.value = false;
@@ -1018,14 +1025,29 @@ function clearInventoryRanking() {
 }
 
 async function loadOverviewPanels(dateKey = selectedDate.value) {
+  clearTimeout(shopLimitsRefreshTimer);
   const requestSeq = ++overviewRequestSeq;
   const scope = currentApiCacheScope();
   const isCurrent = () => requestSeq === overviewRequestSeq && dateKey === selectedDate.value && scope === currentApiCacheScope();
   shopLimitsLoading.value = true;
-  const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then((result) => {
+  const applyLimits = (result) => {
     if (!isCurrent()) return;
     shopProductLimits.value = Array.isArray(result?.rows) ? result.rows : [];
-  }).finally(() => {
+    if (shopProductLimits.value.some(row => row.limit?.refreshing)) {
+      shopLimitsRefreshTimer = setTimeout(async () => {
+        if (!isCurrent()) return;
+        const rows = await Promise.all(shopProductLimits.value.map(async row => {
+          if (row.platform !== 'wb' || !row.limit?.refreshing) return row;
+          try {
+            const limit = await getDashboardWithRetry(`/api/wb/card-limits?shop_id=${row.shop_id}`, { noCache: true, routeScoped: false });
+            return { ...row, limit };
+          } catch (error) { return { ...row, ok: false, limit: null, error: error.message }; }
+        }));
+        applyLimits({ rows });
+      }, 3000);
+    }
+  };
+  const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then(applyLimits).finally(() => {
     if (isCurrent()) shopLimitsLoading.value = false;
   });
   const rankingRequest = loadTopInventory(dateKey);
@@ -1059,6 +1081,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   ++rankingRequestSeq;
   ++overviewRequestSeq;
+  clearTimeout(shopLimitsRefreshTimer);
   ++dashboardRequestSeq;
   window.removeEventListener("erp:auth-scope-changed", clearInventoryRanking);
   clearDashboardSnapshotReload();
@@ -1532,19 +1555,22 @@ onBeforeUnmount(() => {
             <div v-if="availableLimitRows.length" class="limit-chart">
               <article v-for="row in availableLimitRows" :key="row.shop_id" class="limit-chart-row">
                 <div class="limit-chart-label">
-                  <strong>{{ row.shop_name }}</strong>
-                  <span v-if="row.ok">今日已用 {{ numberText(row.today_usage) }}</span>
-                  <span v-else>额度暂不可用</span>
+                  <strong>{{ row.platform === "wb" ? "WB · " : "" }}{{ row.shop_name }}</strong>
+                  <span v-if="row.platform === 'wb' && row.ok">商品卡总额度</span>
+                  <span v-else-if="row.ok">今日已用 {{ numberText(row.today_usage) }}</span>
+                  <span v-else :title="row.error">额度暂不可用</span>
                 </div>
                 <div class="limit-chart-value">
-                  <div class="limit-chart-track">
+                  <div v-if="row.platform !== 'wb'" class="limit-chart-track">
                     <i v-if="row.ok" :style="{ width: limitBarWidth(row.today_available) }"></i>
                   </div>
-                  <strong>{{ row.ok ? numberText(row.today_available) : "--" }}</strong>
+                  <strong>{{ row.ok ? numberText(row.platform === 'wb' ? row.total_limit : row.today_available) : "--" }}</strong>
                 </div>
                 <div v-if="row.ok" class="limit-chart-meta">
-                  <span>今日可用 / {{ numberText(row.today_limit) }}</span>
-                  <span>总可用 {{ numberText(row.total_available) }} / {{ numberText(row.total_limit) }}</span>
+                  <span v-if="row.platform === 'wb'">每日上新：接口未提供</span>
+                  <span v-else>今日可用 / {{ numberText(row.today_limit) }}</span>
+                  <span>总可用 {{ row.total_available === null ? (row.refreshing ? '核对中' : '--') : numberText(row.total_available) }} / {{ numberText(row.total_limit) }}</span>
+                  <small v-if="row.error">{{ row.error }}</small>
                 </div>
               </article>
             </div>

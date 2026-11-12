@@ -1,4 +1,5 @@
 <script setup>
+import WbCardLimits from "../../components/listing/WbCardLimits.vue";
 import {onMounted,onBeforeUnmount,ref} from 'vue';
 import {ElMessage,ElMessageBox} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
@@ -28,7 +29,7 @@ onMounted(()=>{bootstrap();window.addEventListener('erp:auth-scope-changed',rese
 </script>
 <template>
  <div class="copy-page">
-  <section class="copy-header"><strong class="platform-title">WB 商品上架</strong><div class="header-actions"><el-button :disabled="uploading>0" @click="drawer=true;loadDrafts()">打开草稿</el-button><el-button :disabled="uploading>0" @click="newProduct">新建商品</el-button><el-button :disabled="!schema||busy||uploading>0" @click="editor?.preview()">预览与校验</el-button><el-button :disabled="!schema||busy||uploading>0" @click="editor?.saveDraft()">保存草稿</el-button><el-button type="danger" :disabled="!schema||busy||uploading>0" @click="editor?.reviewSubmission()">提交 WB</el-button></div></section>
+  <section class="copy-header"><strong class="platform-title">WB 商品上架</strong><div class="header-actions"><WbCardLimits :shops="shops"/><el-button :disabled="uploading>0" @click="drawer=true;loadDrafts()">打开草稿</el-button><el-button :disabled="uploading>0" @click="newProduct">新建商品</el-button><el-button :disabled="!schema||busy||uploading>0" @click="editor?.preview()">预览与校验</el-button><el-button :disabled="!schema||busy||uploading>0" @click="editor?.saveDraft()">保存草稿</el-button><el-button type="danger" :disabled="!schema||busy||uploading>0" @click="editor?.reviewSubmission()">提交 WB</el-button></div></section>
   <div class="copy-layout"><main class="main-column"><section class="copy-card">
    <el-form label-width="116px" class="copy-form"><section class="editor-block"><h3>主要信息</h3><div class="form-shell"><el-form-item label="产品类目" required><WbCategorySelect :key="catalogGeneration" :subject-id="Number(schema?.subject_id)||null" :display-label="schema?.category_name||''" :disabled="busy||uploading>0" @select="choose"/></el-form-item><el-alert v-if="schema?.cache?.stale" title="类目信息暂未更新，请稍后刷新类目。" type="warning" :closable="false"/></div></section></el-form>
    <div v-if="!schema" class="empty-category">请先选择产品类目，系统会自动获取对应 WB 模板。填写商品内容后再选择上架店铺。</div>

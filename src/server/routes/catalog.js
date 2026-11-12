@@ -13,7 +13,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/products/selection": (req, url) => services.selectionProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/online-products/limits": (req, url) => services.onlineProductLimits(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/online-products/limits": (req, url) => services.onlineProductLimits(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req), { signal: req._abortSignal, session: req._session }),
     "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

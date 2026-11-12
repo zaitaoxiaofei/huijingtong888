@@ -3021,6 +3021,26 @@ Bind an online product to an ERP product and owner.
 - Responses:
   - `200` `application/json` -> `MutationOk`
 
+#### `GET /api/wb/card-limits`
+
+Read current-enterprise verified WB shop capacity from Content GET /content/v2/cards/limits. Returns free_limit, paid_limit, total, refreshing, fetched_at, usage_fetched_at and usage_error. A background complete census of live and trashed nmIDs supplies usage and remaining; they remain null while pending or incomplete. Results are cached for five minutes by tenant, shop, environment and credentials. daily_create and daily_update remain null because this API does not supply daily capacity. Requires orders.read and current enterprise membership.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `shop_id` (`number`, required): Owned active verified WB shop identifier.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/online-products/limits`
+
+Read active current-enterprise shop capacities. Dispatches Ozon shops to the existing Ozon limit API and WB shops to the verified WB Content card-capacity reader. Each row includes platform, ok, error and limit. A shop failure does not fail other shops. WB usage/remaining stay null until its complete background live-and-trash census succeeds; daily buckets are unknown.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `shop_id` (`number`, optional): Optional owned shop filter.
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/online-products/warehouses`
 
 Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.
