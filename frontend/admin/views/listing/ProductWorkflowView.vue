@@ -198,7 +198,7 @@ watch(tab,()=>{reviewEditing.value=false;});
     </el-tabs>
     <el-dialog v-model="keyLibraryOpen" title="企业生产资料库" width="1100px" top="4vh" append-to-body><WorkflowMaterialLibrary v-if="keyLibraryOpen" :category="category" :seed="keyLibrarySeed" :selectable="Boolean(keyLibrarySeed.target)" @select="selectLibraryKey" @saved="keyLibraryRevision++;loadKeyChoices()"/></el-dialog>
     <input ref="importInput" type="file" accept=".json" hidden @change="importTemplate"/>
-    <el-dialog v-model="productionOpen" :title="definition.name" width="900px" top="5vh" class="production-dialog" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy">
+    <el-dialog v-model="productionOpen" :title="definition.name" width="1100px" top="3vh" class="production-dialog" :close-on-click-modal="false" :close-on-press-escape="!busy" :show-close="!busy">
       <template #header><div><small>本次生产名称（可编辑，不修改原模板名称）</small><el-input v-model="productionName" :disabled="busy" placeholder="本次生产名称，可自定义" aria-label="本次生产名称" maxlength="180" style="max-width:650px"/></div></template>
       <WorkflowProductionForm v-if="productionOpen" :busy="busy" :key-library-revision="keyLibraryRevision" :definition="definition" :shared-values="sharedValues" :variants="variants" v-model:production-mode="productionMode" v-model:fitment-mode="fitmentMode" @add="addVariant" @import-files="importProductFiles" @upload="upload" @manage-keys="openKeyLibrary"/>
       <template #footer><el-button :disabled="busy" @click="productionOpen=false">取消</el-button><el-button type="primary" :loading="busy" @click="submitProduction">{{ productionMode==='variants'?`开始生成 · 1 份草稿 / ${variants.length} 个变体`:`开始生成 · ${pendingProductCount} 份草稿` }}</el-button></template>
@@ -228,5 +228,5 @@ watch(tab,()=>{reviewEditing.value=false;});
 @media(max-width:650px){.template-start{height:100%;grid-template-columns:1fr;grid-template-rows:auto minmax(240px,1fr);overflow:auto}.existing-template-list{max-height:none;flex:1}.create-template,.existing-templates{padding:12px}.workflow-page>.page-heading{margin-bottom:8px}.flow-library{grid-template-columns:1fr}}
 </style>
 <style>
-.production-dialog{max-width:calc(100vw - 24px)}.production-dialog .el-dialog__body{max-height:calc(90vh - 160px);overflow:auto}.production-dialog .el-dialog__footer{border-top:1px solid var(--el-border-color-lighter);padding-top:16px}
+.production-dialog{max-width:calc(100vw - 24px)}.production-dialog .el-dialog__header{padding-bottom:8px}.production-dialog .el-dialog__body{max-height:calc(94vh - 140px);overflow:auto}.production-dialog .el-dialog__footer{border-top:1px solid var(--el-border-color-lighter);padding-top:10px}
 </style>
