@@ -1,3 +1,4 @@
+import { createPerformanceReadQueue, performanceResponseError, isPerformanceRateLimit } from "./ozon-performance-read-queue.js";
 import { normalizeAdvertisingBid, executeAdvertisingBid } from "./ozon-advertising-bid.js";
 import { advertisingTenantScope, advertisingTenantSql, advertisingShopSql, assertAdvertisingShop, isAdvertisingBusinessRequest } from './advertising-tenant-context.js';
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
   KEY idx_ozon_ad_sku_daily_product (product_id, date_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 `;
+
+const runPerformanceRead = createPerformanceReadQueue({ wait: sleep });
 
 let schemaReady = false;
 const PERFORMANCE_API_BASE = "https://api-performance.ozon.ru";
@@ -1938,6 +1941,7 @@ async function fetchPerformanceCampaigns(token, options = {}) {
       const rows = normalizeCampaignResponse(data);
       for (const campaign of rows) if (campaign.id) campaigns.push(campaign);
     } catch (error) {
+      if (isPerformanceRateLimit(error)) throw error;
       lastError = error;
     }
   }
@@ -2076,7 +2080,8 @@ async function hydrateCampaignProductSettings(token, campaigns = [], options = {
         }))
         .filter((row) => row.sku);
       campaign.productsBySku = new Map(campaign.productSettings.map((row) => [row.sku, row]));
-    } catch {
+    } catch (error) {
+      if (isPerformanceRateLimit(error)) throw error;
       campaign.productSettingsFetched = false;
       campaign.productSettings = [];
       campaign.productsBySku = new Map();
@@ -2310,11 +2315,14 @@ async function createAndFetchPerformanceReport(token, payload, options = {}) {
         } catch (error) {
           lastError = error;
           if (!isActiveReportLimitError(error)) break;
-          if (attempt < 5) await sleep(reportRetryDelayMs + attempt * 5000, options.signal);
+          if (attempt < 5) await sleep(Math.max(reportRetryDelayMs + attempt * 5000, Number(error.retryAfterMs) || 0), options.signal);
         }
       }
 
-      if (!createData) continue;
+      if (!createData) {
+        if (isActiveReportLimitError(lastError)) throw lastError;
+        continue;
+      }
       const uuid = createData.UUID || createData.uuid || createData.report_id || createData.result?.UUID || createData.result?.uuid;
       if (!uuid) return createData;
       await logAdvertisingSyncEvent(options, {
@@ -2351,6 +2359,10 @@ async function createAndFetchPerformanceReport(token, payload, options = {}) {
             missingReportAttempt = false;
           } catch (error) {
             lastError = error;
+            if (isPerformanceRateLimit(error)) {
+              error.reportUuid = uuid;
+              throw error;
+            }
             if (isMissingReportError(error)) {
               sawMissingReport = true;
               missingReportAttempt = true;
@@ -2406,7 +2418,7 @@ function formatDateKey(date) {
 
 function isActiveReportLimitError(error) {
   const message = String(error?.message || "").toLowerCase();
-  return message.includes("активных запрос") || message.includes("active request") || message.includes("active statistics");
+  return isPerformanceRateLimit(error) || message.includes("активных запрос") || message.includes("active request") || message.includes("active statistics");
 }
 
 function isMissingReportError(error) {
@@ -2438,6 +2450,7 @@ function isCampaignReportUnavailableError(error) {
 function classifyAdvertisingSyncError(error) {
   const message = String(error?.message || error || "Advertising sync failed").trim();
   const lower = message.toLowerCase();
+  if (isPerformanceRateLimit(error)) return { code: "rate_limited", message: "Ozon 广告接口暂时限流，请稍后重试；已有广告数据保留。" };
   if (lower.includes("report not found")) return { code: "report_not_found", message };
   if (isReportEndpointUnavailableError(error)) return { code: "report_endpoint_unavailable", message };
   if (lower.includes("timed out") || lower.includes("超时")) return { code: "timeout", message };
@@ -2680,7 +2693,12 @@ function numericCandidates(value, depth = 0) {
   return keys.flatMap((key) => numericCandidates(value[key], depth + 1));
 }
 
-async function performanceRequest(path, payload, options = {}) {
+function performanceRequest(path, payload, options = {}) {
+  const method = String(options.method || (payload == null ? "GET" : "POST")).toUpperCase();
+  return runPerformanceRead(options.shop_id, method, () => performanceRequestOnce(path, payload, options), { signal: options.signal });
+}
+
+async function performanceRequestOnce(path, payload, options = {}) {
   if (options.beforeRequest) await options.beforeRequest();
   if (options.shop_id) await assertAdvertisingShop(options.shop_id);
   else await advertisingTenantScope();
@@ -2709,8 +2727,7 @@ async function performanceRequest(path, payload, options = {}) {
       data = { raw: text };
     }
     if (!response.ok) {
-      const message = data.message || data.error || data.raw || `HTTP ${response.status}`;
-      throw new Error(`Performance API ${path} failed: ${message}`);
+      throw performanceResponseError(path, response, data);
     }
     if (options.shop_id) await assertAdvertisingShop(options.shop_id);
     else await advertisingTenantScope();
