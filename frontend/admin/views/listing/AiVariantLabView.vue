@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { variantVehicleIdentity, variantForeignBrands, variantSharedSourceBrand, variantVehicleReferences } from "../../../../src/shared/variant-copy-identity.js";
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -91,6 +92,8 @@ const material = reactive({
   richContentJson: "",
   templatePayload: null,
   sourceDraftId: "",
+  sourceVariantKey: "",
+  sourceVariantIndex: -1,
   sourceShopIds: [],
   includeDetailImages: false,
   sourceVariantValue: "",
@@ -175,7 +178,7 @@ const operatorRulePresets = [
   }
 ];
 
-const sourceModel = computed(() => material.sourceType === "case" ? (parseQuickTargets(material.sourceVariantValue)[0] || "") : firstTarget(material.sourceVariantValue));
+const sourceModel = computed(() => variantVehicleIdentity(material.sourceType === "case" ? (parseQuickTargets(material.sourceVariantValue)[0] || "") : firstTarget(material.sourceVariantValue)));
 const targetModels = computed(() => {
   const source = sourceModel.value.toLowerCase();
   const targets = material.sourceType === "case" ? parseQuickTargets(material.targetInput) : parseTargets(material.targetInput);
@@ -462,6 +465,8 @@ function applyImportedMaterial(row) {
   material.templatePayload = row.templatePayload || null;
   material.sourceDraftId = row.source === "draft" ? String(row.sourceDraftId || row.sourceId || "").trim() : "";
   material.sourceShopIds = normalizeShopIds(row.sourceShopIds || []);
+  material.sourceVariantKey = String(row.sourceVariantKey || "");
+  material.sourceVariantIndex = Number.isInteger(row.sourceVariantIndex) ? row.sourceVariantIndex : -1;
   if (row.sourceVariantValue) material.sourceVariantValue = row.sourceVariantValue;
   resetPlanState();
 }
@@ -816,6 +821,8 @@ function workbenchSnapshot() {
       richContentJson: material.richContentJson,
       templatePayload: material.templatePayload,
       sourceDraftId: material.sourceDraftId,
+      sourceVariantKey: material.sourceVariantKey,
+      sourceVariantIndex: material.sourceVariantIndex,
       sourceShopIds: material.sourceShopIds,
       includeDetailImages: material.includeDetailImages,
       sourceVariantValue: material.sourceVariantValue,
@@ -989,6 +996,8 @@ async function importCaseForQuickVariant(caseRow = {}, targets = [], options = {
 
   resetPlanState();
   material.sourceType = "case";
+  material.sourceVariantKey = "";
+  material.sourceVariantIndex = -1;
   material.productName = caseRow.product_subject_name || productFacts.product_subject_name || productFacts.product_type || caseRow.case_name || "案例模板商品";
   material.sourceSku = caseRow.case_no || "";
   material.sourceTitle = material.productName;
@@ -1549,7 +1558,7 @@ async function restoreHistoryJob(job) {
     const detail = await apiClient.get(`/api/ai-variant-lab/batch-jobs/${encodeURIComponent(jobNo)}?full=1`, { noCache: true });
     const snapshot = detail.job?.request_json?.workbench_snapshot || {};
     const savedMaterial = snapshot.material || {};
-    if (Object.keys(savedMaterial).length) Object.assign(material, savedMaterial);
+    if (Object.keys(savedMaterial).length) Object.assign(material, {sourceVariantKey:"",sourceVariantIndex:-1}, savedMaterial);
     else {
       const restoredSource = await restoreLegacyHistorySource(detail.job);
       if (!restoredSource) {
@@ -1560,6 +1569,7 @@ async function restoreHistoryJob(job) {
       material.sourceVariantValue = detail.job?.source_variant_value || material.sourceVariantValue || "";
       material.targetInput = (detail.job?.request_json?.target_variant_values || []).join("\n");
     }
+    if (!material.sourceVariantValue) material.sourceVariantValue = detail.job?.source_variant_value || "";
     if (snapshot.templateDraft) Object.assign(templateDraft, snapshot.templateDraft);
     state.analysis = snapshot.analysis ? normalizeRecognitionAnalysis(snapshot.analysis) : null;
     state.analysisNo = snapshot.analysisNo || detail.job?.analysis_no || "";
@@ -1962,6 +1972,8 @@ function buildListingDraftPayload(row) {
     template_id: material.templateId,
     template_payload: material.sourceDraftId ? null : material.templatePayload || null,
     source_draft_id: material.sourceDraftId || "",
+    source_variant_key: material.sourceVariantKey || "",
+    source_variant_index: material.sourceVariantIndex,
     shop_ids: normalizeShopIds(material.sourceShopIds || []),
     product_name: title,
     offer_id: offerId,
@@ -2249,6 +2261,7 @@ function isValidDraftDescription(value, target = "") {
   const text = normalizeDraftDescription(value);
   if (!text || containsChinese(text) || !isBuyerFacingCopyText(text)) return false;
   if (text.length < DESCRIPTION_MIN_LENGTH || text.length > DESCRIPTION_MAX_LENGTH) return false;
+  if (hasSourceModelLeak(text, target)) return false;
   const targetText = String(target || "").trim().toLowerCase();
   return !targetText || text.toLowerCase().includes(targetText);
 }
@@ -2260,16 +2273,19 @@ function buildFallbackDraftDescription(target = "") {
     ? "Защитные накладки на пороги автомобиля"
     : /подлокотник/i.test(sourceText)
       ? "Органайзер в подлокотник"
-      : "Автомобильный аксессуар";
+      : safeProductNameForCopy();
   const text = /порог|накладк/i.test(subject)
     ? `${subject} для ${model} предназначены для защиты дверных проемов и зоны посадки от царапин, потертостей и следов обуви. Аксессуар аккуратно дополняет интерьер автомобиля, помогает поддерживать чистоту в зоне порогов и не требует изменения штатных элементов. Накладки подходят для ежедневной эксплуатации, уменьшают следы повседневного износа и помогают сохранить ухоженный внешний вид салона.`
-    : `${subject} для ${model} подходит для ежедневного использования в автомобиле и аккуратно дополняет салон. Аксессуар помогает поддерживать порядок, защищать поверхность от повседневного износа и сохранить опрятный внешний вид без сложной доработки. Описание не включает неподтвержденные размеры, сертификаты, гарантийные обещания или дополнительные совместимости.`;
+    : `${subject} для ${model} подходит для ежедневного использования в автомобиле и аккуратно дополняет салон. Аксессуар помогает поддерживать порядок, защищать поверхность от повседневного износа и сохранить опрятный внешний вид без сложной доработки. Перед заказом сравните форму вашего ключа и расположение кнопок с фотографиями товара. Уточните комплектацию по карточке выбранного товара.`;
   if (text.length <= DESCRIPTION_MAX_LENGTH) return text;
   return text.slice(0, DESCRIPTION_MAX_LENGTH - 3).replace(/\s+\S*$/, "").trimEnd() + "...";
 }
 
 function safeProductNameForCopy() {
-  return isBuyerFacingCopyText(material.productName) ? material.productName : "Автомобильный аксессуар";
+  const text = [material.productName, state.analysis?.product_subject_ru, state.analysis?.product_type].filter(Boolean).join(" ");
+  if (/ключ|брелок|钥匙|key.?case/i.test(text)) return "Чехол для автомобильного ключа";
+  if (/порог|threshold|sill|门槛/i.test(text)) return "Накладки на пороги автомобиля";
+  return "Автомобильный аксессуар";
 }
 
 function rowVideoUrls(row) {
@@ -2292,7 +2308,7 @@ function rowQualityIssues(row) {
   if (!title) issues.push("标题为空");
   if (containsChinese(title)) issues.push("标题包含中文");
   if (!isBuyerFacingCopyText(title)) issues.push("标题包含未识别占位词或内部规则话术");
-  if (tags.length < 20) issues.push(`标签不足 20 个（当前 ${tags.length} 个）`);
+  if (!tags.length) issues.push("标签为空，请生成与产品和目标型号相关的标签");
   if (tags.length > 25) issues.push(`标签超过 25 个（当前 ${tags.length} 个）`);
   if (tags.some((tag) => containsChinese(tag))) issues.push("标签包含中文");
   if (tags.some((tag) => !isBuyerFacingCopyText(tag))) issues.push("标签包含未识别占位词或内部规则话术");
@@ -2319,9 +2335,10 @@ function containsChinese(value) {
 
 function hasSourceModelLeak(text, target, row = null) {
   const targetValue = String(target || "").trim().toLowerCase();
-  const candidates = uniqueList([sourceModel.value, material.sourceVariantValue, ...sourceTitleVehicleAliases(material.sourceTitle, sourceModel.value || material.sourceVariantValue), ...(row?.raw?.case_template?.stale_values || []), ...parseTargets(material.targetInput)])
-    .map((item) => String(item || "").trim())
-    .filter((item) => item && item.toLowerCase() !== targetValue);
+  if (variantForeignBrands(text,target).length) return true;
+  const candidates = uniqueList([sourceModel.value, material.sourceVariantValue, ...variantVehicleReferences(material.sourceTitle), ...sourceTitleVehicleAliases(material.sourceTitle, sourceModel.value || material.sourceVariantValue), ...(row?.raw?.case_template?.stale_values || []), ...parseTargets(material.targetInput)])
+    .map(variantVehicleIdentity)
+    .filter((item) => item && item.toLowerCase() !== targetValue && !variantSharedSourceBrand(item,targetValue));
   return candidates.some((item) => item.length >= 3 && containsExactModelText(text, item));
 }
 
