@@ -16,6 +16,7 @@ function applyFields(){Object.assign(props.filters,JSON.parse(JSON.stringify(dra
    <select v-model="filters.searchMode" aria-label="搜索方式"><option value="inventory_id">库存ID</option><option value="inventory_prefix">编号前缀</option><option value="auto">模糊搜索</option><option value="sku">SKU / 货号</option><option value="name">产品名称</option></select>
    <el-input v-model="filters.query" clearable aria-label="搜索内容" :placeholder="filters.searchMode==='inventory_id'?'输入完整新号 1-3-1 或旧编号':filters.searchMode==='inventory_prefix'?'品名与品牌 1-3，或编号前缀 1-3-1':filters.searchMode==='sku'?'输入完整SKU或货号':'输入库存ID或商品名'" @keyup.enter="emit('search')"/>
   </div>
+  <slot name="filters"/>
   <div class="mobile-inventory-filter-actions">
    <el-button type="primary" :loading="loading" @click="emit('search')">查询</el-button>
    <el-button @click="openFields">精确搜索</el-button>

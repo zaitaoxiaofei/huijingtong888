@@ -100,6 +100,15 @@ Automatic refresh may cancel and recreate unconfirmed `suggested` real-order req
 - Warehouse receipt can start from an unarrived batch and atomically record physical arrival and accepted stock. If 80 of an unarrived 600 are accepted, 520 remain unarrived. If 80 were already physically marked arrived and only 70 are accepted, the remaining 10 retain their physical-arrival fact and await acceptance. Only accepted quantity increases stock; purchase totals never change through arrival/receipt.
 - Reminder, physical arrival and receipt must honor current tenant and duty checks, consistent product/batch locking, observed quantity/revision checks, and immutable request-key replay. Concurrent operations cannot duplicate a split, re-open a closed batch or post stock twice. Generic arrival reminders remain separate from per-order human collaboration notes.
 
+## Shared receiving layout (2026-11-12)
+
+- Receipt state and Beijing purchase-date range belong to the search/filter area. `全部状态` is the default label for `status=pending`: it includes unarrived, arrival-reminded and arrived-pending-acceptance batches, and never includes approved stock receipts. State names do not change backend status values.
+- Refresh, cancelled-purchase and inventory-anomaly shortcuts live under `更多` in the receiving view. Completed receipts remain accessible through the existing received-record query, including for warehouse-only staff without exposing procurement amounts.
+- The table header checkbox selects eligible rows on the current page; do not duplicate it with a separate `全选本页` button. Batch receipt, arrival-reminder and physical-arrival actions retain their existing role checks and operate only on the eligible selected subsets.
+- Row primary actions are `验收入库` (green), `提醒到货`, then `确认实物到货`. Secondary actions include purchase editing, erroneous-record cancellation and `更新库存`, with original permission and batch-composition safeguards.
+- `更新库存` opens the existing stocktake flow for eligible unarrived as well as arrived batches. It verifies the total physical stock with a reason and audit; it never substitutes for receiving this purchase batch or closes it. Bundle quantities must be checked through their actual component inventory, rather than posting the displayed component count to a bundle parent. Inventory detail editing and historical inventory-number versions remain separate entry points.
+- After successful receipt, reload the live pending queue: completed portions leave the list and appear as received; unreceived portions retain their original arrival facts and purchase day. An exhausted date disappears and the oldest remaining date is selected.
+
 ## Historical source reconciliation and inventory corrections
 
 - Entry points: procurement workspace, pending purchase list, and inventory product actions → 采购与库存对账. Product search works even when the product has no open procurement task.
