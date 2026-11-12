@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
+import { fetchDurablePerformanceReport } from '../src/services/ozon-performance-report.js';
 import { readFileSync } from 'node:fs';
 import { createPerformanceReadQueue, performanceResponseError, isPerformanceRateLimit } from '../src/services/ozon-performance-read-queue.js';
 const source = readFileSync(new URL('../src/services/advertising-analytics.js', import.meta.url), 'utf8');
@@ -75,22 +76,24 @@ test('production campaign mutation sends one request on a 429', async () => {
 });
 function reportFixture(pollLimited) {
   const calls=[],waits=[];
-  const context=vm.createContext({Number,Math,Array,String,Error,isPerformanceRateLimit,
+  const context=vm.createContext({Number,Math,Array,String,Error,isPerformanceRateLimit,fetchDurablePerformanceReport,
+    isReportReady:()=>false,
     sleep:async ms=>waits.push(ms),logAdvertisingSyncEvent:async()=>{},
     performanceRequest:async(path,payload)=>{calls.push(path);if(pollLimited&&payload)return {UUID:'fixture-report'};throw Object.assign(Error('quota'),{statusCode:429,retryAfterMs:60000});}
   });
   vm.runInContext(['createAndFetchPerformanceReport','isActiveReportLimitError','classifyAdvertisingSyncError'].map(declaration).join('\n'),context);
+  context.reportOptions = { report_checkpoints: { claim:async()=>({}), save:async()=>{}, rejected:async()=>{}, unknown:async()=>{}, defer:async()=>{} }, completed_reports: [] };
   return {context,calls,waits};
 }
 test('report-creation quota exhaustion never switches endpoints to evade the same limit',async()=>{
   const h=reportFixture(false);
-  await assert.rejects(h.context.createAndFetchPerformanceReport('fixture-token',{campaigns:['123'],dateFrom:'2026-11-01',dateTo:'2026-11-02',groupBy:'DATE'}),/quota/);
+  await assert.rejects(h.context.createAndFetchPerformanceReport('fixture-token',{campaigns:['123'],dateFrom:'2026-11-01',dateTo:'2026-11-02',groupBy:'DATE'},h.context.reportOptions),/quota/);
   assert.equal(h.calls.length,6);assert.ok(h.calls.every(path=>path==='/api/client/statistics/json'));
   assert.ok(h.waits.every(ms=>ms>=60000));
 });
 test('polling quota exhaustion does not create another report and preserves its UUID',async()=>{
   const h=reportFixture(true);
-  await assert.rejects(h.context.createAndFetchPerformanceReport('fixture-token',{campaigns:['123'],dateFrom:'2026-11-01',dateTo:'2026-11-02',groupBy:'DATE'}),e=>e.reportUuid==='fixture-report'&&e.statusCode===429);
+  await assert.rejects(h.context.createAndFetchPerformanceReport('fixture-token',{campaigns:['123'],dateFrom:'2026-11-01',dateTo:'2026-11-02',groupBy:'DATE'},h.context.reportOptions),e=>e.reportUuid==='fixture-report'&&e.statusCode===429);
   assert.equal(h.calls.length,2);assert.equal(h.calls.filter(path=>path==='/api/client/statistics/json').length,1);
 });
 

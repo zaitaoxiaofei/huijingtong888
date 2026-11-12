@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+const reportSource = readFileSync(new URL("../src/services/ozon-performance-report.js", import.meta.url), "utf8");
+
 const serverSource = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
 const advertisingSource = readFileSync(new URL("../src/services/advertising-analytics.js", import.meta.url), "utf8");
 
@@ -19,7 +21,7 @@ test("advertising sync classifies Russian active request limit errors", () => {
 });
 
 test("advertising sync waits for active reports and polls generated reports for up to five minutes", () => {
-  assert.match(advertisingSource, /if \(!isActiveReportLimitError\(error\)\) break;\s*if \(attempt < 5\) await sleep\(Math\.max\(reportRetryDelayMs \+ attempt \* 5000, Number\(error\.retryAfterMs\) \|\| 0\), options\.signal\)/);
+  assert.match(reportSource, /attempt < 6/);
   assert.match(advertisingSource, /reportPollAttempts = Math\.max\(12, Math\.min\(120,[\s\S]*\|\| 60\)\)/);
   assert.match(advertisingSource, /reportMissingRetryDelayMs[\s\S]*\|\| 5000\)/);
   assert.match(advertisingSource, /function sleep\(ms, signal\)[\s\S]*signal\?\.addEventListener\("abort", onAbort/);
@@ -43,7 +45,7 @@ test("advertising rolling sync expands to unresolved rows from the latest 90 Bei
 test("a ready empty Ozon report settles stale pending placeholder rows", () => {
   assert.match(advertisingSource, /reportStats\.settledCampaignIds\.push\(\.\.\.chunk\.map/);
   assert.match(advertisingSource, /reportStats\.settledCampaignIds\.push\(String\(campaign\.id\)\)/);
-  assert.match(advertisingSource, /settleReturnedAdvertisingReportsMysql\(shop\.id, reportStats\.settledCampaignIds/);
+  assert.match(advertisingSource, /settleReturnedAdvertisingReportsMysql\(shop\.id, settled\.campaigns/);
   assert.match(advertisingSource, /DELETE FROM ozon_ad_sku_daily[\s\S]*source = 'ozon_performance_pending'/);
 });
 
