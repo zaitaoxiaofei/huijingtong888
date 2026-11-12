@@ -3416,15 +3416,18 @@ async function runBackgroundOzonFinanceSync(context = {}) {
     }).catch(() => {});
     const result = await runTenantScheduledWork(tenantId => services.syncOzonFinance({ from: window.from, to: window.to }, { signal: context?.signal, tenantId }));
     const errors = Array.isArray(result?.errors) ? result.errors : [];
-    const status = errors.length ? "partial_error" : "success";
+    const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+    const warning = [...errors, ...warnings].slice(0, 10).join("; ");
+    const status = errors.length ? "partial_error" : warnings.length ? "partial" : "success";
     await logScheduledJobEvent({
       runId: context?.runId,
       jobKey: "ozon_finance_sync",
       stepKey: "job_finish",
-      status: errors.length ? "warning" : "success",
-      message: errors.length ? errors.join("; ") : "Ozon finance sync finished",
+      status: errors.length || warnings.length ? "warning" : "success",
+      message: warning || "Ozon finance sync finished",
       detail: {
         window,
+        warningCount: warnings.length,
         fetched: Number(result?.fetched || 0),
         upserted: Number(result?.upserted || 0),
         appliedOrders: Number(result?.applied?.orders || 0),
@@ -3432,7 +3435,7 @@ async function runBackgroundOzonFinanceSync(context = {}) {
       }
     }).catch(() => {});
     console.log(`background Ozon finance sync ${status}: ${window.from}~${window.to}, fetched ${result?.fetched || 0}, applied ${result?.applied?.items || 0}`);
-    return { ...result, status, from: window.from, to: window.to };
+    return { ...result, status, warning, from: window.from, to: window.to };
   } catch (error) {
     await logScheduledJobEvent({
       runId: context?.runId,

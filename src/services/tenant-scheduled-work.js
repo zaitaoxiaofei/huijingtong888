@@ -7,7 +7,7 @@ export async function runTenantScheduledWork(run, query = mysqlQuery) {
     AND t.subscription_status IN ('active','trial')
     AND (t.subscription_expires_at IS NULL OR t.subscription_expires_at>UTC_TIMESTAMP())
     ORDER BY t.id`);
-  const aggregate = { tenants: [], errors: [], shops: [] };
+  const aggregate = { tenants: [], errors: [], warnings: [], shops: [] };
   for (const tenant of tenants) {
     const [current] = await query(`SELECT id FROM tenants WHERE id=? AND status='active'
       AND subscription_status IN ('active','trial')
@@ -17,6 +17,7 @@ export async function runTenantScheduledWork(run, query = mysqlQuery) {
       const result = await run(String(current.id));
       aggregate.tenants.push({ tenant_id: Number(current.id), result });
       aggregate.errors.push(...(Array.isArray(result?.errors) ? result.errors : []));
+      aggregate.warnings.push(...(Array.isArray(result?.warnings) ? result.warnings.map(warning => `企业 #${current.id}: ${warning}`) : []));
       aggregate.shops.push(...(Array.isArray(result?.shops) ? result.shops : []));
       for (const [key, value] of Object.entries(result || {})) {
         if (typeof value === "number" && Number.isFinite(value)) aggregate[key] = Number(aggregate[key] || 0) + value;
