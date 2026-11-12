@@ -1,3 +1,5 @@
+import { WB_REMOTE_WRITES_ENABLED } from "../shared/wb-capabilities.js";
+import { enrichWbOrders } from "./wb-order-dispatch.js";
 import { createOrderBindingIgnoreService } from "./order-binding-ignore.js";
 import { settlementOverdue } from '../shared/settlement-overdue.js';
 import { checkOzonHealth, recordOzonSyncHealth } from './ozon-credential-health-mysql.js';
@@ -4159,7 +4161,7 @@ export async function shopsMysql(tenantId = "admin") {
       FROM shops s
       LEFT JOIN people p ON p.id = s.user_id
       WHERE (s.tenant_id = ?${defaultTenant ? " OR s.tenant_id IS NULL" : ""})
-        AND s.status != 'deleted'
+        AND s.status != 'deleted' AND s.platform = 'ozon'
       ORDER BY s.id
     `, [normalizedTenantId]);
     return rows.map((row) => ({
@@ -9598,7 +9600,7 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
       }
     : { detailConcurrency: 3, signal: options.signal };
   const activeShops = await mysqlQuery(
-    `SELECT * FROM shops WHERE ${scope.predicate().sql} AND status = 'active' AND (? IS NULL OR id = ?) ORDER BY id`,
+    `SELECT * FROM shops WHERE ${scope.predicate().sql} AND platform='ozon' AND status = 'active' AND (? IS NULL OR id = ?) ORDER BY id`,
     [scope.id, targetShopId, targetShopId]
   );
   const targetShops = activeShops.filter((shop) => !selectedRows.length || selectedShopIds.has(Number(shop.id)));
@@ -10822,7 +10824,7 @@ export async function bindOnlineProductMysql(body = {}, tenantId = "admin", opti
   if (!onlineProductId) throw new Error("online_product_id is required");
 
   const online = await mysqlQueryOne(`
-    SELECT op.*
+    SELECT op.*, s.platform AS shop_platform
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
     WHERE op.id = ?
@@ -10831,6 +10833,12 @@ export async function bindOnlineProductMysql(body = {}, tenantId = "admin", opti
     LIMIT 1
   `, [onlineProductId, normalizedTenantId]);
   if (!online) throw new Error("Online product not found");
+
+  if (online.shop_platform === "wb" && !WB_REMOTE_WRITES_ENABLED) {
+    const error = new Error("WB 库存绑定将在店铺接口联调完成后开放");
+    error.statusCode = 409;
+    throw error;
+  }
 
   if (productId) {
     const product = await mysqlQueryOne(`SELECT id FROM products
@@ -19643,7 +19651,7 @@ export async function recalculateOrderItemsForMappingMysql(mappingId, options = 
     SELECT sm.*, op.commissions_json AS commissions_json
     FROM sku_mappings sm
     LEFT JOIN online_products op ON op.id = sm.online_product_id AND op.shop_id = sm.shop_id
-    WHERE sm.id = ? AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", tenantScope)} AND EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = sm.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)}) AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = sm.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)})
+    WHERE sm.id = ? AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", tenantScope)} AND EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = sm.shop_id AND owned_shop.platform = 'ozon' AND ${orderTenantPredicateMysql("owned_shop", tenantScope)}) AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = sm.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)})
   `, [Number(mappingId)]);
   if (!mapping) return { updated: 0, date_keys: [] };
   const product = await productForProfitEstimateMysql(mapping.product_id);
@@ -20921,8 +20929,9 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(options.tenantId || "admin");
   await assertOrderTaskAccessMysql(tenantScope, options);
-  const order = await mysqlQueryOne(`SELECT o.* FROM orders o JOIN shops owned_shop ON owned_shop.id = o.shop_id WHERE o.id = ? AND ${orderTenantPredicateMysql("owned_shop", tenantScope)}`, [Number(orderId)]);
+  const order = await mysqlQueryOne(`SELECT o.*, owned_shop.platform FROM orders o JOIN shops owned_shop ON owned_shop.id = o.shop_id WHERE o.id = ? AND ${orderTenantPredicateMysql("owned_shop", tenantScope)}`, [Number(orderId)]);
   if (!order) throw new Error("Order not found");
+  if (order.platform !== 'ozon') throw Object.assign(new Error('WB 利润尚未接入，不能套用 Ozon 计费公式。'), { statusCode:409 });
   const rawOrder = await mysqlQueryOne(
     "SELECT raw_json FROM ozon_orders_raw WHERE store_id = ? AND posting_number = ? LIMIT 1",
     [order.shop_id, order.posting_number]
@@ -30437,7 +30446,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       JOIN scoped_order_items scoped_item ON scoped_item.order_item_id = allocation.order_item_id AND scoped_item.order_id = allocation.order_id
       WHERE allocation.status = 'allocated'
     )
-    SELECT ${summaryOnly ? 'STRAIGHT_JOIN ' : ''}o.*, s.name AS shop_name,
+    SELECT ${summaryOnly ? 'STRAIGHT_JOIN ' : ''}o.*, s.name AS shop_name, s.platform,
       (SELECT COUNT(*) FROM order_items item_count_oi WHERE item_count_oi.order_id = o.id) AS item_count,
       (SELECT COALESCE(SUM(total_oi.quantity), 0) FROM order_items total_oi WHERE total_oi.order_id = o.id) AS total_quantity,
       (SELECT COALESCE(SUM(revenue_oi.sale_price * revenue_oi.quantity), 0) FROM order_items revenue_oi WHERE revenue_oi.order_id = o.id) AS revenue,
@@ -30759,7 +30768,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     for (const row of rows) row.raw_json = byOrder.get(Number(row.id)) ?? null;
   }
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
-  return (await measure("enrich", () => enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId, diagnostics))).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
+  return enrichWbOrders((await measure("enrich", () => enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId, diagnostics))).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0)));
 }
 
 async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
@@ -30805,7 +30814,7 @@ async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
     GROUP BY o.id
   `, cleanIds);
   const ordering = new Map(cleanIds.map((id, index) => [Number(id), index]));
-  return rows.map((row) => {
+  return enrichWbOrders(rows.map((row) => {
     const payload = parseJsonOrNull(row.raw_json) || {};
     const raw = payload.raw || payload;
     const method = raw.delivery_method || {};
@@ -30817,7 +30826,7 @@ async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
       delivery_method_name: method.name || "",
       logistics_channel: method.tpl_provider || analytics.tpl_provider || row.tracking_number || ""
     };
-  }).sort((a, b) => ordering.get(Number(a.id)) - ordering.get(Number(b.id)));
+  }).sort((a, b) => ordering.get(Number(a.id)) - ordering.get(Number(b.id))));
 }
 
 async function readRequestTenantContextMysql(tenantId = "admin") {
@@ -32227,7 +32236,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "frozen_rule");
   const shopScope = `AND ${tenantShopPredicateMysql("s", scope.defaultTenant)}`;
   let order = await mysqlQueryOne(
-    `SELECT o.*, s.name AS shop_name, raw.raw_json, olp.printed_at, om.mark_type, om.note AS mark_note
+    `SELECT o.*, s.name AS shop_name, s.platform, raw.raw_json, olp.printed_at, om.mark_type, om.note AS mark_note
      FROM orders o
      JOIN shops s ON s.id = o.shop_id
      LEFT JOIN order_marks om ON om.order_id = o.id
@@ -35330,3 +35339,51 @@ export const previewInventoryStocktakeMysql = async (body, tenantId = "admin") =
   await procurementLedgerService.preview(inventoryStocktakeBody(body), tenantId));
 export const applyInventoryStocktakeMysql = async (body, personId, tenantId = "admin") => inventoryStocktakeResultView(
   await procurementLedgerService.apply(inventoryStocktakeBody(body), personId, null, tenantId, 'inventory'));
+
+// WB uses the existing inventory ledger and component expansion. No Ozon profit
+// arithmetic runs here. The order lock serializes sync, binding and cancellation.
+export function invalidateWbOrderCachesMysql() {
+  invalidateOrderProcurementCoverage();
+  invalidateShopCacheMysql();
+}
+
+export async function reconcileWbOrderInventoryMysql(orderId, tenantId) {
+  const scope = await orderOwnershipTenantScopeMysql(tenantId);
+  await withMysqlTransaction(async connection => {
+    const [orders] = await connection.execute(`SELECT o.id,o.status,o.shop_id,o.posting_number,w.handover_at
+      FROM orders o JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+      JOIN shops s ON s.id=o.shop_id AND s.platform='wb' WHERE o.id=? AND w.tenant_id=? AND s.tenant_id=? FOR UPDATE`,
+    [Number(orderId), scope.id, scope.id]);
+    const order = orders[0];
+    if (!order) throw Object.assign(new Error('WB 订单不存在或不属于当前企业。'), { statusCode:404 });
+    const [items] = await connection.execute(`SELECT oi.id,oi.quantity,oi.ozon_sku,sm.id AS mapping_id,sm.product_id,sm.person_id,p.purchase_cost
+      FROM order_items oi LEFT JOIN sku_mappings sm ON sm.shop_id=? AND sm.ozon_sku=oi.ozon_sku AND sm.active=1 AND sm.tenant_id=?
+      LEFT JOIN products p ON p.id=sm.product_id AND ${orderTenantPredicateMysql('p', scope)}
+      WHERE oi.order_id=?`, [order.shop_id, scope.id, order.id]);
+    for (const item of items) {
+      if (!item.product_id) continue;
+      const [records] = await connection.execute(`SELECT id,status,quantity FROM outbound_records WHERE order_item_id=? AND shop_id=? FOR UPDATE`, [item.id,order.shop_id]);
+      const outbound = records[0];
+      if (order.status === 'cancelled') {
+        // After handover, a cancellation is not proof that goods came back.
+        if (!outbound || outbound.status !== 'deducted' || order.handover_at) continue;
+        await postProductInventoryWithComponentsMysql(connection, { product_id:item.product_id,shop_id:order.shop_id,sku_mapping_id:item.mapping_id,
+          source_type:'order_outbound_adjustment',source_ref:`${order.posting_number}:wb-cancel:${item.id}`,quantity_delta:Number(outbound.quantity),
+          stock_location:'LOCAL',stock_location_source:'wb_fbs',related_posting_number:order.posting_number,related_order_item_id:item.id,
+          unit_cost:Number(item.purchase_cost||0),amount:0,note:'WB 交接前取消，释放本地订单占用' }, scope.id);
+        await connection.execute("UPDATE outbound_records SET status='cancelled',note='WB 交接前取消，库存占用已释放' WHERE id=?", [outbound.id]);
+        continue;
+      }
+      if (order.status === 'wb_unknown' || outbound) continue;
+      await connection.execute('UPDATE order_items SET sku_mapping_id=? WHERE id=? AND order_id=?', [item.mapping_id,item.id,order.id]);
+      await postProductInventoryWithComponentsMysql(connection, { product_id:item.product_id,shop_id:order.shop_id,sku_mapping_id:item.mapping_id,
+        owner_person_id:item.person_id,source_type:'order_outbound',source_ref:order.posting_number,quantity_delta:-Number(item.quantity),
+        stock_location:'LOCAL',stock_location_source:'wb_fbs',related_posting_number:order.posting_number,related_order_item_id:item.id,
+        unit_cost:Number(item.purchase_cost||0),amount:Number(item.quantity)*Number(item.purchase_cost||0),note:'WB FBS 订单本地库存占用' }, scope.id);
+      await connection.execute(`INSERT INTO outbound_records (product_id,shop_id,order_ref,order_item_id,ozon_sku,person_id,quantity,stock_location,stock_location_source,reason,status,note)
+        VALUES (?,?,?,?,?,?,?,'LOCAL','wb_fbs','order','deducted','WB FBS 订单库存登记')`,
+      [item.product_id,order.shop_id,order.posting_number,item.id,item.ozon_sku,item.person_id,Number(item.quantity)]);
+    }
+  });
+  invalidateOrderProcurementCoverage();
+}

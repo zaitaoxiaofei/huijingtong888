@@ -1,0 +1,37 @@
+<script setup>
+import { WB_REMOTE_WRITES_ENABLED } from "../../../../src/shared/wb-capabilities.js";
+import { onMounted, onBeforeUnmount, ref, reactive } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { apiClient, currentApiCacheScope } from '../../utils/api.js';
+import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
+const shops=ref([]),shopId=ref(null),rows=ref([]),loading=ref(false),dates=ref([shanghaiDateKey(new Date()),shanghaiDateKey(new Date(Date.now()+30*86400000))]),offset=ref(0);
+const drawer=reactive({visible:false,promotion:null,rows:[],selected:[],inAction:false,offset:0,upload:null,status:null});
+const text=value=>shanghaiDateTimeText(value,{assumeUtcWhenNaive:true});
+async function run(work){const scope=currentApiCacheScope();if(loading.value)return;loading.value=true;try{await work(scope);}catch(error){if(scope===currentApiCacheScope())ElMessage.error(error.message);}finally{if(scope===currentApiCacheScope())loading.value=false;}}
+async function load(){await run(async scope=>{rows.value=[];if(!shopId.value)return;if(!dates.value?.length)throw new Error('请选择活动日期。');const result=await apiClient.get(`/api/wb/promotions?shop_id=${shopId.value}&start=${encodeURIComponent(`${dates.value[0]}T00:00:00+08:00`)}&end=${encodeURIComponent(`${dates.value[1]}T23:59:59+08:00`)}&offset=${offset.value}`,{noCache:true});if(scope===currentApiCacheScope())rows.value=result.data?.promotions||[];});}
+async function products(){await run(async scope=>{const value=await apiClient.get(`/api/wb/promotion-products?shop_id=${shopId.value}&promotion_id=${drawer.promotion.id}&in_action=${drawer.inAction}&offset=${drawer.offset}`,{noCache:true});if(scope===currentApiCacheScope()){drawer.rows=value.data?.nomenclatures||[];drawer.selected=[];}});}
+async function open(row){if(row.type==='auto')return ElMessage.info('自动促销请在 WB 后台管理，不能按普通活动报名。');Object.assign(drawer,{visible:true,promotion:row,rows:[],selected:[],offset:0,inAction:false,upload:null,status:null});await products();}
+async function enroll(){try{await ElMessageBox.confirm('请核对所选商品的活动价格和折扣。报名会提交 WB 处理，最终参加结果以任务回读及已参加商品为准。','确认活动报名',{type:'warning'});}catch{return;}await run(async scope=>{const value=await apiClient.post('/api/wb/promotions/enroll',{shop_id:shopId.value,promotion_id:drawer.promotion.id,nm_ids:drawer.selected.map(row=>row.id),upload_now:false});if(scope!==currentApiCacheScope())return;drawer.upload=value.upload_id;ElMessage.info(value.message);});}
+async function check(){await run(async scope=>{const value=await apiClient.get(`/api/wb/price-result?shop_id=${shopId.value}&upload_id=${drawer.upload}`,{noCache:true});if(scope===currentApiCacheScope())drawer.status=value;});}
+async function bootstrap(){const scope=currentApiCacheScope();try{const value=await apiClient.get('/api/wb/shops',{noCache:true});if(scope!==currentApiCacheScope())return;shops.value=value.filter(row=>row.status==='active');shopId.value=shops.value[0]?.id||null;await load();}catch(error){ElMessage.error(error.message);}}
+function reset(){shops.value=[];rows.value=[];shopId.value=null;drawer.visible=false;loading.value=false;bootstrap();}
+onMounted(()=>{bootstrap();window.addEventListener('erp:auth-scope-changed',reset);});onBeforeUnmount(()=>window.removeEventListener('erp:auth-scope-changed',reset));
+</script>
+<template>
+  <div class="wb-actions">
+    <el-alert v-if="!shops.length" title="尚未配置 WB 店铺，请在企业店铺中添加 WB 中国区授权。" type="info" :closable="false"/>
+    <div class="wb-actions-filters"><el-select v-model="shopId" placeholder="选择 WB 店铺" @change="offset=0;load()"><el-option v-for="shop in shops" :key="shop.id" :value="Number(shop.id)" :label="shop.name"/></el-select><el-date-picker v-model="dates" type="daterange" value-format="YYYY-MM-DD" start-placeholder="活动开始日期" end-placeholder="活动结束日期"/><el-button type="primary" :loading="loading" :disabled="!shopId" @click="offset=0;load()">查询活动</el-button></div>
+    <el-table :data="rows" v-loading="loading" border stripe class="erp-data-table" empty-text="当前范围没有已读取的 WB 活动"><el-table-column prop="name" label="活动名称" min-width="230"/><el-table-column label="开始时间（北京）" min-width="180"><template #default="{row}">{{text(row.startDateTime)}}</template></el-table-column><el-table-column label="结束时间（北京）" min-width="180"><template #default="{row}">{{text(row.endDateTime)}}</template></el-table-column><el-table-column label="类型" width="110"><template #default="{row}">{{row.type==='auto'?'自动促销':'平台活动'}}</template></el-table-column><el-table-column label="操作" min-width="160"><template #default="{row}"><el-button link type="primary" :disabled="row.type==='auto'" @click="open(row)">{{WB_REMOTE_WRITES_ENABLED?'查看 / 报名商品':'查看商品'}}</el-button></template></el-table-column></el-table>
+    <div><el-button :disabled="!offset||loading" @click="offset=Math.max(0,offset-100);load()">上一页</el-button><el-button :disabled="rows.length<100||loading" @click="offset+=100;load()">下一页</el-button></div>
+    <el-drawer v-model="drawer.visible" :title="drawer.promotion?.name||'WB 活动商品'" size="min(1100px,96vw)">
+      <el-radio-group v-model="drawer.inAction" @change="drawer.offset=0;products()"><el-radio-button :value="false">可报名商品</el-radio-button><el-radio-button :value="true">已参加商品</el-radio-button></el-radio-group>
+      <el-alert title="请先同步 WB 在线商品。普通活动按活动开始时间设置活动折扣；自动促销在 WB 后台处理。" type="info" :closable="false"/>
+      <el-table :data="drawer.rows" v-loading="loading" border @selection-change="drawer.selected=$event"><el-table-column v-if="!drawer.inAction" type="selection" width="48"/><el-table-column prop="id" label="WB 商品编号" min-width="150"/><el-table-column prop="currencyCode" label="币种" width="90"/><el-table-column prop="price" label="当前价格"/><el-table-column prop="planPrice" label="活动价格"/><el-table-column prop="planDiscount" label="活动折扣（%）" min-width="150"/></el-table>
+      <div><el-button :disabled="!drawer.offset||loading" @click="drawer.offset=Math.max(0,drawer.offset-100);products()">上一页</el-button><el-button :disabled="drawer.rows.length<100||loading" @click="drawer.offset+=100;products()">下一页</el-button></div>
+      <p v-if="drawer.upload">报名已提交处理。任务编号：{{drawer.upload}}，尚未确认报名成功。</p><p v-if="drawer.status">任务状态：{{drawer.status.task?.data?.status||'待处理，请核对商品级结果'}}</p>
+      <el-table v-if="drawer.status" :data="drawer.status.details?.data?.historyGoods||[]"><el-table-column prop="nmID" label="WB 商品"/><el-table-column prop="errorText" label="处理说明"/></el-table>
+      <template #footer><el-button @click="drawer.visible=false">关闭</el-button><el-button v-if="drawer.upload" :loading="loading" @click="check">检查处理结果</el-button><el-button v-if="WB_REMOTE_WRITES_ENABLED&&!drawer.inAction" type="primary" :disabled="!drawer.selected.length||!!drawer.upload" :loading="loading" @click="enroll">报名所选商品</el-button></template>
+    </el-drawer>
+  </div>
+</template>
+<style scoped>.wb-actions{display:grid;gap:16px;min-width:0}.wb-actions-filters{display:flex;gap:12px;flex-wrap:wrap}.wb-actions-filters .el-select{width:220px}</style>

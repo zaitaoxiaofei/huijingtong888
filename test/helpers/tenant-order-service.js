@@ -1,3 +1,4 @@
+import { enrichWbOrders } from "../../src/services/wb-order-dispatch.js";
 import { ORDER_BINDING_IGNORE_SCHEMA } from "../../src/services/order-binding-ignore.js";
 import { memoRequestRead } from '../../src/services/request-read-cache.js';
 import { orderReadIdentity } from "../../src/services/order-read-cache.js";
@@ -121,7 +122,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], readSnap
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,orderReportOutcomeCtesSql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({enrichWbOrders,recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,orderReportOutcomeCtesSql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,inventoryAliasSearch,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

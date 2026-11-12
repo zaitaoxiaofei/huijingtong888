@@ -1,3 +1,5 @@
+import { dispatchPrepare, dispatchLabels } from "./services/wb-order-dispatch.js";
+import { createWbRoutes } from "./server/routes/wb.js";
 import { publicSelfServiceEnabled, publicWebsitePath, isPublicEntry, renderPublicWebsite, loadPublicPlans } from "./server/public-website.js";
 import { createOzonHealthRoutes } from './server/routes/ozonHealth.js';
 import { checkTenantOzonHealth } from './services/ozon-credential-health-mysql.js';
@@ -264,10 +266,11 @@ const routeModules = {
   ...createFinanceSubmissionRoutes({ readJson }),
   ...createSellerAnalyticsRoutes({ services, readJson }),
   ...createOzonActionRoutes({ services, readJson }),
+  ...createWbRoutes({ readJson }),
   ...createReviewRoutes({ services, readJson }),
-  ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
+  ...createOrderRoutes({ services: { ...services, shipOrders: (body, userId, tenantId, options) => dispatchPrepare(body, userId, tenantId, options, services.shipOrders), orderPackageLabel: (body, userId, tenantId, options) => dispatchLabels(body, userId, tenantId, options, services.orderPackageLabel) }, readJson, notFound, writeHead, json }),
   ...createOglDispatchRoutes({ dispatch: oglDispatch, readJson }),
-  ...createPrintRoutes({ services, readJson }),
+  ...createPrintRoutes({ services: { ...services, orderPackageLabel: (body, userId, tenantId, options) => dispatchLabels(body, userId, tenantId, options, services.orderPackageLabel) }, readJson }),
   ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
   ...createListingAutomationRoutes({ services, readJson }),
   ...createAssetVariantEngineRoutes({ services, readJson }),
@@ -1440,7 +1443,7 @@ async function handleRestRoute(req, res, url, parts) {
     res,
     url,
     parts,
-    services,
+    services: { ...services, shipOrders: (body, userId, tenantId, options) => dispatchPrepare(body, userId, tenantId, options, services.shipOrders), orderPackageLabel: (body, userId, tenantId, options) => dispatchLabels(body, userId, tenantId, options, services.orderPackageLabel) },
     readJson,
     json,
     notFound,

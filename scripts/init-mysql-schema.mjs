@@ -1,3 +1,4 @@
+import { WB_SCHEMA } from "../src/services/wb-schema.js";
 import { ORDER_BINDING_IGNORE_SCHEMA } from "../src/services/order-binding-ignore.js";
 import {SKU_TRAFFIC_DAILY_SCHEMA} from '../src/services/sku-traffic-daily-schema.js';
 import { ORDER_SPLIT_SCHEMA } from "../src/services/order-split-schema.js";
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS media_migration_map (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS shops (
+  platform VARCHAR(32) NOT NULL DEFAULT 'ozon',
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   tenant_id BIGINT UNSIGNED NULL,
   name VARCHAR(255) NOT NULL,
@@ -1762,7 +1764,9 @@ const connection = await createMysqlConnection();
 try {
   await connection.query(mysqlSchemaSql);
   for (const sql of FINANCE_SUBMISSIONS_SCHEMA) await connection.query(sql);
+  for (const sql of WB_SCHEMA) await connection.query(sql);
   const alterStatements = [
+    "ALTER TABLE shops ADD COLUMN platform VARCHAR(32) NOT NULL DEFAULT 'ozon'",
     "ALTER TABLE shops ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE shops ADD COLUMN watermark_path TEXT NULL",
     "ALTER TABLE shops ADD COLUMN watermark_name VARCHAR(255) NULL",

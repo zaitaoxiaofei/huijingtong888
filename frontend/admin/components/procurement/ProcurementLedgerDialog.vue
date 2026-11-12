@@ -1,4 +1,5 @@
 <script setup>
+import PlatformInventoryUsage from "../inventory/PlatformInventoryUsage.vue";
 import OrderHandlingSummary from './OrderHandlingSummary.vue';
 import {orderHandlingRow} from '../../utils/order-handling-context.js';
 import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue';
@@ -471,7 +472,8 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
           <el-button type="warning" plain size="small" @click="showHistoryTodo">去处理历史记录</el-button>
           <small>先关联已有采购，确实漏记才补录；不计入新采购需求。</small>
         </div>
-        <el-tabs v-model="activeTab">
+        <PlatformInventoryUsage v-if="productId" :key="`${productId}:${data?.revision||0}`" :product-id="productId" />
+    <el-tabs v-model="activeTab">
           <el-tab-pane label="FBP 库存" name="fbp" lazy>
             <div class="ledger-toolbar"><el-button :loading="fbpLoading" :disabled="fbpSyncing" @click="loadFbp()">重新读取已保存库存</el-button><el-button v-if="stocktakeEnabled" type="primary" :loading="fbpSyncing" :disabled="fbpLoading" @click="syncFbp">从 Ozon 同步 FBP 库存</el-button><span v-if="fbpLoading || fbpSyncing">FBP 单独加载中，本地库存已可查看</span></div>
             <el-alert v-if="fbpError" :title="fbpError" type="warning" :closable="false" />

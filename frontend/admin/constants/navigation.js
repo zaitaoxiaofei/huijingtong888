@@ -38,10 +38,10 @@ export const navigationMenus = [
       { key: "listing-records", label: "草稿箱", route: "/listing-records" },
       { key: "listing-automation", label: "商品上架", route: "/listing-automation" },
       { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
-      { key: "marketplace-demo", label: "多平台预览 · Demo", route: "/marketplace-demo" },
+      { key: "wb-online-products", label: "WB 在线商品", route: "/wb/online-products" },
       { key: "online-products", label: "在线商品", route: "/online-products" },
       { key: "batch-stock-update", label: "批量改库存", route: "/batch-stock-update" },
-      { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" },
+      { key: "ozon-actions", label: "平台活动", route: "/ozon-actions" },
       { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" }
     ]
   },
