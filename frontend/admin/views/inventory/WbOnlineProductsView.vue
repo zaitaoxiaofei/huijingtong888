@@ -1,11 +1,12 @@
 <script setup>
 import { WB_REMOTE_WRITES_ENABLED } from "../../../../src/shared/wb-capabilities.js";
 import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { apiClient, currentApiCacheScope } from '../../utils/api.js';
 import MarketplaceBadge from '../../components/MarketplaceBadge.vue';
 
+const router=useRouter();
 const route=useRoute(),shops=ref([]),shopId=ref(null),rows=ref([]),loading=ref(false),busy=ref(false),search=ref(''),page=ref(1),notice=ref('');
 const editor=reactive({visible:false,card:null,subject:null,attributes:[],values:{},categories:[],categorySearch:'',barcodes:''});
 const binding=reactive({visible:false,row:null,chrt:null,product:null,options:[],search:''});
@@ -49,7 +50,7 @@ onBeforeUnmount(()=>window.removeEventListener('erp:auth-scope-changed',resetSco
 </script>
 <template>
   <div class="wb-products-page">
-    <div class="page-heading"><h2><MarketplaceBadge platform="wb"/> WB 在线商品</h2><div><el-button :loading="busy" :disabled="!shopId" @click="sync">同步商品</el-button><el-button v-if="WB_REMOTE_WRITES_ENABLED" type="primary" :disabled="!shopId" @click="openEditor()">商品上架</el-button></div></div>
+    <div class="page-heading"><h2><MarketplaceBadge platform="wb"/> WB 在线商品</h2><div><el-button :loading="busy" :disabled="!shopId" @click="sync">同步商品</el-button><el-button type="primary" :disabled="!shopId" @click="router.push('/wb/listing')">模板与商品草稿</el-button></div></div>
     <el-alert v-if="!shops.length" title="尚未配置 WB 店铺" description="请由企业管理员到“企业店铺 → 新增店铺”，选择 WB（中国主体），填写 API 授权并绑定卖家仓。这里会展示真实店铺数据。" type="info" :closable="false"/>
     <el-alert v-if="!WB_REMOTE_WRITES_ENABLED" title="当前开放店铺授权和真实数据拉取；WB 上架、改价及发货操作将在店铺联调后开放。" type="info" :closable="false"/>
     <el-alert v-if="notice" :title="notice" type="info" :closable="false"/>
