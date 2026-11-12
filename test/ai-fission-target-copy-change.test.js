@@ -57,3 +57,27 @@ test("hyphenated model identity changes in underscore and compact hashtags while
   assert.equal(ctx.replaceSpecificVariantText("#для_MAZDA_CX_3 #для_MAZDACX3 #для_MAZDA_CX_30 #для_MAZDACX30 #дляMAZDACX3", "MAZDA CX-3", "MAZDA CX-30"),
     "#для_MAZDA_CX_30 #для_MAZDACX30 #для_MAZDA_CX_30 #для_MAZDACX30 #дляMAZDACX3");
 });
+
+test("bare-brand target expansion rewrites each original hashtag once without spaces or duplicated model", () => {
+  const ctx = fixture();
+  const text = "Для JAECOO: #JAECOO #для_JAECOO #для-JAECOO; JAECOO J6 #JAECOOJ6 #JAECOO_J6 #для_JAECOO_J6 #JAECOOJ60";
+  const expected = "Для JAECOO J6: #JAECOOJ6 #для_JAECOOJ6 #для-JAECOOJ6; JAECOO J6 #JAECOOJ6 #JAECOO_J6 #для_JAECOO_J6 #JAECOOJ60";
+  const actual = ctx.replaceSpecificVariantText(text, "JAECOO", "JAECOO J6");
+  assert.equal(actual, expected);
+  assert.equal(ctx.replaceSpecificVariantText(actual, "JAECOO", "JAECOO J6"), expected);
+});
+
+test("target extending source model is protected in body and every hashtag spelling", () => {
+  const ctx = fixture();
+  const text = "HAVAL H3; #HAVAL_H3 #HAVALH3 #HAVAL-H3 #для_HAVAL_H3; HAVAL H3 Pro, HAVALH3Pro #HAVAL_H3_Pro #HAVALH3Pro #HAVAL-H3-Pro #для_HAVAL_H3_Pro; HAVAL H30 #HAVAL_H30 #HAVALH30";
+  const expected = "HAVAL H3 Pro; #HAVAL_H3_Pro #HAVALH3Pro #HAVAL-H3-Pro #для_HAVAL_H3_Pro; HAVAL H3 Pro, HAVALH3Pro #HAVAL_H3_Pro #HAVALH3Pro #HAVAL-H3-Pro #для_HAVAL_H3_Pro; HAVAL H30 #HAVAL_H30 #HAVALH30";
+  const actual = ctx.replaceSpecificVariantText(text, "HAVAL H3", "HAVAL H3 Pro");
+  assert.equal(actual, expected);
+  assert.equal(ctx.replaceSpecificVariantText(actual, "HAVAL H3", "HAVAL H3 Pro"), expected);
+});
+
+test("bare-brand expansion keeps hashtag identities with an unknown model suffix intact", () => {
+  const ctx = fixture();
+  assert.equal(ctx.replaceSpecificVariantText("#JAECOO #для_JAECOO #JAECOO_J7 #JAECOO_J60 #JAECOO-J60 #для_JAECOO_J7 #JAECOO_J6 #салон", "JAECOO", "JAECOO J6"),
+    "#JAECOOJ6 #для_JAECOOJ6 #JAECOO_J7 #JAECOO_J60 #JAECOO-J60 #для_JAECOO_J7 #JAECOO_J6 #салон");
+});

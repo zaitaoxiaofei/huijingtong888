@@ -2017,28 +2017,37 @@ function replaceSpecificVariantText(value, source, target) {
   const from = String(source || "").trim();
   const to = String(target || "").trim();
   if (!text || !from || !to || from === to) return text;
+  const escape = (part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const parts = from.split(/[\s_]+/);
-  const pattern = parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s_]*");
-  const matches = new RegExp(`(^|[^\\p{L}\\p{N}])(${pattern})(?=$|[^\\p{L}\\p{N}])`, "giu");
-  const replaced = text.replace(matches, (_match, prefix, vehicle) => {
-    const replacement = vehicle.includes("_") ? to.replace(/[\s_]+/g, "_")
-      : !/\s/.test(vehicle) && parts.length > 1 ? to.replace(/[\s_]+/g, "") : to.replace(/[\s_]+/g, " ");
-    return prefix + replacement;
-  });
-  const identity = from.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
-  if (!identity) return replaced;
+  const pattern = parts.map(escape).join("[\\s_]*");
+  const bodyTarget = to.split(/[\s_]+/).map(escape).join("[\\s_]*");
+  const matches = new RegExp(`(^|[^\\p{L}\\p{N}])(${bodyTarget}|${pattern})(?=$|[^\\p{L}\\p{N}])`, "giu");
+  const completeBodyTarget = new RegExp(`^${bodyTarget}$`, "iu");
   const sourceParts = from.match(/[\p{L}\p{N}]+/gu) || [];
   const targetParts = to.match(/[\p{L}\p{N}]+/gu) || [];
-  const tagIdentityPattern = sourceParts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("([_-]*)");
+  if (!sourceParts.length || !targetParts.length) return text;
+  const tagIdentityPattern = sourceParts.map(escape).join("([_-]*)");
+  const tagTargetPattern = targetParts.map(escape).join("[_-]*");
   const tagPattern = new RegExp(`^${tagIdentityPattern}$`, "iu");
-  const tagIdentity = new RegExp(`(^|[_-])(${tagIdentityPattern})(?=$|[_-])`, "giu");
-  return replaced.replace(/#[\p{L}\p{N}_-]+/gu, (tag) => {
-    return `#${tag.slice(1).replace(tagIdentity, (_match, prefix, vehicle) => {
+  const completeTagTarget = new RegExp(`^${tagTargetPattern}$`, "iu");
+  const tagSourcePattern = sourceParts.length === 1 && targetParts.length > 1 ? `${tagIdentityPattern}(?=$)` : tagIdentityPattern;
+  const tagIdentity = new RegExp(`(^|[_-])(${tagTargetPattern}|${tagSourcePattern})(?=$|[_-])`, "giu");
+  // Process original tag/body segments independently so inserted text is never
+  // matched again, and recognize complete targets before their source prefix.
+  return text.split(/(#[\p{L}\p{N}_-]+)/gu).map((segment, index) => {
+    if (index % 2) return `#${segment.slice(1).replace(tagIdentity, (_match, prefix, vehicle) => {
+      if (completeTagTarget.test(vehicle)) return prefix + vehicle;
       const separators = vehicle.match(tagPattern);
       if (separators && sourceParts.length === targetParts.length) return prefix + targetParts.map((part, index) => (index ? separators[index] : "") + part).join("");
       return prefix + targetParts.join(vehicle.includes("_") ? "_" : vehicle.includes("-") ? "-" : "");
     })}`;
-  });
+    return segment.replace(matches, (_match, prefix, vehicle) => {
+      if (completeBodyTarget.test(vehicle)) return prefix + vehicle;
+      const replacement = vehicle.includes("_") ? to.replace(/[\s_]+/g, "_")
+        : !/\s/.test(vehicle) && parts.length > 1 ? to.replace(/[\s_]+/g, "") : to.replace(/[\s_]+/g, " ");
+      return prefix + replacement;
+    });
+  }).join("");
 }
 
 function initialRowTitleText(item = {}, target = "") {
