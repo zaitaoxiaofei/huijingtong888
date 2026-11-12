@@ -12,11 +12,11 @@ function deferred() {
   return { promise, resolve, reject };
 }
 function preparation({ persist, video }) {
-  return new Function("rowPreparationTasks", "resultImageUrl", "rowResultId", "persistGeneratedRowAssets", "generateRowRichContent", "rowVideoUrls", "rowVideoUsesCurrentMainImage", "generateRowVideo", "runWithConcurrency", "BACKGROUND_DRAFT_PREPARATION_CONCURRENCY", "queueGeneratedRowPreparation", `
+  return new Function("rowPreparationTasks", "resultImageUrl", "rowResultId", "persistGeneratedRowAssets", "generateRowRichContent", "rowVideoUrls", "rowVideoUsesCurrentMainImage", "generateRowVideo", "runWithConcurrency", "BACKGROUND_DRAFT_PREPARATION_CONCURRENCY", "queueGeneratedRowPreparation", "rowRichContentNeedsRefresh", "rowRichContentSignature", `
     ${extract(view, "prepareGeneratedRowForDraft")}
     ${extract(view, "prepareGeneratedRowsForDraft")}
     return { prepareGeneratedRowForDraft, prepareGeneratedRowsForDraft };
-  `)(new Map(), (row) => row.image, (row) => row.id, persist, async (row) => { row.assets = { rich_content: { json: "rich" } }; }, () => [], () => false, video, (rows, limit, fn) => Promise.all(rows.map(fn)), 10, () => { throw new Error("Save must not wait in the video queue"); });
+  `)(new Map(), (row) => row.image, (row) => row.id, persist, async (row) => { row.assets = { rich_content: { json: "rich" } }; }, () => [], () => false, video, (rows, limit, fn) => Promise.all(rows.map(fn)), 10, () => { throw new Error("Save must not wait in the video queue"); }, row => !row.assets?.rich_content?.json, row => row.image);
 }
 
 test("saving reuses required asset persistence but does not wait for an ongoing video", async () => {

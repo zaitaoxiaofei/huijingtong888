@@ -1208,10 +1208,11 @@ function syncRowTarget(row) {
     target_variant_value: target
   };
   if (previous && target && previous !== target) {
+    const previousRow = { ...row, target_variant_value: previous };
     row.offerId = "";
-    row.titleText = replaceSpecificVariantText(rowTitleOutput(row), previous, target);
-    row.tagsText = replaceSpecificVariantText(rowTagsOutput(row).join(" "), previous, target);
-    row.descriptionText = replaceSpecificVariantText(rowDescriptionOutput(row), previous, target);
+    row.titleText = replaceSpecificVariantText(rowTitleOutput(previousRow), previous, target);
+    row.tagsText = replaceSpecificVariantText(rowTagsOutput(previousRow).join(" "), previous, target);
+    row.descriptionText = replaceSpecificVariantText(rowDescriptionOutput(previousRow), previous, target);
   }
 }
 
@@ -2008,19 +2009,36 @@ function buildListingDraftPayload(row) {
 }
 
 function replaceVariantText(value, target) {
-  const source = sourceModel.value;
-  let text = String(value || "").trim();
-  if (!text) return "";
-  if (source) text = text.replaceAll(source, target);
-  return text;
+  return replaceSpecificVariantText(value, sourceModel.value, target);
 }
 
 function replaceSpecificVariantText(value, source, target) {
-  let text = String(value || "").trim();
+  const text = String(value || "").trim();
   const from = String(source || "").trim();
   const to = String(target || "").trim();
   if (!text || !from || !to || from === to) return text;
-  return text.replaceAll(from, to);
+  const parts = from.split(/[\s_]+/);
+  const pattern = parts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s_]*");
+  const matches = new RegExp(`(^|[^\\p{L}\\p{N}])(${pattern})(?=$|[^\\p{L}\\p{N}])`, "giu");
+  const replaced = text.replace(matches, (_match, prefix, vehicle) => {
+    const replacement = vehicle.includes("_") ? to.replace(/[\s_]+/g, "_")
+      : !/\s/.test(vehicle) && parts.length > 1 ? to.replace(/[\s_]+/g, "") : to.replace(/[\s_]+/g, " ");
+    return prefix + replacement;
+  });
+  const identity = from.replace(/[^\p{L}\p{N}]/gu, "").toLowerCase();
+  if (!identity) return replaced;
+  const sourceParts = from.match(/[\p{L}\p{N}]+/gu) || [];
+  const targetParts = to.match(/[\p{L}\p{N}]+/gu) || [];
+  const tagIdentityPattern = sourceParts.map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("([_-]*)");
+  const tagPattern = new RegExp(`^${tagIdentityPattern}$`, "iu");
+  const tagIdentity = new RegExp(`(^|[_-])(${tagIdentityPattern})(?=$|[_-])`, "giu");
+  return replaced.replace(/#[\p{L}\p{N}_-]+/gu, (tag) => {
+    return `#${tag.slice(1).replace(tagIdentity, (_match, prefix, vehicle) => {
+      const separators = vehicle.match(tagPattern);
+      if (separators && sourceParts.length === targetParts.length) return prefix + targetParts.map((part, index) => (index ? separators[index] : "") + part).join("");
+      return prefix + targetParts.join(vehicle.includes("_") ? "_" : vehicle.includes("-") ? "-" : "");
+    })}`;
+  });
 }
 
 function initialRowTitleText(item = {}, target = "") {
@@ -2089,8 +2107,52 @@ function rowDescriptionOutput(row) {
 function rowRichContentOutput(row) {
   const mainImageUrl = rowMainImageDraftUrl(row);
   const assetJson = row.assets?.rich_content?.json || row.assets?.rich_content?.richContentJson || "";
+  if (assetJson && isAutomaticRowRichContent(row)) return buildRowRichContentJson(row);
   if (assetJson) return rewriteRichContentMainImage(assetJson, mainImageUrl);
   return mainImageUrl ? buildRowRichContentJson(row) : "";
+}
+
+function rowRichContentSignature(row) {
+  return JSON.stringify([row.target_variant_value || "", rowMainImageDraftUrl(row), rowTitleOutput(row), rowDescriptionOutput(row)]);
+}
+
+function stableRichContentJson(value) {
+  if (Array.isArray(value)) return value.map(stableRichContentJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableRichContentJson(value[key])]));
+}
+
+function isAutomaticRowRichContent(row) {
+  const asset = row.assets?.rich_content || {};
+  if (asset.generator === "ai_variant_lab_fixed_rich_v1") return true;
+  try {
+    const value = asset.json || asset.richContentJson;
+    const payload = typeof value === "string" ? JSON.parse(value) : JSON.parse(JSON.stringify(value));
+    const expected = JSON.parse(buildRowRichContentJson(row));
+    const block = payload.content[0].blocks[0];
+    const current = expected.content[0].blocks[0];
+    block.img.src = current.img.src;
+    block.img.srcMobile = current.img.srcMobile;
+    block.img.alt = current.img.alt;
+    block.title.items[0].content = current.title.items[0].content;
+    block.text.items[0].content = current.text.items[0].content;
+    return JSON.stringify(stableRichContentJson(payload)) === JSON.stringify(stableRichContentJson(expected));
+  } catch {
+    return false;
+  }
+}
+
+function rowRichContentNeedsRefresh(row) {
+  const asset = row.assets?.rich_content || {};
+  const value = asset.json || asset.richContentJson;
+  if (!value) return true;
+  if (!isAutomaticRowRichContent(row)) return false;
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return JSON.stringify(stableRichContentJson(parsed)) !== JSON.stringify(stableRichContentJson(JSON.parse(buildRowRichContentJson(row))));
+  } catch {
+    return true;
+  }
 }
 
 function rewriteRichContentMainImage(value, imageUrl) {
@@ -2106,17 +2168,26 @@ function rewriteRichContentMainImage(value, imageUrl) {
   }
 }
 
-function rewriteRichContentImageNode(value, imageUrl) {
+function rewriteRichContentImageNode(value, imageUrl, state = { firstImage: true, sourceImage: "" }) {
   if (Array.isArray(value)) {
-    value.forEach((item) => rewriteRichContentImageNode(item, imageUrl));
+    value.forEach((item) => rewriteRichContentImageNode(item, imageUrl, state));
     return;
   }
   if (!value || typeof value !== "object") return;
   if (value.img && typeof value.img === "object") {
-    value.img.src = imageUrl;
-    value.img.srcMobile = imageUrl;
+    const firstImage = state.firstImage;
+    const sourceImage = value.img.src || value.img.srcMobile;
+    if (sourceImage) {
+      if (firstImage) {
+        state.sourceImage = sourceImage;
+        state.firstImage = false;
+      }
+      for (const key of ["src", "srcMobile"]) {
+        if (typeof value.img[key] === "string" && value.img[key] && (firstImage || value.img[key] === state.sourceImage)) value.img[key] = imageUrl;
+      }
+    }
   }
-  Object.values(value).forEach((item) => rewriteRichContentImageNode(item, imageUrl));
+  Object.values(value).forEach((item) => rewriteRichContentImageNode(item, imageUrl, state));
 }
 
 function normalizeDraftDescription(value) {
@@ -2723,14 +2794,23 @@ function buildRowRichContentJson(row) {
 
 async function generateRowRichContent(row, options = {}) {
   await persistGeneratedRowAssets(row);
-  const json = buildRowRichContentJson(row);
+  let json = buildRowRichContentJson(row);
   if (!json) {
     if (!options.silent) ElMessage.warning("请先生成主图，并确认标题和描述不为空。");
     return;
   }
   row.richContentStatus = "saving";
   try {
-    await saveRowAsset(row, "rich_content", { json, sourceImageUrl: rowMainImageDraftUrl(row) }, "generated");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const signature = rowRichContentSignature(row);
+      await saveRowAsset(row, "rich_content", {
+        json, sourceImageUrl: rowMainImageDraftUrl(row), generator: "ai_variant_lab_fixed_rich_v1", contentSignature: signature
+      }, "generated");
+      if (signature === rowRichContentSignature(row)) break;
+      if (attempt === 2) throw new Error("本行内容在保存期间持续变化，请确认当前主图、标题和描述后重试富文本生成。");
+      json = buildRowRichContentJson(row);
+      if (!json) throw new Error("当前主图或描述已变化，请确认本行内容后重试富文本生成。");
+    }
     row.richContentStatus = "done";
     if (!options.silent) ElMessage.success("富文本已生成并记录。");
   } catch (error) {
@@ -2795,7 +2875,7 @@ async function prepareGeneratedRowForDraft(row, options = {}) {
   if (!task) {
     task = (async () => {
       await persistGeneratedRowAssets(row);
-      if (!row.assets?.rich_content?.json && !row.assets?.rich_content?.richContentJson) {
+      if (rowRichContentNeedsRefresh(row)) {
         await generateRowRichContent(row, { ...options, throwOnError: true });
       }
     })();
@@ -2808,6 +2888,10 @@ async function prepareGeneratedRowForDraft(row, options = {}) {
   if (options.generateVideo !== false && (!rowVideoUrls(row).length || !rowVideoUsesCurrentMainImage(row))) {
     await generateRowVideo(row, options);
   }
+  if (rowRichContentNeedsRefresh(row)) {
+    await generateRowRichContent(row, { ...options, throwOnError: true });
+  }
+  return rowRichContentSignature(row);
 }
 
 async function prepareGeneratedRowsForDraft(rows = [], options = {}) {
@@ -2821,7 +2905,7 @@ async function prepareGeneratedRowsForDraft(rows = [], options = {}) {
 function queueGeneratedRowPreparation(row, options = {}) {
   if (!row || !resultImageUrl(row)) return Promise.resolve();
   const key = rowResultId(row);
-  const imageSignature = resultImageUrl(row);
+  const imageSignature = rowRichContentSignature(row);
   if (preparedRowImageSignatures.get(key) === imageSignature) return Promise.resolve();
   const pending = queuedRowPreparationTasks.get(key);
   if (pending) return pending;
@@ -2835,7 +2919,7 @@ function queueGeneratedRowPreparation(row, options = {}) {
   rowPreparationQueue.push({ row, options, resolveTask, rejectTask, key });
   void drainGeneratedRowPreparationQueue();
   void task.finally(() => queuedRowPreparationTasks.delete(key)).catch(() => {});
-  void task.then(() => preparedRowImageSignatures.set(key, imageSignature)).catch(() => {});
+  void task.then((signature) => preparedRowImageSignatures.set(key, signature)).catch(() => {});
   return task;
 }
 

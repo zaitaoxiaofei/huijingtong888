@@ -13731,7 +13731,7 @@ function normalizeAiVariantDraftShopIds(value) {
 
 function applyAiVariantDraftPatch(editable = {}, patch = {}) {
   const previousMainImage = resolveDraftEffectiveImages({ editable_payload: editable }).images[0] || "";
-  const next = cloneJsonValue(editable, {});
+  let next = cloneJsonValue(editable, {});
   const offerId = normalizeListingOfferId(patch.offer_id || patch.offerId);
   const title = String(patch.title || "").trim();
   const description = String(patch.description || "").trim();
@@ -13743,11 +13743,17 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
   const videoCoverUrls = normalizeStringList(patch.video_cover_urls || patch.videoCoverUrls || patch.video_cover_url || patch.videoCoverUrl);
   const richContentJson = String(patch.rich_content_json || patch.richContentJson || patch.richTextContent || patch.richText || "").trim();
   if (title) {
+    next = syncAiVariantVariantTitle(next, title);
     next.title = title;
     next.name = title;
   }
   if (description) next.description = description;
-  if (tags.length) next.hashtags = tags;
+  if (tags.length) {
+    next.hashtags = tags;
+    for (const key of ["tags", "main_tags"]) {
+      if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = tags.slice();
+    }
+  }
   if (images.length) next.images = images;
   if (richContentJson) {
     next.rich_content_json = richContentJson;
@@ -13775,7 +13781,7 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
   if (videoCoverPatchProvided) next.video_cover_urls = videoCoverUrls;
   next.variants = normalizeArray(next.variants).map((variant, index) => {
     if (index > 0) return variant;
-    const nextVariant = {
+    let nextVariant = {
       ...variant,
       ...(offerId ? { offer_id: offerId, offerId } : {}),
       title: title || variant.title || variant.name || "",
@@ -13794,6 +13800,8 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
       delete nextVariant.video_cover_urls;
       delete nextVariant.videoCoverUrls;
     }
+    nextVariant = syncAiVariantVariantTitle(nextVariant, title);
+    nextVariant = syncAiVariantVariantTags(nextVariant, tags);
     return syncAiVariantVariantDescription(nextVariant, description);
   });
   return syncAiVariantDraftRichContent(next, { richContentJson, previousMainImage });
@@ -13852,30 +13860,75 @@ function syncAiVariantDraftRichContent(editable = {}, { richContentJson = "", pr
   };
 }
 
+function syncAiVariantVariantTags(variant = {}, tags = []) {
+  if (!tags.length) return variant;
+  const dynamic = { ...objectValue(variant.dynamicAttributes), ...objectValue(variant.dynamic_attributes) };
+  const tagKeys = Object.entries(dynamic).filter(([key, entry]) =>
+    Number(entry?.attribute_id || entry?.id || key) === 23171
+  ).map(([key]) => key);
+  const values = tags.map((value) => ({ value }));
+  const label = tags.join(" ");
+  for (const key of tagKeys.length ? tagKeys : ["23171"]) {
+    const existing = objectValue(dynamic[key]);
+    dynamic[key] = {
+      ...existing,
+      attribute_id: 23171,
+      name: existing.name || existing.attribute_name || "Search tags",
+      value: tags.slice(), values, selected_values: values, selectedValues: values,
+      label, display_value_zh: label, displayValueZh: label,
+      type: "multiselect",
+      source: existing.source || "ai_variant_draft"
+    };
+  }
+  return {
+    ...variant,
+    main_tags: tags.slice(), tags: tags.slice(), hashtags: tags.slice(),
+    attributes: syncAiVariantTextAttributes(variant.attributes || [], { tags }),
+    dynamic_attributes: dynamic, dynamicAttributes: dynamic
+  };
+}
+
+function syncAiVariantVariantTitle(variant = {}, title = "") {
+  const text = String(title || "").trim();
+  if (!text) return variant;
+  const dynamic = { ...objectValue(variant.dynamicAttributes), ...objectValue(variant.dynamic_attributes) };
+  const titleKeys = Object.entries(dynamic).filter(([key, entry]) => Number(entry?.attribute_id || entry?.id || key) === 4180).map(([key]) => key);
+  for (const key of titleKeys) {
+    dynamic[key] = { ...objectValue(dynamic[key]), attribute_id: 4180, value: text,
+      values: [{ value: text }], selected_values: [{ value: text }], selectedValues: [{ value: text }],
+      label: text, display_value_zh: text, displayValueZh: text };
+  }
+  return {
+    ...variant,
+    ...(Array.isArray(variant.attributes) ? { attributes: syncAiVariantTextAttributes(variant.attributes, { title: text }) } : {}),
+    ...(titleKeys.length ? { dynamic_attributes: dynamic, dynamicAttributes: dynamic } : {})
+  };
+}
+
 function syncAiVariantVariantDescription(variant = {}, description = "") {
   const text = String(description || "").trim();
   if (!text) return variant;
-  const dynamic = objectValue(variant.dynamic_attributes || variant.dynamicAttributes);
-  const existingKey = Object.entries(dynamic).find(([key, entry]) => {
+  const nextDynamicAttributes = { ...objectValue(variant.dynamicAttributes), ...objectValue(variant.dynamic_attributes) };
+  const descriptionKeys = Object.entries(nextDynamicAttributes).filter(([key, entry]) => {
     const attrId = String(entry?.attribute_id || entry?.id || (/^\d+$/.test(String(key)) ? key : "")).trim();
     const name = String(entry?.name || entry?.attribute_name || key || "").toLowerCase();
-    return attrId === "4191" || name.includes("description") || name.includes("аннотац") || name.includes("описан") || name.includes("简介");
-  })?.[0] || "4191";
-  const existing = objectValue(dynamic[existingKey]);
-  const nextDynamicAttributes = {
-    ...dynamic,
-    [existingKey]: {
+    return attrId === "4191" || (!attrId && (name.includes("description") || name.includes("аннотац") || name.includes("описан") || name.includes("简介")));
+  }).map(([key]) => key);
+  for (const key of descriptionKeys.length ? descriptionKeys : ["4191"]) {
+    const existing = objectValue(nextDynamicAttributes[key]);
+    nextDynamicAttributes[key] = {
       ...existing,
       attribute_id: existing.attribute_id || 4191,
       name: existing.name || existing.attribute_name || "Description",
       attribute_name: existing.attribute_name || existing.name || "Description",
       value: text,
       values: [{ value: text }],
-      selected_values: [],
+      selected_values: [], selectedValues: [],
+      label: text, display_value_zh: text, displayValueZh: text,
       type: existing.type || "textarea",
       source: existing.source || "ai_variant_draft"
-    }
-  };
+    };
+  }
   return {
     ...variant,
     description: text,
@@ -14074,6 +14127,22 @@ function syncAiVariantTextAttributes(attributes = [], facts = {}) {
   upsert(["产品标签", "标签", "Search tags", "Hashtags", "Теги", "Ключевые слова", "浜у搧鏍囩", "涓诲浘鏍囩", "泻谢褞褔械胁褘械 褋谢芯胁邪", "褌械谐"], facts.tags, { name: "产品标签", attribute_id: 23171, type: "multiselect" });
   upsert(["简介", "Description", "Аннотация", "Описание"], facts.description, { name: "Description", attribute_id: 4191, type: "textarea" });
   upsert(["rich_content_json", "Rich content JSON", "JSON富内容"], facts.richContentJson, { name: "rich_content_json", attribute_id: 11254, type: "rich_json" });
+  const tagValue = Array.isArray(facts.tags) ? facts.tags.join(",") : String(facts.tags || "");
+  if (tagValue) {
+    for (const item of next.filter((attribute) => Number(attribute.attribute_id || attribute.id) === 23171)) {
+      item.value = tagValue;
+      item.values = makeValueOptions(facts.tags);
+      item.selected_values = item.values;
+    }
+  }
+  for (const [id, value] of [[4180, facts.title], [4191, facts.description]]) {
+    if (!String(value || "").trim()) continue;
+    for (const item of next.filter((attribute) => Number(attribute.attribute_id || attribute.id) === id)) {
+      item.value = String(value).trim();
+      item.values = makeValueOptions(item.value);
+      item.selected_values = item.values;
+    }
+  }
   return next;
 }
 

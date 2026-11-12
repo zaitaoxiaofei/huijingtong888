@@ -1146,7 +1146,7 @@ test("ai variant lab can save selected variant rows to listing drafts", () => {
   assert.match(view, /function buildRowRichContentJson/);
   assert.match(view, /widgetName: "raShowcase"/);
   assert.match(view, /async function prepareGeneratedRowForDraft/);
-  assert.match(view, /!row\.assets\?\.rich_content\?\.json && !row\.assets\?\.rich_content\?\.richContentJson/);
+  assert.match(view, /rowRichContentNeedsRefresh\(row\)/);
   assert.match(view, /await generateRowRichContent\(row, options\)/);
   assert.match(view, /await generateRowVideo\(row, options\)/);
   assert.match(view, /await prepareGeneratedRowsForDraft\(rows, \{ silent: true, generateVideo: true, throwOnError: true \}\)/);
