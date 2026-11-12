@@ -1,0 +1,31 @@
+.pricing-workbench.profit-page,.pricing-workbench.pricing-page{width:100%;max-width:1280px;margin:0 auto;padding:20px 24px 28px;box-sizing:border-box;min-width:0}
+.pricing-workbench.is-embedded{padding:0;max-width:none}
+.pricing-platform-bar{display:flex;align-items:center;gap:16px;margin-bottom:16px}
+.pricing-platform-note{font-size:12px;color:var(--el-text-color-secondary)}
+.pricing-workbench .profit-grid,.pricing-workbench .pricing-grid{grid-template-columns:minmax(0,1.45fr) minmax(320px,1fr);gap:20px;margin-top:16px;align-items:start}
+.pricing-workbench .el-card{border-radius:12px;border-color:var(--el-border-color-lighter);box-shadow:none}
+.pricing-workbench .el-card__header{padding:17px 22px;background:var(--el-fill-color-extra-light)}
+.pricing-workbench .el-card__header h2{font-size:17px;text-align:left;color:var(--el-text-color-primary);font-weight:650;letter-spacing:.1px}
+.pricing-workbench .el-card__body{padding:20px 22px}
+.pricing-workbench .el-form-item{margin-bottom:18px}
+.pricing-workbench .el-form-item__label{font-size:13px;color:var(--el-text-color-regular)}
+.pricing-workbench h3{font-size:13px;letter-spacing:.3px;margin:24px 0 18px;color:var(--el-text-color-primary)}
+.pricing-workbench h3:first-child{margin-top:0}
+.pricing-workbench .unit{font-size:12px;color:var(--el-text-color-secondary)}
+.pricing-workbench .el-alert{border-radius:8px;font-size:12px}
+.pricing-workbench .calculate-button{height:40px;border-radius:8px;font-size:14px;font-weight:600;margin-top:6px}
+.pricing-workbench .results,.pricing-workbench .pricing-results{gap:16px}
+.pricing-workbench .headline{padding:5px 0}
+.pricing-workbench .headline strong{font-size:32px;font-variant-numeric:tabular-nums}
+.pricing-workbench .detail-row{font-size:13px;padding:11px 0}
+.pricing-workbench .hint{line-height:1.6}
+.pricing-empty{display:grid;justify-items:center;align-content:center;gap:10px;min-height:154px;color:var(--el-text-color-secondary);text-align:center}
+.pricing-empty-symbol{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--el-border-color-lighter);border-radius:12px;background:var(--el-fill-color-extra-light);font-size:22px;color:var(--el-text-color-placeholder)}
+.pricing-empty strong{font-size:13px;font-weight:500;color:var(--el-text-color-regular)}
+.pricing-empty p{font-size:12px;margin:0;line-height:1.6}
+@media(max-width:1000px){.pricing-workbench .profit-grid,.pricing-workbench .pricing-grid{grid-template-columns:1fr}.pricing-workbench .el-card__body{padding:18px}}
+@media(max-width:600px){.pricing-workbench.profit-page,.pricing-workbench.pricing-page{padding:12px}.pricing-workbench.is-embedded{padding:0}.pricing-platform-bar{gap:10px;flex-wrap:wrap}.pricing-platform-note{display:none}.pricing-workbench .el-card__body{padding:16px}.pricing-workbench .el-form-item{display:block}.pricing-workbench .el-form-item__label{width:auto!important;height:auto;line-height:1.5;padding-bottom:7px}.pricing-workbench .el-form-item__content{margin-left:0!important}.pricing-workbench .dimensions{display:flex;flex-wrap:nowrap}.pricing-workbench .dimensions .el-input-number{min-width:0;width:calc((100% - 75px)/3)}}
+
+.pricing-workbench .dimensions>span{white-space:nowrap;flex:none}
+.pricing-workbench.pricing-page .pricing-grid,.pricing-workbench.profit-page .profit-grid,.pricing-workbench .wb-calculator .wb-grid{grid-template-columns:minmax(0,1.45fr) minmax(320px,1fr)}
+@media(max-width:1000px){.pricing-workbench.pricing-page .pricing-grid,.pricing-workbench.profit-page .profit-grid,.pricing-workbench .wb-calculator .wb-grid{grid-template-columns:1fr}}

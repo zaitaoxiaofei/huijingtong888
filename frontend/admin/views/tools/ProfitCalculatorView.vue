@@ -6,6 +6,8 @@ import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogistics
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionRateForRub } from "../../utils/rfbs-commission.js";
+import MarketplaceSwitcher from "../../components/MarketplaceSwitcher.vue";
+import "./pricing-workbench.css";
 import WbCalculator from "./WbCalculator.vue";
 import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
@@ -104,15 +106,15 @@ function calculate() {
 </script>
 
 <template>
-  <div class="profit-page" :class="{ 'is-embedded': props.embedded }">
-    <el-radio-group v-model="platform" aria-label="计算平台"><el-radio-button value="ozon">Ozon</el-radio-button><el-radio-button value="wb">WB</el-radio-button></el-radio-group>
-    <KeepAlive><WbCalculator v-if="platform === 'wb'" mode="profit" /></KeepAlive>
+  <div class="profit-page pricing-workbench" :class="{ 'is-embedded': props.embedded }">
+    <div class="pricing-platform-bar"><MarketplaceSwitcher v-model="platform" label="计算平台" /><span class="pricing-platform-note">{{ platform === 'ozon' ? 'Ozon 跨境 rFBS' : 'WB 中国跨境 FBS' }}</span></div>
+    <KeepAlive><WbCalculator v-if="platform === 'wb'" mode="profit" :embedded="props.embedded" /></KeepAlive>
     <template v-if="platform === 'ozon'">
     <el-alert type="info" :closable="false" show-icon title="佣金按 Ozon 中国 rFBS 费率表匹配；物流按售价、重量和尺寸匹配本地规则，退货损失按退货率分摊。" />
     <div class="profit-grid">
       <el-card shadow="never">
         <template v-if="!props.embedded" #header><h2>OZON 跨境利润计算器</h2></template>
-        <el-form :model="form" label-width="150px" label-position="right">
+        <el-form :model="form" label-width="130px" label-position="right">
           <h3>基础设置</h3>
           <el-form-item label="实际售价" required><el-input-number :controls="false" v-model="form.saleCny" :min="0" :precision="2" /><span class="unit">元</span></el-form-item>
           <el-form-item label="采购成本" required><el-input-number :controls="false" v-model="form.purchaseCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
@@ -136,7 +138,7 @@ function calculate() {
         <el-card shadow="never">
           <template #header><strong>计算结果</strong></template>
           <div v-if="result" class="headline"><small>预计净利润</small><strong :class="{ negative: result.profit < 0 }">¥ {{ money(result.profit) }}</strong><span>利润率 {{ result.margin }}% · 售价约 ₽ {{ money(result.saleRub) }}</span></div>
-          <el-empty v-else description="填写参数后计算利润" :image-size="80" />
+          <div v-else class="pricing-empty"><span class="pricing-empty-symbol">—</span><strong>填写参数后计算利润</strong><p>测算结果与费用明细将在这里展示</p></div>
         </el-card>
         <el-card shadow="never" class="shipping-panel">
           <template #header><strong>物流费用</strong></template>

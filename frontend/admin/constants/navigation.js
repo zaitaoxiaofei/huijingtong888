@@ -36,11 +36,11 @@ export const navigationMenus = [
       { key: "collector-box", label: "采集箱", route: "/collector-box" },
       { key: "selection", label: "选品池", route: "/selection" },
       { key: "listing-records", label: "草稿箱", route: "/listing-records" },
-      { key: "listing-automation", label: "商品上架", route: "/listing-automation" },
+      { key: "listing-automation", platform: "ozon", label: "商品上架", route: "/listing-automation" },
       { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
-      { key: "wb-listing", label: "WB 商品上架", route: "/wb/listing" },
-      { key: "wb-online-products", label: "WB 在线商品", route: "/wb/online-products" },
-      { key: "online-products", label: "在线商品", route: "/online-products" },
+      { key: "wb-listing", platform: "wb", label: "WB 商品上架", route: "/wb/listing" },
+      { key: "wb-online-products", platform: "wb", label: "WB 在线商品", route: "/wb/online-products" },
+      { key: "online-products", platform: "ozon", label: "在线商品", route: "/online-products" },
       { key: "batch-stock-update", label: "批量改库存", route: "/batch-stock-update" },
       { key: "ozon-actions", label: "平台活动", route: "/ozon-actions" },
       { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" }
@@ -165,3 +165,5 @@ export const navigationIconByRoute = navigationMenus.reduce((map, menu) => {
   }
   return map;
 }, new Map());
+
+export const navigationPlatformByRoute = new Map(navigationMenus.flatMap(menu => (menu.children || []).filter(child => child.platform).map(child => [child.route, child.platform])));
