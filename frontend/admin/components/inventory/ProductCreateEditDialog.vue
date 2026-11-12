@@ -225,7 +225,7 @@ function createDefaultForm() {
       vehicle_brand: "",
       vehicle_model: "",
       vehicle_models: [],
-      accessory: "普通款",
+      accessory: "",
       colors: [],
       materials: [],
       process: "",
@@ -697,7 +697,7 @@ async function handleCategoryChange(value) {
   }
   form.structured_naming.vehicle_model = "";
   form.structured_naming.vehicle_models = [];
-  form.structured_naming.accessory = "普通款";
+  form.structured_naming.accessory = "";
   if (!inlineInventoryRequest.value) await createNamingOption("category", value);
   await Promise.all(["accessory", "color", "material", "process", "quantity"].map(loadNamingOption));
 }
@@ -1781,7 +1781,7 @@ function submitAndCreateDraft() {
               </el-col>
               <el-col :span="6" v-show="showMobileSection('identity')" class="naming-field naming-field--spec">
                 <el-form-item label="款式">
-                  <el-select v-model="form.structured_naming.accessory" filterable allow-create default-first-option placeholder="请选择或输入款式">
+                  <el-select v-model="form.structured_naming.accessory" filterable allow-create default-first-option clearable placeholder="请选择款式（未选时检索全部款式）">
                     <el-option v-for="(item, index) in namingOptions.accessory" :key="item.value" :label="item.label" :value="item.value">
                       <div class="ranked-naming-option"><span>{{ item.label }}</span><small v-if="Number(item.usage_count || 0)">{{ index < 3 ? '热门 · ' : '' }}{{ item.usage_count }} 次</small></div>
                     </el-option>
