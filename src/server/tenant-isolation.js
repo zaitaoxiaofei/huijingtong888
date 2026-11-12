@@ -1,6 +1,6 @@
 import { wbRoutePermission } from "./wb-paths.js";
 import { aiSkillsApiDecision } from "../shared/ai-skills-access.js";
-import { isPlatformAdmin } from "../shared/permissions.js";
+import { isPlatformAdmin, isEnterpriseAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
@@ -76,6 +76,9 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const aiSkills = aiSkillsApiDecision(session, parts, method);
   if (!aiSkills.allowed) return aiSkills;
   const tenant = session?.tenant;
+  if (parts[1] === 'finance-center' && parts[2] === 'ozon-posting-accruals') {
+    return { allowed: parts.length === 3 && String(method || 'GET').toUpperCase() === 'POST' && Boolean(tenant?.id && tenant?.slug) && isEnterpriseAdmin(session), error: '订单费用仅允许在有效企业中由负责人或管理员只读核对' };
+  }
   if (parts[1] === 'wb') return { allowed: Boolean(tenant?.id && tenant?.slug && wbRoutePermission(parts, String(method).toUpperCase())), error: 'WB 请求路径无效或缺少企业上下文' };
   if (parts[1] === "finance-submissions") {
     const access = financeSubmissionRoute(parts, String(method).toUpperCase());

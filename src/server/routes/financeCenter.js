@@ -13,9 +13,11 @@ import {
   saveShopCompanyAssignment
 } from "../../services/finance-center.js";
 import { tenantIdFromRequest } from "../tenant-context.js";
+import { readOzonPostingFinanceMysql } from '../../services/ozon-finance-postings-read.js';
 
 export function createFinanceCenterRoutes({ readJson, services }) {
   return {
+    "POST /api/finance-center/ozon-posting-accruals": async req => readOzonPostingFinanceMysql(await readJson(req, { limitBytes: 64 * 1024 }), req._session, { signal: req._abortSignal }),
     "GET /api/finance-center/companies": (req) => financeCompanies(tenantIdFromRequest(req)),
     "GET /api/finance-center/inventory-capital-details": (req, url) => services.financeInventoryCapitalDetails(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/finance-center/inventory-capital": (req, url) => services.financeInventoryCapital(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

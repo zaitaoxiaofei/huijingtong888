@@ -41,7 +41,7 @@ test('non-429 failures are never retried by this queue', async () => {
   }
 });
 test('mutations, unverified report methods and unscoped calls are rejected before sending', async () => {
-  for (const [client,path] of [['A','/v2/products/stocks'],['A','/v1/finance/accrual/postings'],['A','/v3/finance/transaction/list'],['',DAY]]) {
+  for (const [client,path] of [['A','/v2/products/stocks'],['A','/v1/finance/accrual/unverified'],['A','/v3/finance/transaction/list'],['',DAY]]) {
     let calls = 0;await assert.rejects(clock().run(client,path,async()=>calls++));assert.equal(calls, 0);
   }
 });

@@ -24,6 +24,9 @@ export function authorizeApiRequest(req, parts = []) {
   if (parts[0] !== "api") return { allowed: true };
   const feature = subscriptionApiFeature(parts);
   if (session.tenant?.id && feature && !planFeatures(session.tenant)[feature]) return deny(planFeatureMessage(feature));
+  if (parts[1] === 'finance-center' && parts[2] === 'ozon-posting-accruals') {
+    return parts.length === 3 && String(req.method || 'GET').toUpperCase() === 'POST' && session.tenant?.id && session.tenant?.slug && isEnterpriseAdmin(session) ? { allowed: true } : deny('仅有效企业的负责人或管理员可以只读核对订单费用');
+  }
   if (parts[1] === "finance-submissions") {
     const access = financeSubmissionRoute(parts, String(req.method || "GET").toUpperCase());
     return session.tenant?.id && session.tenant?.slug && access && (access === "member" || canReviewFinance(session)) ? { allowed: true } : deny();

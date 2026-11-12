@@ -19,3 +19,5 @@ This directory records Ozon seller API behavior that affects local sync logic.
 
 - Use `/v4/product/info/stocks` for current product stock and `/v1/analytics/turnover/stocks` for turnover analytics.
 - Do not call the retired `/v1/analytics/manage/stocks` endpoint during scheduled stock sync. A failed probe adds latency and error noise without providing usable data.
+
+- [finance-posting-reconciliation.md](./finance-posting-reconciliation.md): verified postings contract, read-only order-fee inspection, enterprise boundaries and unresolved live throttling.
