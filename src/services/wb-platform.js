@@ -1,3 +1,4 @@
+import {createWbProductOperations} from './wb-product-operations.js';
 import {createWbPublishFlow} from './wb-publish-flow.js';
 import {WB_LISTING_PUBLISH_ENABLED} from '../shared/wb-capabilities.js';
 import { readWbCardLimits } from './wb-card-limits.js';
@@ -453,7 +454,8 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
   const listing=createWbListingWorkflow({query,request,account,transaction,categoryOptions:catalog.categoryOptions});
   const publishing=createWbPublishFlow({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
-  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...listing, ...publishing, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
+  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
