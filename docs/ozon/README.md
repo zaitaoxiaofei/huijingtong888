@@ -21,3 +21,6 @@ This directory records Ozon seller API behavior that affects local sync logic.
 - Do not call the retired `/v1/analytics/manage/stocks` endpoint during scheduled stock sync. A failed probe adds latency and error noise without providing usable data.
 
 - [finance-posting-reconciliation.md](./finance-posting-reconciliation.md): verified postings contract, read-only order-fee inspection, enterprise boundaries and unresolved live throttling.
+
+- [product-attributes-pagination.md](./product-attributes-pagination.md): complete v4 attribute reads and original error propagation.
+- [remaining-contract-audit-20261112.md](./remaining-contract-audit-20261112.md): current Seller path coverage, unlisted compatibility paths and next local adaptation sequence.

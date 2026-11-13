@@ -41,15 +41,15 @@ test("split shipping rejects incomplete, empty and foreign allocations", () => {
 test("normal shipping uses authoritative live Ozon product quantities", () => {
   assert.deepEqual(buildLiveShippingProductsMysql({
     items: [
-      { ozon_product_id: "101", quantity: 2 },
-      { ozon_product_id: "101", quantity: 1 },
-      { ozon_product_id: "202", quantity: 4 }
+      { ozon_sku: "101", ozon_product_id: "9001", quantity: 2 },
+      { ozon_sku: "101", ozon_product_id: "9001", quantity: 1 },
+      { ozon_sku: "202", ozon_product_id: "9002", quantity: 4 }
     ]
   }), [
     { product_id: 101, quantity: 3 },
     { product_id: 202, quantity: 4 }
   ]);
-  assert.deepEqual(buildLiveShippingProductsMysql({ items: [{ ozon_product_id: "", quantity: 1 }] }), []);
+  assert.deepEqual(buildLiveShippingProductsMysql({ items: [{ ozon_product_id: "999", quantity: 1 }] }), []);
 });
 
 test("orders page exposes split-package preparation without replacing normal preparation", async () => {

@@ -1006,19 +1006,49 @@ export async function fetchOzonProductInfoAttributes(shop, options = {}) {
   const filter = {};
   if (productIds.length) filter.product_id = productIds;
   if (offerIds.length) filter.offer_id = offerIds;
-  const payload = {
-    filter,
-    limit: Math.min(Math.max(Number(options.limit || 100), 1), 1000),
-    sort_dir: "ASC"
-  };
-  let data;
-  try {
-    data = await ozonRequest(shop, "/v4/product/info/attributes", payload, options);
-  } catch (error) {
-    if (!String(error?.message || "").includes("/v4/product/info/attributes")) throw error;
-    data = await ozonRequest(shop, "/v3/products/info/attributes", payload, options);
+  const limit = Math.min(Math.max(Number(options.limit || 100), 1), 1000);
+  const rows = [];
+  const seenCursors = new Set();
+  const seenProducts = new Set();
+  let lastId = "";
+  let expectedTotal = null;
+  for (let page = 0; page < 1000; page++) {
+    throwIfAborted(options.signal);
+    const data = await ozonRequest(shop, "/v4/product/info/attributes", {
+      filter, limit, last_id: lastId, sort_dir: "asc"
+    }, options);
+    await options.afterRequest?.();
+    const result = data.result;
+    const items = Array.isArray(result) ? result : result?.items ?? data.items;
+    if (!Array.isArray(items)) throw new Error("Ozon 商品属性列表格式已变化，请重新读取商品信息后重试");
+    for (const item of items) {
+      const identity = item?.id || item?.product_id || item?.offer_id;
+      if (!identity || seenProducts.has(String(identity))) throw new Error("Ozon 商品属性分页缺少商品编号或重复，未取得完整属性列表");
+      seenProducts.add(String(identity));
+    }
+    rows.push(...items);
+    const next = data.last_id ?? result?.last_id ?? "";
+    if (typeof next !== "string") throw new Error("Ozon 商品属性分页游标格式已变化，请重新读取商品信息");
+    const rawTotal = data.total ?? result?.total;
+    const total = rawTotal === undefined || rawTotal === null || rawTotal === "" ? null : Number(rawTotal);
+    if (total !== null && (!Number.isSafeInteger(total) || total < 0 || total < rows.length)) {
+      throw new Error("Ozon 商品属性总数异常，未取得完整属性列表");
+    }
+    if (total !== null) {
+      if (expectedTotal !== null && total !== expectedTotal) throw new Error("Ozon 商品属性总数在读取期间发生变化，请重新读取完整列表");
+      expectedTotal = total;
+    }
+    if (expectedTotal !== null && rows.length > expectedTotal) throw new Error("Ozon 商品属性总数异常，未取得完整属性列表");
+    if (expectedTotal !== null && rows.length === expectedTotal) return rows;
+    if (!next) {
+      if (expectedTotal !== null && rows.length < expectedTotal) throw new Error("Ozon 商品属性分页提前结束，未取得完整属性列表");
+      return rows;
+    }
+    if (!items.length || next === lastId || seenCursors.has(next)) throw new Error("Ozon 商品属性分页未推进，未取得完整属性列表");
+    seenCursors.add(next);
+    lastId = next;
   }
-  return data.result?.items || data.items || data.result || [];
+  throw new Error("Ozon 商品属性分页超过安全上限，未取得完整属性列表");
 }
 
 export async function fetchOzonProductContentRating(shop, options = {}) {
@@ -1926,7 +1956,6 @@ function productImages(item) {
 
 function normalizeOzonPosting(item) {
   const products = Array.isArray(item.products) ? item.products : [];
-  const financialProducts = Array.isArray(item.financial_data?.products) ? item.financial_data.products : [];
   const cancellation = item.cancellation || item.cancel_reason || {};
   const status = item.status || item.status_alias || "";
   return {
@@ -1949,8 +1978,7 @@ function normalizeOzonPosting(item) {
     cancel_type: cancellation.cancellation_type || item.cancellation_type || "",
     cancelled_after_ship: cancellation.cancelled_after_ship ? 1 : 0,
     raw: item,
-    items: products.map((product, index) => {
-      const financialProduct = financialProducts[index] || {};
+    items: products.map((product) => {
       const sellerPriceSource = product.price ? product : product.financial_data?.price ? product.financial_data
         : product.price === 0 ? product : product.financial_data?.price === 0 ? product.financial_data : null;
       const sellerMoney = resolveOzonSellerMoney(sellerPriceSource, sellerPriceSource === product ? "posting.products" : "posting.products.financial_data");
@@ -1967,7 +1995,8 @@ function normalizeOzonPosting(item) {
       );
       return {
         ozon_sku: resolvedOzonPostingSku(product),
-        ozon_product_id: String(product.product_id || product.id || financialProduct.product_id || financialProduct.id || ""),
+        // financial_data.products.product_id is a marketplace SKU, not a catalog product ID.
+        ozon_product_id: String(product.product_id || product.id || ""),
         offer_id: String(product.offer_id || product.product_offer_id || ""),
         name: product.name || product.product_name || "",
         quantity: Number(product.quantity || 1),
@@ -2071,7 +2100,6 @@ function resolvedOzonPostingSku(item = {}) {
       || item.productSku
       || item.fbo_sku
       || item.fbs_sku
-      || item.product_id
       || ""
   );
 }
