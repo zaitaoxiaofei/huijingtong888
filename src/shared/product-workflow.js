@@ -22,8 +22,12 @@ export function validateWorkflow(value) {
     if (!/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(node.id) || ["constructor","prototype","__proto__"].includes(node.id) || seen.has(node.id)) throw workflowError("节点标识无效或重复，请重新添加该节点");
     if (!WORKFLOW_TYPES[node.type] || !String(node.label || "").trim()) throw workflowError("节点类型或名称无效");
     if (!Array.isArray(node.inputs) || node.inputs.some(id => !seen.has(id))) throw workflowError(`${node.label}只能引用排在前面的节点；请调整顺序或输入引用`);
-    if (["image", "copy"].includes(node.type) && node.imageMode!=='material' && !String(node.prompt || "").trim()) throw workflowError(`${node.label}缺少提示词，请在节点设置填写`);
-    if(node.imageMode&&!['generate','material'].includes(node.imageMode))throw workflowError(`${node.label}的图片来源无效`);
+    if (["image", "copy"].includes(node.type) && !['material','compose'].includes(node.imageMode) && !String(node.prompt || "").trim()) throw workflowError(`${node.label}缺少提示词，请在节点设置填写`);
+    if(node.imageMode&&!['generate','material','compose'].includes(node.imageMode))throw workflowError(`${node.label}的图片来源无效`);
+    if(node.imageMode==='compose') {
+      const source=seen.get(node.composeInput);
+      if(node.type!=='image'||node.role==='main'||node.ratio!=='3:4'||source?.type!=='images'||source.count!==1||source.referenceRole!=='compatibility'||!node.inputs.includes(node.composeInput))throw workflowError(`${node.label}原图合成需要引用一个适配钥匙图片输入，并使用3:4详情图`);
+    }
     if(node.type==='image'&&node.imageMode==='material'&&node.materialRefs?.length!==1)throw workflowError(`${node.label}请从资料库选择一张成品图`);
     if(node.requiresInput&&(node.type!=='image'||node.role==='main'||!seen.has(node.requiresInput)||seen.get(node.requiresInput).type!=='images'))throw workflowError(`${node.label}的可选图片依赖无效`);
     if(node.inputFormat&&!['text','number','images'].includes(node.inputFormat))throw workflowError(`${node.label}的输入格式无效`);

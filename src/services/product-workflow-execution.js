@@ -49,7 +49,7 @@ function acceptOutput(node,raw) {
 
 export function isConfirmedImageTaskFailure(task){return task?.status==='failed'&&['AI_CREDIT_TASK_FAILED','provider_job_terminal_failed'].includes(task.error?.code);}
 // One bounded tick, independent of any browser. commit persists submit intent before creating an AI task.
-export async function advanceProductWorkflow({id,payload}, {findTask,createTask,retryTask,commit,guard}) {
+export async function advanceProductWorkflow({id,payload}, {findTask,createTask,retryTask,composeImage,commit,guard}) {
   const definition=payload.definition;
   let pending=false,review=false;
   for(const variant of payload.variants) {
@@ -65,6 +65,20 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
       if(node.type==='image'&&node.imageMode==='material'){const ref=node.materialRefs?.[0],url=definition.materialSnapshots?.[ref?.id]?.images?.[ref?.imageIndex||0];if(!url){results[node.id]={status:'failed',error:'没有可用资料图片，请检查流程引用的资料后重新生产'};return {status:'failed',error:`${node.label}没有可用资料图片，请检查流程引用的资料后重新生产`};}results[node.id]={url,status:'done',approved:definition.reviewMode==='automatic',source:'material'};return {status:'running'};}
       if(!dependenciesReady(definition,variant,node,results)){review=true;continue;}
       if(state?.status==='failed'&&!state.taskId)return {status:'failed',error:`${variant.label} / ${node.label}：${state.error||'生成失败'}`};
+      if(node.type==='image'&&node.imageMode==='compose') {
+        results[node.id]={status:'composing',approved:false};await commit();await guard();
+        try {
+          if(!composeImage)throw new Error('原图合成服务尚不可用，请联系管理员，不会改用AI重画');
+          const url=await composeImage({runId:id,variant,node});await guard();
+          if(!url)throw new Error('原图合成没有返回图片，请重试本节点');
+          results[node.id]={url,status:'done',approved:definition.reviewMode==='automatic',source:'composition'};
+          return {status:'running'};
+        }catch(error){
+          if(error.code==='WORKFLOW_LEASE_LOST')throw error;
+          results[node.id]={status:'failed',approved:false,error:error.message};
+          return {status:'failed',error:`${variant.label} / ${node.label}：${error.message}`};
+        }
+      }
       if(state?.taskId) {
         const task=await findTask(state.taskId);
         if(!task) {

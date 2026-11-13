@@ -1,4 +1,5 @@
 import {createWorkflowJobPump} from './product-workflow-pump.js';
+import { composeWorkflowKeyImage } from './product-workflow-key-composition.js';
 import { workflowNodeSkipped } from '../shared/workflow-conditions.js';
 import { validateWorkflowCopy } from '../shared/workflow-copy-rules.js';
 import { randomUUID } from 'node:crypto';
@@ -72,6 +73,7 @@ async function processNextWorkflowJob() {
       };
       const result=document.payload.draftId?{status:'imported'}:await advanceProductWorkflow(document,{
         commit,guard,
+        composeImage:request=>composeWorkflowKeyImage({...request,session:actor,guard}),
         findTask:id=>workflowAiTaskAccess.find(job.run_id,id,actor),
         createTask:body=>workflowAiTaskAccess.submit(job.run_id,body,actor),
         retryTask:id=>workflowAiTaskAccess.retry(job.run_id,id,actor)
