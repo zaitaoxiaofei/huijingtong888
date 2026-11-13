@@ -109,6 +109,7 @@
     "bwip-js": "^4.11.1",
     "element-plus": "^2.11.5",
     "exceljs": "^4.4.0",
+    "hls.js": "1.7.4",
     "lucide-vue-next": "^1.0.0",
     "mysql2": "3.23.1",
     "pdf-lib": "^1.17.1",
