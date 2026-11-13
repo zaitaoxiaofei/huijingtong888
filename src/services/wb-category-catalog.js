@@ -1,5 +1,5 @@
 import {wbLocalizedOptions} from '../shared/wb-display.js';
-import {wbAttributeDirectory,wbDirectoryOptions} from '../shared/wb-attribute-options.js';
+import {wbAttributeDirectory,wbDirectoryOptions,wbTemplateOptions} from '../shared/wb-attribute-options.js';
 import {createHash} from 'node:crypto';
 const fail=(message,statusCode=409)=>Object.assign(new Error(message),{statusCode});
 const parse=value=>typeof value==='string'?JSON.parse(value):value;
@@ -64,10 +64,16 @@ export function createWbCategoryCatalog({query,request,account}){
   if(!Number.isSafeInteger(subject)||subject<=0||!Number.isSafeInteger(attributeId)||attributeId<=0)throw fail('请先选择有效类目和属性。',400);
   const schema=await cached(a,`schema:${subject}`,'zh',false,()=>request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}}));
   const attribute=schema.data.find(item=>Number(item.charcID)===attributeId),kind=wbAttributeDirectory(attribute);
-  if(!attribute||!kind)throw fail('该属性不使用 WB 官方选项，请按模板要求填写。',400);
+  if(!attribute)throw fail('该属性不属于当前类目，请重新选择类目。',400);
+  if(!kind){
+   const options=wbTemplateOptions(attribute),seen=new Set(options.map(item=>item.value));
+   const cards=await query("SELECT raw_json FROM wb_product_cards WHERE tenant_id=? AND shop_id=? AND CAST(JSON_UNQUOTE(JSON_EXTRACT(raw_json,'$.subjectID')) AS UNSIGNED)=? ORDER BY synced_at DESC LIMIT 200",[a.tenant_id,a.shop_id,subject]);
+   for(const row of cards){const card=parse(row.raw_json);for(const value of card.characteristics||[]){if(Number(value.id)!==attributeId||!Array.isArray(value.value))continue;for(const text of value.value){if(typeof text!=='string'||!text.trim()||text.length>500||seen.has(text))continue;seen.add(text);options.push({value:text,label:text});}}}
+   return {data:options.map(item=>item.value),options,source:wbTemplateOptions(attribute).length?'template':'shop_history',allow_custom:true};
+  }
   const result=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'ru',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'ru',...(kind==='tnved'?{subjectID:subject}:{})}}));
   const localized=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'zh',...(kind==='tnved'?{subjectID:subject}:{})}}));
-  return {...result,data:wbDirectoryOptions(result.data,kind),options:wbLocalizedOptions(result.data,localized.data,kind),cache:{...result.cache,stale:result.cache.stale||localized.cache.stale}};
+  return {...result,source:'official',allow_custom:false,data:wbDirectoryOptions(result.data,kind),options:wbLocalizedOptions(result.data,localized.data,kind),cache:{...result.cache,stale:result.cache.stale||localized.cache.stale}};
  }
  async function categoryBrands(tenantId,body={}){
   const a=await catalogAccount(tenantId,body),subject=Number(body.subject_id);if(!Number.isSafeInteger(subject)||subject<=0)throw fail('请先选择有效类目。',400);
