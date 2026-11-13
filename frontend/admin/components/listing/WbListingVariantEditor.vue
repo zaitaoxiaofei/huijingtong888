@@ -1,0 +1,89 @@
+<script setup>
+import { computed, onMounted, reactive, ref } from 'vue';
+import { ElMessage } from 'element-plus';
+import { currentApiCacheScope } from '../../utils/api.js';
+import { UploadFilled, VideoCamera, Delete } from '@element-plus/icons-vue';
+import WbAttributeInput from './WbAttributeInput.vue';
+import { generateAiVideo } from '../../api/tools/aiImageGenerator.js';
+import { uploadListingMedia } from '../../api/tools/imageCropper';
+const props=defineProps({shopId:{type:Number,default:null},shops:{type:Array,default:()=>[]},schema:{type:Object,required:true},templates:{type:Array,default:()=>[]},draft:{type:Object,default:null},card:{type:Object,default:null}}),emit=defineEmits(['close','saved','shop-changed','upload-state']);
+const mediaUploading=ref(0),videoUrl=ref(''),selectedImages=ref([]);let mediaQueue=Promise.resolve();
+const clone=v=>JSON.parse(JSON.stringify(v));
+const targetShop=ref(props.shopId||null);
+const initial=props.draft?.payload||{subject_id:props.card?.subjectID||null,card:props.card?clone(props.card):{title:'',vendorCode:'',brand:'',description:'',dimensions:{length:null,width:null,height:null,weightBrutto:null},characteristics:[],sizes:[{techSize:'0',price:null,skus:[]}]},images:(props.card?.photos||[]).map(p=>p.big).filter(Boolean)};
+const form=reactive({currency:'CNY',video_url:'',...clone(initial),template_id:Number(props.schema.template_id),subject_id:Number(props.schema.subject_id)}),draftId=ref(props.draft?.id||null),busy=ref(false),attributes=ref([]),values=reactive({}),imageUrl=ref(''),dragIndex=ref(-1),barcodeText=ref(form.card.sizes.map(s=>(s.skus||[]).join('\n')));
+for(const item of form.card.characteristics||[])values[item.id]=item.value;
+async function run(work){if(mediaUploading.value)return ElMessage.info('素材上传中，请等待上传完成。');if(busy.value)return;busy.value=true;const scope=currentApiCacheScope();try{await work(scope);}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{busy.value=false;}}
+function applyTemplate(clear=false){const template=props.templates.find(t=>Number(t.id)===Number(form.template_id));if(!template)return;form.subject_id=Number(template.subject_id);attributes.value=template.attributes||[];if(clear){for(const key of Object.keys(values))delete values[key];for(const value of template.defaults?.characteristics||[])values[value.id]=Array.isArray(value.value)?value.value.join(', '):value.value;}form.currency='CNY';}
+function attributeLabel(attribute){const name=String(attribute.name||'').split('/')[0].replace(/（[^）]*）|\([^)]*\)/g,'').trim();return name+(attribute.unitName?'（'+attribute.unitName+'）':'');}
+const optionalLimit=ref(12);
+const editableAttributes=computed(()=>attributes.value.filter(a=>!a.existNamedField&&Number(a.charcType)!==0));
+const visibleAttributes=computed(()=>{const fields=editableAttributes.value.filter(a=>a.isVariable===true),required=fields.filter(a=>a.required),optional=fields.filter(a=>!a.required);return [...required,...optional.slice(0,optionalLimit.value)];});
+function payload(){const value=clone(form);value.card.sizes=value.card.sizes.map((s,i)=>({...s,skus:barcodeText.value[i].split(/\s+/).filter(Boolean)}));value.card.characteristics=attributes.value.map(a=>({id:a.charcID,value:Number(a.charcType)===4?(values[a.charcID]===undefined||values[a.charcID]===null||values[a.charcID]===''?undefined:Number(values[a.charcID])):(Array.isArray(values[a.charcID])?clone(values[a.charcID]):String(values[a.charcID]||'').split(/[,，]/).map(v=>v.trim()).filter(Boolean))})).filter(a=>a.value!==undefined&&(!Array.isArray(a.value)||a.value.length));return value;}
+function addImage(){const url=imageUrl.value.trim();if(url&&!form.images.includes(url)&&form.images.length<30){form.images.push(url);imageUrl.value='';}}
+function drop(index){const from=dragIndex.value;if(from>=0&&from!==index){const [image]=form.images.splice(from,1);form.images.splice(index,0,image);}selectedImages.value=[];dragIndex.value=-1;}
+function addVideo(){const url=videoUrl.value.trim();if(!url)return;if(!/^https:\/\//i.test(url)||!(/\.(mp4|mov)(?:\?|$)/i.test(url)))return ElMessage.warning('请填写有效的 HTTPS MP4 或 MOV 视频地址。');form.video_url=url;form.video_source_image="";videoUrl.value='';}
+function removeSelected(){form.images=form.images.filter((_,index)=>!selectedImages.value.includes(index));selectedImages.value=[];}
+function upload(options,kind='image'){
+ const scope=currentApiCacheScope();mediaUploading.value++;emit('upload-state',mediaUploading.value);
+ const task=mediaQueue.catch(()=>{}).then(async()=>{try{
+  if(scope!==currentApiCacheScope())throw Error('账户已切换，请重新上传素材。');
+  const isVideo=kind==='video',limit=(isVideo?50:32)*1024*1024;
+  if(options.file.size>limit)throw Error(isVideo?'视频不能超过 50MB。':'图片不能超过 32MB。');
+  if(!isVideo&&form.images.length>=30)throw Error('每个商品最多 30 张图片。');
+  if(isVideo&&!/\.(mp4|mov)$/i.test(options.file.name))throw Error('视频请使用 MP4 或 MOV 格式。');
+  const r=await uploadListingMedia(options.file,{source_module:'wb_listing',role:isVideo?'listing_video':'listing_image'});
+  if(scope!==currentApiCacheScope())return;
+  if(r.mediaType!==kind||!r.publishUrl)throw Error('素材未生成可用的发布地址，请重新上传。');
+  if(isVideo){form.video_url=r.publishUrl;form.video_source_image="";}else form.images.push(r.publishUrl);
+  options.onSuccess?.(r);
+ }catch(e){options.onError?.(e);if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{mediaUploading.value--;emit('upload-state',mediaUploading.value);}});
+ mediaQueue=task;return task;
+}
+async function generateVideo(){
+ if(!form.images[0])return ElMessage.warning('请先上传该变体的首图。');
+ await run(async scope=>{const sourceImage=form.images[0];emit('upload-state',1);try{
+  const result=await generateAiVideo({imageUrl:sourceImage,sourceId:form.card.vendorCode,title:form.card.title},{sourceModule:'wb_listing_video',listingVariantMedia:true});
+  if(scope!==currentApiCacheScope())return;
+  const url=result.video?.publishUrl||result.video?.publish_url;
+  if(!url)throw Error('视频未生成可用地址，请在任务记录中检查。');
+  form.video_url=url;form.video_source_image=sourceImage;ElMessage.success('视频已生成，请预览后保存草稿。');
+ }finally{emit('upload-state',0);}});
+}
+onMounted(()=>applyTemplate(false));
+defineExpose({getPayload:payload});
+</script>
+<template>
+ <div class="wb-workbench-fields">
+  <el-form label-width="92px" :disabled="busy||mediaUploading>0" class="copy-form">
+   <section class="editor-block product-section"><h3>商品信息</h3><div class="form-shell">
+    <el-form-item label="商品标题" required><el-input v-model="form.card.title" :maxlength="60" show-word-limit/></el-form-item>
+    <el-form-item label="商家货号" required><el-input v-model="form.card.vendorCode" :disabled="!!draftId||!!form.card.nmID" :maxlength="72" placeholder="填写商品货号"/></el-form-item>
+    
+    <el-form-item label="商品描述"><el-input v-model="form.card.description" type="textarea" :rows="5"/></el-form-item>
+   </div></section>
+   <section class="editor-block variant-section"><div class="section-line"><h3>规格与价格</h3><el-button :disabled="form.card.sizes.length>=30" @click="form.card.sizes.push({techSize:'',price:null,skus:[]});barcodeText.push('')">添加规格</el-button></div>
+    <el-table :data="form.card.sizes" border stripe class="variant-table dense-variant-table" :scrollbar-always-on="true">
+     <el-table-column type="index" label="序号" width="64" fixed="left"/>
+     <el-table-column label="规格 / 尺码" min-width="180"><template #default="{row}"><el-input v-model="row.techSize" placeholder="无尺码填写 0"/></template></el-table-column>
+     <el-table-column label="WB 尺码" min-width="140"><template #default="{row}"><el-input v-model="row.wbSize"/></template></el-table-column>
+     <el-table-column label="售价（人民币 CNY）" min-width="180"><template #default="{row}"><el-input-number v-model="row.price" :min="1" :precision="0"/></template></el-table-column>
+     <el-table-column label="商品条码" min-width="230"><template #default="{$index}"><el-input v-model="barcodeText[$index]" type="textarea" placeholder="每行一个条码；审核草稿可暂留空"/></template></el-table-column>
+     <el-table-column label="操作" width="90"><template #default="{$index}"><el-button link type="danger" :disabled="form.card.sizes.length===1" @click="form.card.sizes.splice($index,1);barcodeText.splice($index,1)">删除</el-button></template></el-table-column>
+    </el-table>
+   </section>
+   <section class="editor-block attribute-section"><h3>商品属性</h3><div class="form-shell"><el-form-item v-for="attribute in visibleAttributes" :key="attribute.charcID" :label="attributeLabel(attribute)" :title="attribute.name" :required="attribute.required"><WbAttributeInput v-model="values[attribute.charcID]" :attribute="attribute" :subject-id="form.subject_id" :shop-id="targetShop"/></el-form-item><el-button v-if="optionalLimit<editableAttributes.filter(a=>a.isVariable===true).length" @click="optionalLimit+=12">展开更多选填属性</el-button><p v-if="!editableAttributes.length">此类目当前没有独立属性字段，请补全商品信息、规格和包装。</p></div></section>
+   <section class="editor-block package-section"><h3>包装信息</h3><div class="form-shell package-grid"><el-form-item v-for="(label,key) in {length:'包装长（cm）',width:'包装宽（cm）',height:'包装高（cm）',weightBrutto:'包装重量（kg）'}" :key="key" :label="label" required><el-input-number v-model="form.card.dimensions[key]" :precision="key==='weightBrutto'?3:0" :min="key==='weightBrutto'?0.001:1"/></el-form-item></div></section>
+   <section class="editor-block media-section"><div class="section-line"><h3>图片与视频</h3><span class="field-hint">{{form.images.length}} / 30 张图片</span></div>
+    <el-upload drag multiple :show-file-list="false" :http-request="upload" accept="image/*" :disabled="busy||mediaUploading>0" class="image-uploader"><el-icon class="upload-icon"><UploadFilled/></el-icon><strong>上传商品图片</strong><span>点击选择或将图片拖到这里</span></el-upload>
+    <div class="media-tools"><el-popover placement="bottom" :width="300" trigger="click"><template #reference><el-button link type="primary">添加图片链接</el-button></template><el-input v-model="imageUrl" placeholder="填写图片地址" @keyup.enter="addImage"/><el-button type="primary" size="small" class="link-add" @click="addImage">添加图片</el-button></el-popover><el-button v-if="selectedImages.length" link type="danger" @click="removeSelected">删除所选（{{selectedImages.length}}）</el-button><span v-if="mediaUploading" class="field-hint">正在上传素材…</span></div>
+    <div class="wb-images"><div v-for="(image,index) in form.images" :key="index" draggable="true" @dragstart="dragIndex=index" @dragover.prevent @drop.prevent="drop(index)" @dragend="dragIndex=-1"><el-image :src="image" :preview-src-list="form.images" :initial-index="index" preview-teleported fit="cover"/><el-checkbox-group v-model="selectedImages" class="image-select"><el-checkbox :value="index" :label="index"><span class="sr-only">选择图片 {{index+1}}</span></el-checkbox></el-checkbox-group><el-tag v-if="index===0" size="small" class="main-image-label">主图</el-tag><el-button circle size="small" :icon="Delete" class="image-remove" :aria-label="'删除图片 '+(index+1)" @click="form.images.splice(index,1);selectedImages=[]"/></div></div>
+    <p class="field-hint">第一张为主图，拖动可调整顺序，点击图片可放大。</p>
+    <div class="video-section"><div class="section-line"><h3>商品视频</h3><span class="field-hint">选填 · 1 个</span></div><video v-if="form.video_url" :src="form.video_url" controls preload="metadata" class="video-preview"/><div v-else class="video-empty"><el-icon><VideoCamera/></el-icon><span>尚未添加视频</span></div><div class="video-actions"><el-button type="primary" :disabled="!form.images.length" :loading="busy" @click="generateVideo">首图生成视频</el-button><el-upload :show-file-list="false" :http-request="options=>upload(options,'video')" accept=".mp4,.mov,video/mp4,video/quicktime" :disabled="busy||mediaUploading>0"><el-button :loading="mediaUploading>0">{{form.video_url?'替换视频':'上传视频'}}</el-button></el-upload><el-popover placement="bottom" :width="300" trigger="click"><template #reference><el-button link type="primary">添加视频链接</el-button></template><el-input v-model="videoUrl" placeholder="填写 MP4 或 MOV 视频地址" @keyup.enter="addVideo"/><el-button type="primary" size="small" class="link-add" @click="addVideo">添加视频</el-button></el-popover><el-button v-if="form.video_url" link type="danger" @click="form.video_url=''">删除视频</el-button></div><p v-if="form.video_source_image&&form.video_source_image!==form.images[0]" class="field-hint">首图已更换，可重新生成视频。</p><p class="field-hint">支持 MP4、MOV，文件不超过 50MB。</p></div>
+   </section>
+  </el-form>
+ </div>
+</template>
+<style scoped>
+.copy-form{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}.editor-block{min-width:0;margin:0;padding:18px 20px;background:var(--el-bg-color);border:1px solid var(--el-border-color-lighter);border-radius:8px;grid-column:1}.editor-block h3{margin:0 0 16px;font-size:14px;line-height:1.3;font-weight:600;color:var(--el-text-color-primary)}.product-section{grid-row:1}.variant-section{grid-row:2}.attribute-section{grid-row:3}.package-section{grid-row:4}.publish-section{grid-row:5}.media-section{grid-column:2;grid-row:1/span 5;position:sticky;top:64px;max-height:calc(100vh - 160px);overflow-y:auto;padding:16px}.form-shell{max-width:none;margin:0}.form-shell :deep(.el-form-item){margin-bottom:14px}.form-shell :deep(.el-form-item:last-child){margin-bottom:0}.form-shell :deep(.el-form-item__label){font-size:13px;color:var(--el-text-color-regular);line-height:20px;height:auto;min-height:32px;align-items:center}.form-shell :deep(.el-select){width:100%}.attribute-section :deep(.el-form-item__label){width:116px!important;overflow-wrap:anywhere}.attribute-section .form-shell,.package-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 12px}.attribute-section .form-shell>p,.attribute-section .form-shell>.el-button{grid-column:1/-1}.field-row{display:flex;align-items:center;gap:8px;width:100%}.field-hint{font-size:12px;color:var(--el-text-color-secondary);margin:8px 0;line-height:1.5}.section-line{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}.section-line h3,.section-line .field-hint{margin:0}.image-uploader :deep(.el-upload){width:100%;display:block}.image-uploader :deep(.el-upload-dragger){padding:18px 10px;border-radius:6px}.image-uploader strong,.image-uploader span{display:block;line-height:1.7}.image-uploader strong{font-size:13px;color:var(--el-color-primary)}.image-uploader span{font-size:12px;color:var(--el-text-color-secondary)}.upload-icon{font-size:30px;color:var(--el-color-primary);margin-bottom:4px}.media-tools,.video-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}.link-add{margin-top:10px}.wb-images{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}.wb-images>div{min-width:0;position:relative;cursor:grab}.wb-images .el-image{display:block;width:100%;height:116px;border-radius:6px}.image-select{position:absolute;top:2px;left:5px;z-index:1}.image-select :deep(.el-checkbox){margin:0}.image-remove{position:absolute;right:3px;top:3px;opacity:0}.wb-images>div:hover .image-remove,.image-remove:focus{opacity:1}.main-image-label{position:absolute;bottom:5px;left:5px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.video-section{border-top:1px solid var(--el-border-color-lighter);padding-top:14px;margin-top:16px}.video-preview{display:block;width:100%;max-height:200px;background:#111;border-radius:6px;margin:10px 0}.video-empty{display:flex;align-items:center;justify-content:center;gap:8px;min-height:84px;background:var(--el-fill-color-light);border:1px dashed var(--el-border-color);border-radius:6px;color:var(--el-text-color-secondary);font-size:12px}.video-empty .el-icon{font-size:24px}.preview-images{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0}.preview-images .el-image{width:160px;height:210px}.description{white-space:pre-wrap;line-height:1.7}.variant-table :deep(.el-input-number){width:130px}.publish-section .el-alert{margin-top:8px}@media(max-width:1120px){.copy-form{grid-template-columns:minmax(0,1fr)}.media-section{grid-column:1;grid-row:2;position:static;max-height:none}.variant-section{grid-row:3}.attribute-section{grid-row:4}.package-section{grid-row:5}.publish-section{grid-row:6}.wb-images{grid-template-columns:repeat(5,minmax(0,1fr))}}@media(max-width:700px){.editor-block{padding:14px}.attribute-section .form-shell,.package-grid{grid-template-columns:1fr}.field-row{flex-wrap:wrap}.wb-images{grid-template-columns:repeat(3,minmax(0,1fr))}.image-remove{opacity:1}}
+</style>

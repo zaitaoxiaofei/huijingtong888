@@ -1,5 +1,6 @@
+import {wbListingVariants,wbVariantPayload} from './wb-listing-variants.js';
 const clean = value => String(value ?? '').trim();
-export function wbListingValidation(payload = {}, attributes = []) {
+function validateOne(payload = {}, attributes = []) {
   const card = payload.card || {}, errors = [], dimensions = card.dimensions || {};
   if (!Number.isSafeInteger(Number(payload.subject_id || card.subjectID)) || Number(payload.subject_id || card.subjectID) <= 0) errors.push('商品类目：请选择 WB 类目，再加载该类目的必填属性。');
   if (!clean(card.title) || clean(card.title).length > 60) errors.push('商品标题：请填写 1–60 个字符。');
@@ -8,6 +9,7 @@ export function wbListingValidation(payload = {}, attributes = []) {
     if (!Number.isFinite(Number(dimensions[key])) || Number(dimensions[key]) <= 0) errors.push(`${label}：请在包装信息中填写大于零的数值；尺寸单位 cm，重量单位 kg。`);
     if (key !== 'weightBrutto' && !Number.isInteger(Number(dimensions[key]))) errors.push(`${label}：WB 包装尺寸使用整数厘米，请向上取整。`);
   }
+  if(attributes.some(a=>a.required&&a.existNamedField&&Number(a.charcID)===14177446)&&!clean(card.brand))errors.push('品牌：当前类目要求填写品牌，请在变体行补全。');
   const sizes = card.sizes || [], barcodes = new Set();
   if (!sizes.length || sizes.length > 30) errors.push('规格：请填写 1–30 个规格。');
   for (const [index,size] of sizes.entries()) {
@@ -23,7 +25,7 @@ export function wbListingValidation(payload = {}, attributes = []) {
     else if (Number(attribute.charcType) === 4) { if (typeof value.value !== 'number' || !Number.isFinite(value.value)) errors.push(`${attribute.name}：请填写一个有效数值。`); }
     else if (!Array.isArray(value.value) || value.value.some(v=>typeof v !== 'string' || !v.trim()) || (attribute.maxCount>0 && value.value.length>attribute.maxCount)) errors.push(`${attribute.name}：请按该属性要求填写文本值，最多 ${attribute.maxCount||'平台允许的'} 项。`);
   }
-  for (const attribute of attributes.filter(a=>a.required)) {
+  for (const attribute of attributes.filter(a=>a.required&&!a.existNamedField&&Number(a.charcType)!==0)) {
     const value = values.find(v=>Number(v.id)===Number(attribute.charcID))?.value;
     if (value === undefined || value === null || (Array.isArray(value) && !value.length)) errors.push(`类目必填属性：${attribute.name}，请在类目属性中补全。`);
   }
@@ -39,4 +41,24 @@ export function wbListingCard(payload) {
     dimensions:Object.fromEntries(['length','width','height','weightBrutto'].map(k=>[k,Number(card.dimensions[k])])),
     characteristics:card.characteristics||[],sizes:card.sizes.map(s=>({...(s.chrtID?{chrtID:Number(s.chrtID)}:{}),techSize:clean(s.techSize),...(s.wbSize?{wbSize:clean(s.wbSize)}:{}),price:Number(s.price),skus:s.skus.map(clean)})),
     ...(card.documents?{documents:card.documents}:{}),...(typeof card.kizMarked==='boolean'?{kizMarked:card.kizMarked}:{})};
+}
+
+export function wbListingValidation(payload={},attributes=[]){
+ const variants=wbListingVariants(payload),errors=[],vendors=new Set(),barcodes=new Set();
+ if(!variants.length||variants.length>30)errors.push('商品变体：请保留 1–30 行变体。');
+ if(payload.strategy&&!['grouped','independent'].includes(payload.strategy))errors.push('变体策略：请选择合并或独立商品。');
+ for(const [index,row] of variants.entries()){
+  const prefix=variants.length>1?`变体 ${index+1}：`:'';
+  errors.push(...validateOne(wbVariantPayload(payload,row),attributes).errors.map(e=>prefix+e));
+  const vendor=clean(row.card?.vendorCode);if(vendors.has(vendor))errors.push(prefix+'商家货号重复，请重新生成。');vendors.add(vendor);
+  for(const size of row.card?.sizes||[])for(const code of size.skus||[]){if(barcodes.has(clean(code)))errors.push(prefix+'条码与其他规格或变体重复，请核对。');barcodes.add(clean(code));}
+  if(index>0&&payload.strategy!=='independent'){
+   if(clean(row.card?.brand)!==clean(variants[0].card?.brand))errors.push(prefix+'合并商品品牌必须相同，请使用同首行或选择独立商品。');
+   for(const attribute of attributes.filter(a=>a.isVariable!==true&&!a.existNamedField&&Number(a.charcType)!==0)){
+    const value=r=>{const v=r.card?.characteristics?.find(c=>Number(c.id)===Number(attribute.charcID))?.value;return JSON.stringify(Array.isArray(v)?[...v].sort():v);};
+    if(value(row)!==value(variants[0]))errors.push(prefix+`${attribute.name} 不允许作为变体差异，请在共用属性中统一填写。`);
+   }
+  }
+ }
+ return {ok:!errors.length,errors};
 }

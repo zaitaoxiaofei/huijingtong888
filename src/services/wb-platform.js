@@ -448,7 +448,7 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
   }
   const catalog=createWbCategoryCatalog({query,request,account});
   async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
-  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...createWbListingWorkflow({query,request,account}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...createWbListingWorkflow({query,request,account,transaction,categoryOptions:catalog.categoryOptions}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 

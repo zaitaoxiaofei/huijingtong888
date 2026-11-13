@@ -17,6 +17,16 @@ test('WB templates and CNY draft review preserve tenant isolation and never publ
   const saved=await service.saveListingDraft(2,{shop_id:a.id,payload});
   await t.test('review draft retains 258 CNY without manufacturing a barcode or applying Ozon prices',async()=>{const row=(await service.listingDrafts(2,{shop_id:a.id})).rows[0];assert.equal(row.payload.card.sizes[0].price,258);assert.equal(row.payload.currency,'CNY');assert.equal(row.payload.video_url,'https://example.test/review.mp4');assert.equal(row.status,'draft');assert.equal(row.payload.template_revision,1);assert.deepEqual(row.payload.card.sizes[0].skus,[]);const result=await service.validateListingDraft(2,{shop_id:a.id,draft_id:saved.draft_id});assert.equal(result.review_only,true);assert.equal(result.ok,false);assert.ok(result.errors.some(e=>e.includes('条码')));});
   await t.test('foreign shops, stale writes, duplicate vendor and foreign templates fail closed',async()=>{await assert.rejects(service.saveListingDraft(3,{shop_id:b.id,payload}),e=>e.statusCode===404);await assert.rejects(service.saveListingDraft(2,{shop_id:a.id,payload,draft_id:saved.draft_id,revision:99}),e=>e.statusCode===409);await assert.rejects(service.saveListingDraft(2,{shop_id:a.id,payload}),e=>e.statusCode===409);await assert.rejects(service.saveListingDraft(2,{shop_id:a.id,payload:{...payload,currency:'RUB'}}),e=>e.statusCode===400);});
+  await t.test('multi-variant draft round-trip preserves independent images, video, price and checks secondary-row collisions',async()=>{
+   const first=structuredClone(payload);first.card.vendorCode='MULTI-A';
+   const second=structuredClone(first);second.card.vendorCode='MULTI-B';second.images=['https://example.test/blue.png'];second.video_url='https://example.test/blue.mp4';second.card.sizes[0].price=299;
+   const multi={...first,strategy:'grouped',variants:[{card:first.card,images:first.images,video_url:first.video_url},{card:second.card,images:second.images,video_url:second.video_url}]};
+   const result=await service.saveListingDraft(2,{shop_id:a.id,payload:multi});const saved=(await service.listingDrafts(2,{shop_id:a.id})).rows.find(r=>Number(r.id)===Number(result.draft_id));
+   assert.equal(saved.payload.variants.length,2);assert.equal(saved.payload.variants[1].card.sizes[0].price,299);assert.deepEqual(saved.payload.variants[1].images,second.images);assert.equal(saved.payload.variants[1].video_url,second.video_url);
+   await assert.rejects(service.saveListingDraft(2,{shop_id:a.id,payload:second}),e=>e.statusCode===409&&e.message.includes('MULTI-B'));
+   const duplicate=structuredClone(multi);duplicate.variants[1].card.vendorCode='MULTI-A';await assert.rejects(service.saveListingDraft(2,{shop_id:a.id,payload:duplicate}),e=>e.statusCode===400);
+   const changed=await service.saveListingDraft(2,{shop_id:a.id,payload:multi,draft_id:result.draft_id,revision:1});assert.equal(changed.revision,2);
+  });
   assert.ok(calls.every(c=>c.method==='GET'));assert.ok(!calls.some(c=>/upload|media|barcodes|stocks|supplies/.test(c.path)));
  }finally{await f.cleanup();}
 });

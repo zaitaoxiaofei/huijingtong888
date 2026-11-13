@@ -67,3 +67,8 @@ test('WB routes take tenant exclusively from a freshly authorized session',async
   await routes['POST /api/wb/products/sync']({_session:{tenant:{id:999}}});
   assert.equal(calls[0][0],2);assert.equal(calls[0][1].tenant_id,3);
 });
+
+test('WB official option directory has an operations read gate and no write alias',()=>{
+ assert.equal(wbRoutePermission(['api','wb','catalog','options'],'GET'),'operations');
+ assert.equal(wbRoutePermission(['api','wb','catalog','options'],'POST'),null);
+});
