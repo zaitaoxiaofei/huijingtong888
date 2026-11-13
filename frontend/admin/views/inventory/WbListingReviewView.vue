@@ -1,4 +1,6 @@
 <script setup>
+import {useRoute} from 'vue-router';
+const route=useRoute();
 import MarketplaceBadge from "../../components/MarketplaceBadge.vue";
 import WbCardLimits from "../../components/listing/WbCardLimits.vue";
 import {onMounted,onBeforeUnmount,ref} from 'vue';
@@ -24,7 +26,7 @@ async function choose(category,refresh=false,restored=null){
 }
 async function openDraft(row){await choose({subjectID:row.payload.subject_id},false,row);drawer.value=false;}
 async function newProduct(){if(editor.value){try{await ElMessageBox.confirm('创建另一款商品前，请确认当前修改已保存。','新建商品');}catch{return;}}context.value=null;generation.value++;}
-async function bootstrap(){const scope=currentApiCacheScope();try{const s=await apiClient.get('/api/wb/shops',{noCache:true});if(scope!==currentApiCacheScope())return;shops.value=s.filter(s=>s.status==='active');await loadDrafts();}catch(e){ElMessage.error(e.message);}}
+async function bootstrap(){const scope=currentApiCacheScope();try{const s=await apiClient.get('/api/wb/shops',{noCache:true});if(scope!==currentApiCacheScope())return;shops.value=s.filter(s=>s.status==='active');await loadDrafts();if(route.query.wbDraftId){const row=drafts.value.find(d=>Number(d.id)===Number(route.query.wbDraftId));if(!row)throw Error('WB 草稿不存在或不属于当前企业，请刷新草稿箱。');await openDraft(row);}}catch(e){ElMessage.error(e.message);}}
 function reset(){categorySequence++;catalogGeneration.value++;schema.value=null;context.value=null;drafts.value=[];shops.value=[];drawer.value=false;bootstrap();}
 onMounted(()=>{bootstrap();window.addEventListener('erp:auth-scope-changed',reset);});onBeforeUnmount(()=>{categorySequence++;window.removeEventListener('erp:auth-scope-changed',reset);});
 </script>

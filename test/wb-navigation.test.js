@@ -8,7 +8,7 @@ import { WB_REMOTE_WRITES_ENABLED, WB_REMOTE_WRITE_ACTIONS } from '../src/shared
 test('WB routes resolve under the existing desktop layout, while Ozon routes retain their names',()=>{
   const source=readFileSync(new URL('../frontend/admin/router/index.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replaceAll('export const ','var ').replaceAll('export function ','function ');
   const AdminLayout={name:'AdminLayout'},MobileLayout={name:'MobileLayout'};
-  const context=vm.createContext({createRouter,createWebHashHistory:createMemoryHistory,AdminLayout,MobileLayout,LoginView:{name:'LoginView'}});
+  const context=vm.createContext({productPlatformModule:(ozon,wb,module)=>({name:module,ozon,wb}),createRouter,createWebHashHistory:createMemoryHistory,AdminLayout,MobileLayout,LoginView:{name:'LoginView'}});
   vm.runInContext(source,context);
   for(const [path,name]of [['/wb/online-products','wb-online-products'],['/wb/listing','wb-listing'],['/orders','orders'],['/online-products','online-products'],['/ozon-actions','ozon-actions']]){
     const route=context.router.resolve(path);assert.equal(route.name,name);assert.equal(route.matched[0].components.default,AdminLayout);
