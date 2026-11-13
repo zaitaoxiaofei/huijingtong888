@@ -1,4 +1,4 @@
-import {wbListingPrice} from './wb-listing-prices.js';
+import {wbNativeSize} from './wb-native-fields.js';
 import {wbListingVariants,wbVariantPayload} from './wb-listing-variants.js';
 const clean = value => String(value ?? '').trim();
 function validateOne(payload = {}, attributes = []) {
@@ -14,8 +14,6 @@ function validateOne(payload = {}, attributes = []) {
   const sizes = card.sizes || [], barcodes = new Set();
   if (!sizes.length || sizes.length > 30) errors.push('规格：请填写 1–30 个规格。');
   for (const [index,size] of sizes.entries()) {
-    if(size.old_price!==undefined&&size.old_price!==null&&size.old_price!==''){try{if(!Number.isSafeInteger(Number(size.old_price))||Number(size.old_price)<=0)throw Error('划线价须为大于零的整数。');const computed=wbListingPrice(Number(size.price),1,Number(size.old_price)/Number(size.price));if(!computed.exact)errors.push(`规格 ${index+1}：WB 使用整数百分比折扣，当前折扣后为 ${computed.effective_price}，请调整划线价。`);}catch(e){errors.push(`规格 ${index+1}：${e.message}`);}}
-    if (!clean(size.techSize)) errors.push(`规格 ${index+1}：请填写规格名称；无尺码商品填写 0。`);
     if (!Number.isInteger(Number(size.price)) || Number(size.price) <= 0) errors.push(`规格 ${index+1}：请填写大于零的整数售价（店铺币种）。`);
     if (!Array.isArray(size.skus) || !size.skus.length) errors.push(`规格 ${index+1}：请填写条码，或点击生成条码。`);
     for (const sku of size.skus || []) { if (!/^\d{8,30}$/.test(clean(sku)) || barcodes.has(clean(sku))) errors.push(`规格 ${index+1}：条码应为 8–30 位数字，且不能重复。`); barcodes.add(clean(sku)); }
@@ -41,7 +39,7 @@ export function wbListingCard(payload) {
   const card=payload.card;
   return {vendorCode:clean(card.vendorCode),title:clean(card.title),brand:clean(card.brand),description:clean(card.description),
     dimensions:Object.fromEntries(['length','width','height','weightBrutto'].map(k=>[k,Number(card.dimensions[k])])),
-    characteristics:card.characteristics||[],sizes:card.sizes.map(s=>({...(s.chrtID?{chrtID:Number(s.chrtID)}:{}),techSize:clean(s.techSize),...(s.wbSize?{wbSize:clean(s.wbSize)}:{}),price:Number(s.price),skus:s.skus.map(clean)})),
+    characteristics:card.characteristics||[],sizes:card.sizes.map(s=>({...(s.chrtID?{chrtID:Number(s.chrtID)}:{}),...wbNativeSize({techSize:s.techSize,wbSize:s.wbSize}),price:Number(s.price),skus:s.skus.map(clean)})),
     ...(card.documents?{documents:card.documents}:{}),...(typeof card.kizMarked==='boolean'?{kizMarked:card.kizMarked}:{})};
 }
 
