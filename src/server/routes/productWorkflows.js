@@ -9,7 +9,7 @@ export function createProductWorkflowRoutes({readJson,services,store=productWork
       ?store.get(kind,String(req.query.id),req._session):store.list(kind,req._session,req.query||{});
     routes[`POST /api/product-workflows/${collection}`]=async req=>store.save(kind,await readJson(req),req._session);
   }
-  routes['POST /api/product-workflows/archive']=async req=>{const body=await readJson(req);if(body.kind==='template')return store.archiveTemplate(body,req._session);if(body.kind==='run')return productWorkflowAction({...body,action:'archive'},req._session);throw Object.assign(new Error('请选择流程或生产记录'),{status:400});};
+  routes['POST /api/product-workflows/archive']=async req=>{const body=await readJson(req);if(body.kind==='template')return store.archiveTemplate(body,req._session);if(['material','key_model'].includes(body.kind))return store.deleteMaterial(body.kind,body,req._session);if(body.kind==='run')return productWorkflowAction({...body,action:'archive'},req._session);throw Object.assign(new Error('请选择流程或生产记录'),{status:400});};
   routes['GET /api/product-workflows/key-models']=req=>req.query?.id?store.get('key_model',String(req.query.id),req._session):store.list('key_model',req._session,req.query||{});
   routes['POST /api/product-workflows/key-models']=async req=>store.save('key_model',await readJson(req),req._session);
   routes['GET /api/product-workflows/facts-history']=req=>store.factsHistory(req._session);
