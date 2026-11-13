@@ -1109,6 +1109,36 @@ onBeforeUnmount(() => {
           <div>
             <h1>经营总览</h1>
           </div>
+        <div class="dashboard-auxiliary" aria-label="辅助工具">
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown ai-usage-breakdown">
+                <h4>今日人员 AI 生图消耗</h4>
+                <div v-for="row in aiUsage.people || []" :key="`ai-person-${row.person_id || row.person_name}`">
+                  <span>{{ row.person_name }} · {{ row.request_count }} 次调用 / {{ row.generated_count }} 张成功 / {{ row.task_count }} 个任务</span>
+                  <strong>{{ aiMoney(row.allocated_cost) }}</strong>
+                </div>
+                <div v-if="!(aiUsage.people || []).length"><span>今日暂无成功生图记录</span><strong>—</strong></div>
+                <small>{{ aiUsage.cost_source || "ERP 本地调用次数 × 0.038 RMB" }}；成功和失败均计费</small>
+                <small>数量口径：{{ aiUsage.count_basis || '调用流水' }}；日期按北京时间 00:00–24:00</small>
+                <small v-if="!aiUsage.available && (aiUsage.errors || []).length" class="ai-usage-error">费用查询失败：{{ aiUsage.errors[0] }}</small>
+              </div>
+            </template>
+            <article class="primary-metric ai-usage-card" @click="open('/settings/ai')">
+              <div class="metric-label"><Sparkles :size="16" />AI 消耗</div>
+              <strong>{{ aiMoney(aiUsage.cost) }}</strong>
+              <div class="metric-subline">
+                <span>当前余额</span>
+                <div class="metric-subline-value"><b>{{ aiMoney(aiUsage.available ? aiUsage.balance : null) }}</b></div>
+              </div>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ metricNumber(aiUsage.request_count, " 次调用") }}</span>
+                <em>{{ metricNumber((aiUsage.people || []).length, " 人") }}</em>
+              </div>
+            </article>
+          </el-tooltip>
+          <DailyExchangeRateCard />
+        </div>
           <div class="dashboard-date-control" aria-label="经营日期选择">
             <span class="dashboard-date-control__label"><CalendarDays :size="14" />数据日期</span>
             <el-button class="dashboard-date-control__arrow" text aria-label="前一天" @click="shiftDashboardDate(-1)">
@@ -1587,36 +1617,7 @@ onBeforeUnmount(() => {
         </div>
         </div>
 
-        <div class="dashboard-auxiliary" aria-label="辅助工具">
-          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
-            <template #content>
-              <div class="shop-breakdown ai-usage-breakdown">
-                <h4>今日人员 AI 生图消耗</h4>
-                <div v-for="row in aiUsage.people || []" :key="`ai-person-${row.person_id || row.person_name}`">
-                  <span>{{ row.person_name }} · {{ row.request_count }} 次调用 / {{ row.generated_count }} 张成功 / {{ row.task_count }} 个任务</span>
-                  <strong>{{ aiMoney(row.allocated_cost) }}</strong>
-                </div>
-                <div v-if="!(aiUsage.people || []).length"><span>今日暂无成功生图记录</span><strong>—</strong></div>
-                <small>{{ aiUsage.cost_source || "ERP 本地调用次数 × 0.038 RMB" }}；成功和失败均计费</small>
-                <small>数量口径：{{ aiUsage.count_basis || '调用流水' }}；日期按北京时间 00:00–24:00</small>
-                <small v-if="!aiUsage.available && (aiUsage.errors || []).length" class="ai-usage-error">费用查询失败：{{ aiUsage.errors[0] }}</small>
-              </div>
-            </template>
-            <article class="primary-metric ai-usage-card" @click="open('/settings/ai')">
-              <div class="metric-label"><Sparkles :size="16" />AI 消耗</div>
-              <strong>{{ aiMoney(aiUsage.cost) }}</strong>
-              <div class="metric-subline">
-                <span>当前余额</span>
-                <div class="metric-subline-value"><b>{{ aiMoney(aiUsage.available ? aiUsage.balance : null) }}</b></div>
-              </div>
-              <div class="metric-footer">
-                <span class="delta is-flat">{{ metricNumber(aiUsage.request_count, " 次调用") }}</span>
-                <em>{{ metricNumber((aiUsage.people || []).length, " 人") }}</em>
-              </div>
-            </article>
-          </el-tooltip>
-          <DailyExchangeRateCard />
-        </div>
+
 
       </div>
     </div>
@@ -2326,6 +2327,7 @@ button {
 }
 
 .today-core-grid .roi-card .metric-subline {
+  justify-content: flex-start;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
@@ -3725,7 +3727,8 @@ button {
 .commerce-dashboard .business-reminder{margin:0;padding:8px 12px;font-size:12px;border-radius:7px}
 .commerce-dashboard .overview-panel{padding:16px;border-radius:10px;box-shadow:none}
 .commerce-dashboard .dashboard-overview-grid{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:14px;margin:0;align-items:start}
-.dashboard-auxiliary{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;padding:4px 0}
+.dashboard-auxiliary{display:flex;align-items:center;justify-content:flex-end;gap:4px;flex-wrap:wrap;padding:0;min-width:0}
+.commerce-dashboard .operating-card__top .dashboard-auxiliary{flex:0 1 auto}
 .commerce-dashboard .dashboard-auxiliary .primary-metric{display:flex;flex-direction:row;align-items:center;gap:8px;padding:5px 10px;min-height:32px;height:auto;width:auto;border:0!important;border-radius:6px;box-shadow:none!important;background:transparent!important;transform:none}
 .commerce-dashboard .dashboard-auxiliary :deep(.primary-metric .metric-label){font-size:12px;white-space:nowrap}
 .commerce-dashboard .dashboard-auxiliary :deep(.primary-metric strong){font-size:13px!important;margin:0;line-height:1.5;white-space:nowrap}
@@ -3743,6 +3746,6 @@ button {
 .commerce-dashboard .hero-health-panel .health-grid{gap:8px;grid-template-columns:repeat(2,minmax(0,1fr))}
 @media(max-width:1350px){.dashboard-metric-zones{grid-template-columns:minmax(0,1fr) minmax(0,1.28fr)}.commerce-dashboard .dashboard-metric-zones :deep(.capacity-panel){grid-column:1/-1;min-height:250px;height:250px}.commerce-dashboard .dashboard-metric-zones :deep(.capacity-rows){grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:minmax(0,1fr);gap:18px}.commerce-dashboard .metric-group .primary-metric>strong{font-size:21px}.commerce-dashboard .month-group .primary-metric>strong{font-size:17px}.commerce-dashboard .dashboard-overview-grid{grid-template-columns:minmax(0,1fr) minmax(300px,1fr)}}
 @media(max-width:960px){.commerce-dashboard .dashboard-metric-zones :deep(.capacity-panel){height:320px}.commerce-dashboard .dashboard-metric-zones :deep(.capacity-rows){grid-template-columns:minmax(0,1fr);grid-template-rows:repeat(3,minmax(0,1fr));gap:0}.dashboard-metric-zones{grid-template-columns:minmax(0,1fr)}.commerce-dashboard .month-core-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.commerce-dashboard .dashboard-overview-grid{grid-template-columns:minmax(0,1fr)}.commerce-dashboard .hero-health-panel{height:auto;overflow:visible}.metric-group-heading>span{font-size:11px}}
-@media(max-width:640px){.commerce-dashboard{padding:12px}.commerce-dashboard .operating-card{padding:0;gap:12px}.commerce-dashboard .operating-card__top{gap:8px}.commerce-dashboard .operating-card__top>div:first-child{flex-basis:calc(100% - 90px)}.commerce-dashboard .dashboard-date-control{order:3;flex-basis:100%}.dashboard-metric-zones{gap:12px}.metric-group{padding:12px}.metric-group-heading{margin-bottom:4px}.metric-group-heading h2{font-size:15px}.commerce-dashboard .today-core-grid,.commerce-dashboard .month-core-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 8px}.commerce-dashboard .metric-group .primary-metric{padding:10px 6px;min-height:80px}.commerce-dashboard .month-group .primary-metric{min-height:65px}.commerce-dashboard .metric-group .primary-metric>strong{font-size:21px}.commerce-dashboard .month-group .primary-metric>strong{font-size:19px}.commerce-dashboard .overview-panel{padding:12px}.commerce-dashboard .dashboard-overview-grid{gap:12px}.dashboard-auxiliary{justify-content:flex-start;gap:4px}.commerce-dashboard .hero-health-panel .health-grid{grid-template-columns:minmax(0,1fr)}.commerce-dashboard .metric-group .primary-metric .metric-label{font-size:12px}.commerce-dashboard .dashboard-date-picker{width:100%!important;min-width:0}.commerce-dashboard .today-core-grid.is-staff .primary-metric:last-child,.commerce-dashboard .month-core-grid.is-staff .primary-metric:last-child{grid-column:span 2}}
+@media(max-width:640px){.commerce-dashboard{padding:12px}.commerce-dashboard .operating-card{padding:0;gap:12px}.commerce-dashboard .operating-card__top{gap:8px}.commerce-dashboard .operating-card__top>div:first-child{flex-basis:calc(100% - 90px)}.commerce-dashboard .dashboard-date-control{order:3;flex-basis:100%}.dashboard-metric-zones{gap:12px}.metric-group{padding:12px}.metric-group-heading{margin-bottom:4px}.metric-group-heading h2{font-size:15px}.commerce-dashboard .today-core-grid,.commerce-dashboard .month-core-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 8px}.commerce-dashboard .metric-group .primary-metric{padding:10px 6px;min-height:80px}.commerce-dashboard .month-group .primary-metric{min-height:65px}.commerce-dashboard .metric-group .primary-metric>strong{font-size:21px}.commerce-dashboard .month-group .primary-metric>strong{font-size:19px}.commerce-dashboard .overview-panel{padding:12px}.commerce-dashboard .dashboard-overview-grid{gap:12px}.dashboard-auxiliary{justify-content:flex-start;gap:4px}.commerce-dashboard .operating-card__top .dashboard-auxiliary{order:4;flex-basis:100%}.commerce-dashboard .dashboard-auxiliary .primary-metric{padding:5px 6px;min-height:36px}.commerce-dashboard .hero-health-panel .health-grid{grid-template-columns:minmax(0,1fr)}.commerce-dashboard .metric-group .primary-metric .metric-label{font-size:12px}.commerce-dashboard .dashboard-date-picker{width:100%!important;min-width:0}.commerce-dashboard .today-core-grid.is-staff .primary-metric:last-child,.commerce-dashboard .month-core-grid.is-staff .primary-metric:last-child{grid-column:span 2}}
 
 </style>
