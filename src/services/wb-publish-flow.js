@@ -1,3 +1,4 @@
+import {findWbCard} from './wb-find-card.js';
 import {inspectWbPublishMedia} from './wb-publish-media.js';
 import {createHash, randomUUID} from 'node:crypto';
 import {wbListingVariants, wbVariantPayload} from '../shared/wb-listing-variants.js';
@@ -70,7 +71,7 @@ export function createWbPublishFlow({query, transaction, request, account, listi
   const payload=parse(fresh.payload_json),state=parse(fresh.state_json),variants=wbListingVariants(payload);let status='processing',message='等待 WB 处理';
   const persist=async()=>{const args=[status,JSON.stringify(state),message.slice(0,255),job.id,a.tenant_id,lease];const sql='UPDATE wb_publish_jobs SET status=?,state_json=?,message=?,next_run_at=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 15 SECOND) WHERE id=? AND tenant_id=? AND lease_token=?';if(status==='failed'){await transaction(async c=>{const [r]=await c.execute(sql,args);if(!r.affectedRows)throw fail('发布任务锁已失效。');await c.execute("UPDATE wb_listing_drafts SET status='draft',revision=revision+1 WHERE id=? AND tenant_id=? AND revision=? AND status='publishing'",[job.draft_id,a.tenant_id,job.draft_revision]);});}else{const r=await query(sql,args);if(!r.affectedRows)throw fail('发布任务锁已失效，操作已停止。');}};
   const waiting=(item,text)=>{item.waitSince??=now();message=text;if(now()-item.waitSince>45*60*1000){status='needs_review';message=text+'；等待时间较长，请核对后继续。';}};
-  const findCard=async code=>{const r=await request(a,'content','/content/v2/get/cards/list',{method:'POST',query:{locale:'zh'},body:{settings:{cursor:{limit:100},filter:{textSearch:code,withPhoto:-1}}}});if(!Array.isArray(r.cards))throw fail('WB 未返回有效商品卡列表，请稍后核对。',502);const found=r.cards.filter(card=>card.vendorCode===code);if(found.length>1)throw fail('WB 返回多个相同货号商品，请人工核对。');return found[0]||null;};
+  const findCard=(code,nmId)=>findWbCard(request,a,code,{nmId});
   const cacheCard=async card=>{await query('INSERT INTO wb_product_cards (tenant_id,shop_id,nm_id,vendor_code,title,raw_json,synced_at) VALUES (?,?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE title=VALUES(title),raw_json=VALUES(raw_json),synced_at=VALUES(synced_at)',[a.tenant_id,a.shop_id,card.nmID,card.vendorCode,card.title||'',JSON.stringify(card)]);};
   const readPrice=async nm=>{const r=await request(a,'prices','/api/v2/list/goods/filter',{query:{limit:100,offset:0,filterNmID:nm}});if(!Array.isArray(r.data?.listGoods))throw fail('WB 价格返回不完整。',502);return r.data.listGoods.find(item=>Number(item.nmID)===Number(nm));};
   const taskDone=async (task,item)=>{if(!task)return false;const r=await request(a,'prices','/api/v2/history/tasks',{query:{uploadID:task}});const value=Number(r.data?.status);if([4,5,6].includes(value)){status='needs_review';const details=await request(a,'prices','/api/v2/history/goods/task',{query:{uploadID:task,limit:100,offset:0}});item.price_errors=(details.data?.historyGoods||[]).filter(row=>Number(row.nmID)===Number(item.nm_id)).map(row=>({status:row.status,errors:row.errors||row.errorText||''}));message='WB 价格任务未全部成功，请在详情核对平台错误后重试。';return false;}return value===3;};
@@ -88,7 +89,7 @@ export function createWbPublishFlow({query, transaction, request, account, listi
    }
    const index=state.items.findIndex(item=>item.phase!=='done');
    if(index<0){status='completed';message='商品卡、媒体和价格均已确认；未推送库存，是否可售请核对 WB 后台。';await transaction(async c=>{const [r]=await c.execute('UPDATE wb_publish_jobs SET status=?,state_json=?,message=? WHERE id=? AND tenant_id=? AND lease_token=?',[status,JSON.stringify(state),message,job.id,a.tenant_id,lease]);if(!r.affectedRows)throw fail('发布任务锁已失效。');const [draft]=await c.execute("UPDATE wb_listing_drafts SET status='published' WHERE id=? AND tenant_id=? AND revision=? AND status='publishing'",[job.draft_id,a.tenant_id,job.draft_revision]);if(!draft.affectedRows)throw fail('草稿发布状态已变化，请人工核对。');});return {status};}
-   const item=state.items[index],variant=variants[index],card=await findCard(item.vendor_code);
+   const item=state.items[index],variant=variants[index],card=await findCard(item.vendor_code,item.nm_id);
    if(!card){
     const r=await request(a,'content','/content/v2/cards/error/list',{method:'POST',query:{locale:'zh'},body:{cursor:{limit:100},order:{ascending:false}}});
     const errors=(r.data?.items||[]).flatMap(batch=>batch.errors?.[item.vendor_code]||[]);
