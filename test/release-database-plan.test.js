@@ -166,3 +166,5 @@ test('indexed procurement facts are planned even when the existing order search 
   assert.equal(migrationNeedsApply('migrate-order-search-indexes.mjs', { ...report, procurement_facts: { exists: true, ready: true, compatible: true } }), false);
   assert.throws(() => migrationNeedsApply('migrate-order-search-indexes.mjs', { ...report, procurement_facts: { exists: true, ready: true, compatible: false } }), /incompatible/);
 });
+
+test('WB lifecycle operations are an explicitly allowed additive table and unknown tables still fail closed',()=>{const report={ok:true,mode:'dry-run',changes_database:false,ready:false,missing_tables:['wb_product_operations'],problems:[]};assert.equal(migrationNeedsApply('migrate-wb-listing-catalog.mjs',report),true);assert.throws(()=>migrationNeedsApply('migrate-wb-listing-catalog.mjs',{...report,missing_tables:['unreviewed_table']}),/incompatible WB/);assert.throws(()=>migrationNeedsApply('migrate-wb-listing-catalog.mjs',{...report,problems:['incompatible index']}),/incompatible WB/);});
