@@ -1,3 +1,5 @@
+import {createWbPublishFlow} from './wb-publish-flow.js';
+import {WB_LISTING_PUBLISH_ENABLED} from '../shared/wb-capabilities.js';
 import { readWbCardLimits } from './wb-card-limits.js';
 import { createWbCategoryCatalog } from "./wb-category-catalog.js";
 import { createWbListingWorkflow } from "./wb-listing-workflow.js";
@@ -19,7 +21,7 @@ const positiveId = value => {
 };
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
 
-export function createWbPlatform({ query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability, loadSourceDraft }) {
+export function createWbPlatform({ actorId, query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability, loadSourceDraft }) {
   async function account(tenantId, shopId, allowUnchecked = false) {
     const rows = await query(`SELECT c.*, s.name FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id
       WHERE c.tenant_id=? AND s.tenant_id=? AND c.shop_id=? AND s.platform='wb' AND s.status='active'`,
@@ -449,7 +451,9 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
   }
   const catalog=createWbCategoryCatalog({query,request,account});
   async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
-  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...createWbListingWorkflow({query,request,account,transaction,categoryOptions:catalog.categoryOptions}), account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  const listing=createWbListingWorkflow({query,request,account,transaction,categoryOptions:catalog.categoryOptions});
+  const publishing=createWbPublishFlow({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
+  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...listing, ...publishing, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
@@ -465,7 +469,7 @@ export async function wbPlatform(session, permission = 'operations', signal) {
     return current;
   };
   const runQuery = async(sql,params) => { if(/^\s*(INSERT|UPDATE|DELETE)/i.test(sql))await authorize(); return mysqlQuery(sql,params); };
-  const platform=createWbPlatform({query:runQuery,transaction:async work=>{await authorize();return withMysqlTransaction(work);},
+  const platform=createWbPlatform({actorId:session.personId,query:runQuery,transaction:async work=>{await authorize();return withMysqlTransaction(work);},
     request:async(a,service,path,options)=>{
       await authorize();
       const current=await mysqlQuery(`SELECT c.* FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id
@@ -473,7 +477,9 @@ export async function wbPlatform(session, permission = 'operations', signal) {
       if(!current[0])throw fail('WB 店铺已停用或授权已撤销，操作已停止。',403);
       if(current[0].environment==='production'&&path!=='/ping'&&path!=='/api/v1/seller-info'
         &&(!current[0].checked_at||current[0].seller_id!==a.seller_id))throw fail('WB 授权已变更，操作已停止；请先检查店铺授权再继续。',409);
-      return wbRequest(current[0],service,path,{...options,signal:options?.signal||signal});
+      const publishingWrite=options?.method==='POST'&&['/content/v2/cards/upload','/content/v3/media/save','/content/v2/barcodes','/api/v2/upload/task','/api/v2/upload/task/size'].includes(path);
+      const beforeRequest=publishingWrite?async()=>{await authorize();const [latest]=await mysqlQuery("SELECT c.token,c.environment,c.seller_id,c.checked_at FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.shop_id=? AND s.status='active'",[session.tenant.id,a.shop_id]);if(!latest||latest.token!==current[0].token||latest.environment!==current[0].environment||latest.seller_id!==current[0].seller_id||(latest.environment==='production'&&!latest.checked_at))throw fail('WB 授权在等待期间已变化，未发送写入请求，请核对后继续。',409);}:undefined;
+      return wbRequest(current[0],service,path,{...options,beforeRequest,signal:options?.signal||signal});
     },invalidate:invalidateWbOrderCachesMysql,
     reconcileInventory:async(...args)=>{await authorize();return reconcileWbOrderInventoryMysql(...args);},loadAvailability:productInventoryAvailabilityMysql,loadSourceDraft:async id=>{
       const current=await authorize(),key=current.tenant.slug==='default'?'admin':String(current.tenant.id);

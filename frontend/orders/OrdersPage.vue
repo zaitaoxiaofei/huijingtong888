@@ -1611,6 +1611,7 @@ async function handleProductCompositionSaved() {
 
 async function handleInventoryProductEditorSaved({ mode, product } = {}) {
   const createdFromOrder = mode === "create" && Boolean(inventoryProductEditorCreateContext.value?.online_product_id);
+  orderDetailCache.clear();
   inventoryProductEditorVisible.value = false;
   inventoryProductEditorValue.value = null;
   inventoryProductEditorCreateContext.value = null;
@@ -1619,6 +1620,7 @@ async function handleInventoryProductEditorSaved({ mode, product } = {}) {
     loadInventoryProductOptions(),
     loadOrders({ forceRefresh: true, includeCounts: true })
   ]);
+  if (detailDialog.visible) await openDrawer(detailDialog.mode, detailDialog.orderId);
   if (compositionDialogVisible.value && mode === "create") {
     compositionDialogRefreshKey.value += 1;
   }
@@ -1919,7 +1921,7 @@ async function handleRecalculate(orderId) {
   try {
     const result = await recalculateOrderProfit(numericOrderId);
     orderDetailCache.delete(numericOrderId);
-    await loadOrders();
+    await loadOrders({ forceRefresh: true });
     if (detailDialog.visible && Number(detailDialog.orderId) === numericOrderId) {
       await openDrawer(detailDialog.mode, numericOrderId);
     }

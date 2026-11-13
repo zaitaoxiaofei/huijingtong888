@@ -41,5 +41,17 @@ export const WB_SCHEMA = [WB_CATALOG_CACHE_SCHEMA,
     status VARCHAR(32) NOT NULL, order_ids_json JSON NOT NULL, last_error VARCHAR(255) NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_wb_supply_operation (tenant_id, operation_key), UNIQUE KEY uk_wb_supply_shop (shop_id, supply_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+  `CREATE TABLE IF NOT EXISTS wb_publish_jobs (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id BIGINT UNSIGNED NOT NULL, shop_id BIGINT UNSIGNED NOT NULL,
+    draft_id BIGINT UNSIGNED NOT NULL, draft_revision INT NOT NULL, person_id BIGINT UNSIGNED NOT NULL,
+    environment VARCHAR(16) NOT NULL, seller_id VARCHAR(128) NOT NULL, review_hash CHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL, payload_json JSON NOT NULL, state_json JSON NOT NULL,
+    message VARCHAR(255) NOT NULL DEFAULT '', lease_token CHAR(36) NULL, lease_until DATETIME NULL,
+    next_run_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_wb_publish_revision (draft_id,draft_revision), KEY idx_wb_publish_tenant (tenant_id,shop_id),
+    KEY idx_wb_publish_queue (status,next_run_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`
 ];

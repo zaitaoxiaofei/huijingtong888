@@ -5,7 +5,7 @@ import { SCHEMA_MIGRATIONS, migrationNeedsApply } from "../scripts/lib/release-d
 const cases = [
   ["migrate-wb-listing-catalog.mjs",
     {ok:true,mode:"dry-run",changes_database:false,ready:true,missing_tables:[],problems:[]},
-    {ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["wb_catalog_cache"],problems:[]}],
+    {ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["wb_catalog_cache","wb_publish_jobs"],problems:[]}],
   ["migrate-sku-traffic-daily.mjs",
     {ok:true,mode:"dry-run",changes_database:false,ready:true,missing_tables:[],problems:[]},
     {ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["seller_sku_traffic_daily","seller_sku_traffic_days"],problems:[]}],

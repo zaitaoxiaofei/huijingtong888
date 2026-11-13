@@ -1,4 +1,6 @@
 <script setup>
+import ProductProfitRecalculationDialog from './ProductProfitRecalculationDialog.vue';
+import { productProfitParameterChanges } from '../../../../src/shared/product-profit-parameters.js';
 import { normalizeVehicleBrand, vehicleBrandAliases } from "../../../../src/shared/vehicle-brand.js";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, useId, watch } from "vue";
@@ -30,6 +32,7 @@ const props = defineProps({
   editProductId: { type: [Number, String], default: null },
   createEndpoint: { type: String, default: "/api/products" },
   createContext: { type: Object, default: () => ({}) },
+  promptProfitRecalculation: { type: Boolean, default: false },
   inventoryRequest: { type: Object, default: null }
 });
 
@@ -37,6 +40,7 @@ const emit = defineEmits(["update:visible", "saved", "existing-selected", "quick
 const authStore = useAuthStore();
 const router = useRouter();
 
+const profitRecalculationDialog = ref();
 const formRef = ref();
 const logisticsRuleSelect = ref();
 const imageUploadLoading = ref(false);
@@ -1619,6 +1623,10 @@ async function submitDialog(options = {}) {
       emit("update:visible", false);
       return;
     }
+    if (isInventoryTarget.value && isEditMode.value && !props.inventoryRequest && savedProduct?.id && hasPermission(authStore.user, "inventory.write")) {
+      const changes = productProfitParameterChanges(props.value || {}, savedProduct);
+      if (changes.length || props.promptProfitRecalculation) await profitRecalculationDialog.value.open(savedProduct, changes);
+    }
     if (options?.createDraft === true) {
       await createDraftForProduct(savedProduct || { id: editProductId });
       return;
@@ -2238,6 +2246,7 @@ function submitAndCreateDraft() {
       <el-button v-if="inventoryRequest?.action !== 'view'" type="primary" :loading="submitting" :disabled="submitting" @click="submitDialog">{{ saveButtonText }}</el-button>
     </template>
   </component>
+  <ProductProfitRecalculationDialog ref="profitRecalculationDialog"/>
 </template>
 
 <style scoped>

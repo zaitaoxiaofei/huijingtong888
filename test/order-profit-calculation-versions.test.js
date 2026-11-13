@@ -321,3 +321,16 @@ test("V1 accounting aggregates preserve normal and terminal amount semantics", (
   { terminalLoss: 50, actualProfit: 50, grossProfit: 55 });
   assert.equal(formula.estimatedProfitValue({ order: { status: "cancelled" }, item: { sale_price: 100, quantity: 1 }, product: {}, estimated: {}, returnLossEstimate: 3 }), -3);
 });
+
+test('current estimate pointer is loaded by its exact tenant and ID even outside the bounded history', async () => {
+  const current = { id: 5, revision_no: 5, formula_version: 'V4', layer: 'estimate', inputs_json: '{}', outputs_json: '{"estimated_profit":43.77}' };
+  const lookup = await readOrderProfitCalculationVersions({ query: async (sql, params) => {
+    if (sql.includes('FROM order_profit_calc_state')) return [{ tenant_key: '7', order_item_id: 8, order_id: 11,
+      formula_version: 'V4', current_estimate_revision_id: 5, revision_count: 30 }];
+    if (sql.includes('ORDER BY revision_no DESC')) return [{ id: 30, revision_no: 30, layer: 'actual', inputs_json: '{}', outputs_json: '{}' }];
+    if (sql.includes('ORDER BY revision_no LIMIT')) return [];
+    assert.match(sql, /AND id = \? AND layer = 'estimate'/); assert.deepEqual(params, ['7', 8, 5]); return [current];
+  } }, { tenantId: 7, orderId: 11, limitPerItem: 1 });
+  assert.equal(lookup.items[0].truncated, true);
+  assert.equal(lookup.items[0].current_estimate_revision.outputs.estimated_profit, 43.77);
+});

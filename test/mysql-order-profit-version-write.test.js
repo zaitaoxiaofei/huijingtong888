@@ -182,3 +182,17 @@ test("a caller-owned connection leaves deadlock retries to the outer transaction
     assert.equal(projections, 1);
   }
 });
+
+test('preview preconditions reject changed order amounts before projection or revision creation', async () => {
+  const db = memoryProjection(); let called = false;
+  await assert.rejects(withVersionedOrderProfitWrite(101, { connection: db.connection,
+    expectedProjection: { quantity: 2, sale_price: 100 } }, async () => { called = true; }), { code: 'ORDER_PROFIT_PREVIEW_STALE' });
+  assert.equal(called, false); assert.equal(db.revisions.length, 0);
+});
+
+test('an automatic sync holding old parameters cannot overwrite a newer manual estimate', async () => {
+  const db = memoryProjection(); let called = false;
+  await assert.rejects(withVersionedOrderProfitWrite(101, { connection: db.connection, legacy: false,
+    expectedEstimateRevisionId: 99 }, async () => { called = true; }), { code: 'ORDER_PROFIT_ESTIMATE_CHANGED' });
+  assert.equal(called, false); assert.equal(db.revisions.length, 0);
+});

@@ -62,7 +62,7 @@ export function migrationNeedsApply(filename, report) {
   switch (filename) {
     case "migrate-wb-listing-catalog.mjs": {
       const missing=list(report.missing_tables,"missing_tables"),problems=list(report.problems,"problems"),ready=boolean(report.ready,"ready");
-      if(report.ok!==true||problems.length||missing.some(name=>!["wb_catalog_cache","wb_listing_templates","wb_listing_drafts"].includes(name))||ready!==(missing.length===0))invalid("incompatible WB catalog schema");
+      if(report.ok!==true||problems.length||missing.some(name=>!["wb_catalog_cache","wb_listing_templates","wb_listing_drafts","wb_publish_jobs"].includes(name))||ready!==(missing.length===0))invalid("incompatible WB catalog schema");
       return !ready;
     }
     case "migrate-tenant-lifecycle.mjs": {

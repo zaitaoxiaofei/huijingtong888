@@ -1,3 +1,4 @@
+import {startWbPublishWorker} from './services/wb-publish-worker.js';
 import { createDashboardHandler } from './server/routes/dashboard.js';
 import { dispatchPrepare, dispatchLabels } from "./services/wb-order-dispatch.js";
 import { createWbRoutes } from "./server/routes/wb.js";
@@ -2479,12 +2480,15 @@ server.listen(config.port, config.host || undefined, () => {
     }
   })();
   if (!deploymentCandidate) setTimeout(recoverGenerationJobs, 3000);
+  if (!deploymentCandidate && config.scheduledJobsEnabled) void startWbPublishWorker().then(worker=>{wbPublishWorker=worker;}).catch(()=>console.warn('[wb-publish] worker startup failed'));
 });
 
+let wbPublishWorker;
 let gracefulShutdownStarted = false;
 function gracefulShutdown(signal) {
   if (gracefulShutdownStarted) return;
   gracefulShutdownStarted = true;
+  wbPublishWorker?.stop();
   runtimeReadiness.ready = false;
   console.log(`received ${signal}; draining HTTP connections`);
   const forceTimer = setTimeout(() => {

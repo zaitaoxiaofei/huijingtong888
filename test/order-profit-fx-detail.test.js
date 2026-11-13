@@ -52,44 +52,37 @@ test("legitimate zero actual profit and zero settled costs remain exact", () => 
   assert.equal(row(payload, "profit").estimated, 0);
 });
 
-test("the first nonpending estimate breakdown survives later estimates and current actual cost changes", () => {
-  const later = { ...firstRevision, revision_no: 3, outputs: { estimated_profit: 999,
-    estimated_breakdown: { ...baseline, purchase_cost_cny: 1, net_profit_cny: 999 } } };
-  const earliestReady = { ...firstRevision, revision_no: 2 };
-  const pending = { ...firstRevision, revision_no: 1, inputs: { estimate: { fxPending: true } } };
-  const payload = build([{ ...item, estimated_profit: 999, frozen_purchase_cost: 1, purchase_cost_cny: 1 }], state, finance,
-    { calculationVersions: { items: [{ order_item_id: item.id, revisions: [later, pending, earliestReady] }] } });
-  assert.equal(row(payload, "purchase").estimated, 40);
-  assert.equal(row(payload, "purchase").actual, 1);
-  assert.equal(row(payload, "profit").estimated, 50);
-  assert.equal(payload.estimated_cost_total_cny, 50);
-  assert.equal(payload.estimated_breakdown_ready, true);
-});
-
-test("missing first breakdown leaves estimate fees unknown rather than substituting actual or a later revision", () => {
-  const withoutBreakdown = { ...firstRevision, outputs: { estimated_profit: 50 } };
-  const later = { ...firstRevision, revision_no: 2 };
-  const payload = build([item], state, finance,
-    { calculationVersions: { items: [{ order_item_id: item.id, revisions: [later, withoutBreakdown] }] } });
-  assert.equal(payload.estimated_breakdown_ready, false);
-  assert.equal(payload.estimated_profit_cny, 50);
-  assert.equal(payload.estimated_cost_total_cny, null);
-  assert.equal(row(payload, "purchase").estimated, null);
-  assert.match(row(payload, "purchase").estimatedText, /未留存/);
-  assert.equal(row(payload, "purchase").diff, null);
-  assert.equal(row(payload, "purchase").actual, 40);
+test("current estimate replaces the first quote while actual costs remain independent", () => {
+  const later = { ...firstRevision, id: 3, revision_no: 3, outputs: { estimated_profit: 43.77,
+    estimated_breakdown: { ...baseline, international_shipping_cny: 12.06, net_profit_cny: 43.77 } } };
+  const old = { ...firstRevision, id: 2, revision_no: 2, outputs: { estimated_profit: 50.70,
+    estimated_breakdown: { ...baseline, international_shipping_cny: 5.04, net_profit_cny: 50.70 } } };
+  const payload = build([item], state, finance, { calculationVersions: { items: [{ order_item_id: item.id,
+    current_estimate_revision_id: 3, current_estimate_revision: later, first_estimate_revision: old, revisions: [later, old] }] } });
+  assert.equal(payload.estimated_profit_cny, 43.77);
+  assert.equal(row(payload, "international").estimated, 12.06);
+  assert.equal(row(payload, "international").actual, 5);
   assert.equal(payload.actual_profit_cny, 30);
 });
 
-test("truncated history cannot pretend its earliest retained estimate was the initial baseline", () => {
-  const truncatedRecord = { order_item_id: item.id, truncated: true, revisions: [{ ...firstRevision, revision_no: 10 }] };
-  const missing = build([item], state, finance, { calculationVersions: { items: [truncatedRecord] } });
-  assert.equal(missing.estimated_profit_cny, null);
-  assert.equal(row(missing, "profit").estimatedText, "未留存完整预估依据");
-  const present = build([item], state, finance,
-    { calculationVersions: { items: [{ ...truncatedRecord, first_estimate_revision: firstRevision }] } });
+test("missing current breakdown stays unknown rather than taking older or settled costs", () => {
+  const current = { ...firstRevision, id: 2, revision_no: 2, outputs: { estimated_profit: 0 } };
+  const payload = build([item], state, finance, { calculationVersions: { items: [{ order_item_id: item.id,
+    current_estimate_revision: current, revisions: [current, firstRevision] }] } });
+  assert.equal(payload.estimated_breakdown_ready, false);
+  assert.equal(payload.estimated_profit_cny, 0);
+  assert.equal(row(payload, "purchase").estimated, null);
+  assert.equal(row(payload, "purchase").actual, 40);
+});
+
+test("authoritative current pointer works outside truncated history and pending never falls back", () => {
+  const record = { order_item_id: item.id, truncated: true, first_estimate_revision: firstRevision, revisions: [] };
+  assert.equal(build([item], state, finance, { calculationVersions: { items: [record] } }).estimated_profit_cny, null);
+  const present = build([item], state, finance, { calculationVersions: { items: [{ ...record, current_estimate_revision: firstRevision }] } });
   assert.equal(present.estimated_breakdown_ready, true);
   assert.equal(row(present, "purchase").estimated, 40);
+  const pending = { ...firstRevision, inputs: { estimate: { fxPending: true } } };
+  assert.equal(build([item], state, finance, { calculationVersions: { items: [{ ...record, current_estimate_revision: pending }] } }).estimated_profit_cny, null);
 });
 
 test("an incomplete archived breakdown does not fill gaps from current settlement values", () => {
@@ -101,7 +94,7 @@ test("an incomplete archived breakdown does not fill gaps from current settlemen
   assert.equal(row(payload, "packaging").estimated, null);
   assert.equal(row(payload, "packaging").actual, 0);
   assert.equal(row(payload, "costTotal").estimated, 50);
-  assert.match(row(payload, "costTotal").note, /首次预估销售额减首次预估利润/);
+  assert.match(row(payload, "costTotal").note, /当前生效预估销售额减当前生效预估利润/);
 });
 
 test("V2 cache skips unknown required estimate totals while leaving live actual detail readable", async () => {

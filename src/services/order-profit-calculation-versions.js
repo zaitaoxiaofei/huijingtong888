@@ -190,7 +190,11 @@ export async function readOrderProfitCalculationVersions(deps, { tenantId, order
       WHERE tenant_key = ? AND order_item_id = ? AND layer = 'estimate' AND formula_version IN ('V2', 'V4')
         AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(inputs_json, '$.estimate.fxPending')), 'false') <> 'true'
       ORDER BY revision_no LIMIT 1`, [tenantKey, state.order_item_id])) : [];
-    items.push({ ...state, legacy_baseline: Boolean(state.legacy_baseline), history_count: Number(state.revision_count || 0),
+    const currentEstimate = history.find(row => Number(row.id) === Number(state.current_estimate_revision_id))
+      || (state.current_estimate_revision_id ? rows(await deps.query(`SELECT * FROM order_profit_calc_revisions
+        WHERE tenant_key = ? AND order_item_id = ? AND id = ? AND layer = 'estimate'`,
+      [tenantKey, state.order_item_id, state.current_estimate_revision_id]))[0] : null);
+    items.push({ ...state, current_estimate_revision: decode(currentEstimate), legacy_baseline: Boolean(state.legacy_baseline), history_count: Number(state.revision_count || 0),
       truncated: Number(state.revision_count || 0) > history.length,
       ...(usesDailyProfitFx(state.formula_version) ? { first_estimate_revision: decode(firstEstimate) } : {}),
       revisions: history.map(decode) });

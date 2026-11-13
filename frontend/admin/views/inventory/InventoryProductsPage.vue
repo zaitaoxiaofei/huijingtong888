@@ -1,4 +1,5 @@
 <script setup>
+import ProductProfitRecalculationDialog from "../../components/inventory/ProductProfitRecalculationDialog.vue";
 import { inventoryNumberTitle } from '../../utils/inventory-number.js';
 import {useInventoryRequestSummary} from '../../composables/useInventoryRequestSummary.js';
 import InventoryCompositionBadge from "../../components/inventory/InventoryCompositionBadge.vue";
@@ -33,6 +34,7 @@ import {
   percent
 } from "./inventory-utils.js";
 
+const profitRecalculationDialog = ref();
 const InventoryLabelPrintDialog = defineAsyncComponent(() => import("../../components/inventory/InventoryLabelPrintDialog.vue"));
 
 const INVENTORY_LIST_CACHE_TTL_MS = 30 * 1000;
@@ -1004,28 +1006,11 @@ async function handleQuickComponentExistingSelected(row) {
 }
 
 async function handleDialogSaved({ mode }) {
-  const editedProduct = dialogProduct.value;
   const returnTo = String(route.query.returnTo || "").trim();
   dialogVisible.value = false;
   dialogProduct.value = null;
   ElMessage.success(mode === "edit" ? "库存产品已更新" : "库存产品已创建");
   void loadPageData({ silent: true });
-  if (mode === "edit" && route.query.recalculateAfterSave === "1" && editedProduct?.id) {
-    try {
-      await ElMessageBox.confirm(
-        "库存资料已保存。是否立即重算该产品关联订单的预估利润？",
-        "继续处理利润差异",
-        {
-          type: "warning",
-          confirmButtonText: "立即重算",
-          cancelButtonText: "稍后处理"
-        }
-      );
-      await recalculateProfits(editedProduct);
-    } catch (error) {
-      if (error !== "cancel" && error !== "close" && error?.message !== "cancel") throw error;
-    }
-  }
   if (mode === "edit" && returnTo.startsWith("/") && !returnTo.startsWith("//")) {
     await router.replace(returnTo);
     return;
@@ -1220,23 +1205,9 @@ async function removeFromInventory(row) {
 }
 
 async function recalculateProfits(row) {
-  const productId = Number(row?.id || 0);
-  if (!productId) return;
-  productProfitRecalculatingId.value = productId;
-  productProfitRecalculatingMode.value = "estimated";
-  try {
-    const result = await apiClient.post(`/api/products/${productId}/recalculate-profits`, {
-      only_missing_purchase: route.query.source === "pending-settlement-costs" ? 1 : 0
-    });
-    const updated = Number(result?.updated || 0);
-    ElMessage.success(`该产品预估利润已重算：${updated} 行`);
-    await loadPageData();
-  } catch (error) {
-    ElMessage.error(error.message || "重算预估利润失败");
-  } finally {
-    productProfitRecalculatingId.value = 0;
-    productProfitRecalculatingMode.value = "";
-  }
+  if (!Number(row?.id)) return;
+  const result = await profitRecalculationDialog.value.open(row);
+  if (result?.updated) await loadPageData();
 }
 
 function isActualProfitDetailRow(row = {}) {
@@ -2373,6 +2344,7 @@ onActivated(() => {
       :suppliers="state.suppliers"
       :logistics-rules="state.logisticsRules"
       :value="dialogProduct"
+      :prompt-profit-recalculation="route.query.recalculateAfterSave === '1'"
       @saved="handleDialogSaved"
       @existing-selected="handleExistingProductSelected"
       @quick-create-component="openQuickComponentCreate"
@@ -2833,6 +2805,7 @@ onActivated(() => {
     </el-dialog>
 
   </div>
+  <ProductProfitRecalculationDialog ref="profitRecalculationDialog"/>
 </template>
 
 <style scoped>

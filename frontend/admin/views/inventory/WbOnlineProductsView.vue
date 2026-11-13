@@ -63,7 +63,7 @@ onBeforeUnmount(()=>window.removeEventListener('erp:auth-scope-changed',resetSco
   <div class="wb-products-page">
     <div class="page-heading"><h2><MarketplaceBadge platform="wb"/> WB 在线商品</h2><div><WbCardLimits :shops="shops" :shop-id="Number(shopId)||null"/><el-button :loading="busy" :disabled="!shopId" @click="sync">同步商品</el-button><el-button type="primary" :disabled="!shopId" @click="router.push('/wb/listing')">模板与商品草稿</el-button></div></div>
     <el-alert v-if="!shops.length" title="尚未配置 WB 店铺" description="请由企业管理员到“企业店铺 → 新增店铺”，选择 WB（中国主体），填写 API 授权并绑定卖家仓。这里会展示真实店铺数据。" type="info" :closable="false"/>
-    <el-alert v-if="!WB_REMOTE_WRITES_ENABLED" title="当前开放店铺授权和真实数据拉取；WB 上架、改价及发货操作将在店铺联调后开放。" type="info" :closable="false"/>
+    <el-alert v-if="!WB_REMOTE_WRITES_ENABLED" title="新商品发布请使用“商品上架”；本页可查看已同步商品和库存。" type="info" :closable="false"/>
     <el-alert v-if="priceNotice" :title="priceNotice" type="warning" :closable="false"/><el-alert v-if="notice" :title="notice" type="info" :closable="false"/>
     <div class="wb-filters"><el-select v-model="shopId" :disabled="busy" placeholder="选择 WB 店铺" @change="changeShop"><el-option v-for="shop in shops" :key="shop.id" :value="Number(shop.id)" :label="shop.name+(shop.environment==='sandbox'?'（沙箱）':'')"/></el-select><el-input v-model="search" placeholder="搜索商品名称、商家货号、WB 商品编号" clearable @input="page=1"/><el-button :disabled="!shopId||busy" @click="showErrors">查看发布错误</el-button></div>
     <el-table v-loading="loading" :data="paged" stripe border class="erp-data-table" row-key="id" empty-text="暂无已同步的 WB 商品">

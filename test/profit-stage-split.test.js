@@ -72,7 +72,7 @@ test("pre-fulfillment cancellations keep only actual parent acquiring fee", () =
 });
 
 test("estimated terminal losses are componentized once instead of double-counted as aftersale loss", () => {
-  const saveProfitItemSource = backend.match(/async function saveProfitItemMysql[\s\S]*?\r?\n}\r?\n\r?\nasync function syncOrderItemProfitFromBreakdownMysql/)?.[0] || "";
+  const saveProfitItemSource = backend.match(/async function estimateProfitBreakdownMysql[\s\S]*?\r?\n}\r?\n\r?\nasync function syncOrderItemProfitFromBreakdownMysql/)?.[0] || "";
   assert.match(saveProfitItemSource, /const terminalPolicy = terminalNoRevenue/);
   assert.match(saveProfitItemSource, /const returnLoss = terminalNoRevenue\s*\?\s*0/);
   assert.match(saveProfitItemSource, /const otherFee = terminalPolicy\?\.collecting \? rawCollectingFee : 0/);
@@ -133,7 +133,9 @@ function profitSaveFixture({ existing = null, packagingFee = 0.5 } = {}) {
   };
   const saveSource = backend.match(/async function saveProfitItemMysql[\s\S]*?\r?\n}/)?.[0];
   assert.ok(saveSource);
-  const save = runInNewContext(`(${saveSource})`, {
+  const helperSource = backend.match(/async function estimateProfitBreakdownMysql[\s\S]*?\r?\n}/)?.[0];
+  assert.ok(helperSource);
+  const save = runInNewContext(`${helperSource}; (${saveSource})`, {
     usesDailyProfitFx,
     getProfitFormula: (version) => { requestedVersions.push(version); return getProfitFormula(version); },
     profitCalculationDatabase: (passed) => { assert.equal(passed, connection); return db; },

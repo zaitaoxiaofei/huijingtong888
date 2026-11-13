@@ -9,12 +9,20 @@ const ACTUAL_FIELDS = {
   collecting: "other_fee_cny", service: "ozon_service_fee_cny", aftersale: "return_loss_cny", other: "advertising_cost_cny", profit: "net_profit_cny"
 };
 
-function firstEstimateRevision(record) {
+function currentEstimateRevision(record) {
   const eligible = revision => ["V2", "V4"].includes(revision?.formula_version) && revision.layer === "estimate"
     && !revision.legacy_baseline && !revision.inputs?.estimate?.fxPending;
-  if (record?.first_estimate_revision) return eligible(record.first_estimate_revision) ? record.first_estimate_revision : null;
+  // The authoritative pointer can sit outside the paged history. Never replace
+  // a pending/unknown current estimate with a valid but obsolete first quote.
+  if (record && Object.hasOwn(record, "current_estimate_revision")) {
+    return eligible(record.current_estimate_revision) ? record.current_estimate_revision : null;
+  }
+  if (record?.current_estimate_revision_id) {
+    const revision = record.revisions?.find(row => Number(row.id) === Number(record.current_estimate_revision_id));
+    return eligible(revision) ? revision : null;
+  }
   if (record?.truncated) return null;
-  return [...(record?.revisions || [])].filter(eligible).sort((a, b) => Number(a.revision_no) - Number(b.revision_no))[0] || null;
+  return [...(record?.revisions || [])].filter(eligible).sort((a, b) => Number(b.revision_no) - Number(a.revision_no))[0] || null;
 }
 
 export function orderProfitFxDetailFinalRate(order, state) {
@@ -31,11 +39,11 @@ export function orderProfitFxDetailFinalRate(order, state) {
 // never from reinterpreting legacy amount_cny columns or incomplete bill rows.
 export function buildOrderProfitFxDetailSnapshotPayload(order, items, finance, fxState, { financeErrorCode = null, calculationVersions = {} } = {}) {
   const base = buildOrderProfitDetailSnapshotPayload(order, [], []);
-  const firstRevisions = items.map(item => firstEstimateRevision(calculationVersions.items?.find(record => Number(record.order_item_id) === Number(item.id))));
-  const baselines = firstRevisions.map(revision => revision?.outputs?.estimated_breakdown || null);
+  const currentRevisions = items.map(item => currentEstimateRevision(calculationVersions.items?.find(record => Number(record.order_item_id) === Number(item.id))));
+  const baselines = currentRevisions.map(revision => revision?.outputs?.estimated_breakdown || null);
   const completeEstimate = baselines.length > 0 && baselines.every(baseline => baseline
     && Object.values(ACTUAL_FIELDS).every(field => amount(baseline[field]) !== null));
-  const originalProfits = firstRevisions.map(revision => amount(revision?.outputs?.estimated_profit) ?? amount(revision?.outputs?.estimated_breakdown?.net_profit_cny));
+  const originalProfits = currentRevisions.map(revision => amount(revision?.outputs?.estimated_profit) ?? amount(revision?.outputs?.estimated_breakdown?.net_profit_cny));
   const estimated = Object.fromEntries(Object.entries(ACTUAL_FIELDS).map(([key, field]) => [key,
     completeEstimate ? round(baselines.reduce((sum, baseline) => sum + Number(baseline[field]), 0)) : null]));
   if (estimated.profit === null && originalProfits.length && originalProfits.every(value => value !== null)) {
@@ -70,8 +78,8 @@ export function buildOrderProfitFxDetailSnapshotPayload(order, items, finance, f
       estimatedBreakdownReady: completeEstimate, actualProfit: actual.profit, actualProfitRate: actualRate,
       actualCostTotal: actual.costTotal, actualProfitReady: actualReady, financeMatchStatus: matchStatus, financeRows: finance.length },
     detailRows: base.detailRows.map(row => ({ ...row, estimated: estimated[row.key], actual: actual[row.key],
-      ...(estimated[row.key] === null ? { estimatedText: "未留存完整预估依据", note: "未保存完整的首次预估费用基线，不能用当前真实成本倒推。" } : {}),
-      ...(!completeEstimate && row.key === "costTotal" && estimated.costTotal !== null ? { note: "由首次预估销售额减首次预估利润确认总成本；费用细项未完整保存。" } : {}),
+      ...(estimated[row.key] === null ? { estimatedText: "未留存完整预估依据", note: "未保存完整的当前生效预估费用基线，不能用当前真实成本倒推。" } : {}),
+      ...(!completeEstimate && row.key === "costTotal" && estimated.costTotal !== null ? { note: "由当前生效预估销售额减当前生效预估利润确认总成本；费用细项未完整保存。" } : {}),
       diff: actual[row.key] === null || estimated[row.key] === null ? null : round(actual[row.key] - estimated[row.key]) })),
     financeTotals: actualReady ? { commission: actual.commission, collecting_fee: actual.collecting,
       platform_delivery: actual.international, other: actual.service, aftersale_loss: actual.aftersale } : {}
