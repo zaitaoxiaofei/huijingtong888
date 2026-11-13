@@ -38,7 +38,7 @@ export const navigationMenus = [
       { key: "listing-records", label: "草稿箱", route: "/listing-records" },
       { key: "listing-automation", platform: "ozon", label: "商品上架", route: "/listing-automation" },
       { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
-      { key: "wb-listing", platform: "wb", label: "WB 商品上架", route: "/wb/listing" },
+      { key: "wb-listing", platform: "wb", label: "商品上架", route: "/wb/listing" },
       { key: "wb-online-products", platform: "wb", label: "WB 在线商品", route: "/wb/online-products" },
       { key: "online-products", platform: "ozon", label: "在线商品", route: "/online-products" },
       { key: "batch-stock-update", label: "批量改库存", route: "/batch-stock-update" },
