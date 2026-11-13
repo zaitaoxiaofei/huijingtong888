@@ -65,10 +65,6 @@ function productImage(row) {
   return productId ? `/api/products/${productId}/image?thumb=1&w=180` : "";
 }
 
-function productCode(row) {
-  return row?.product_code || row?.code || "-";
-}
-
 function productSkuText(row) {
   return row?.mapped_skus || "未绑定 SKU";
 }
@@ -239,7 +235,7 @@ onMounted(()=>{restoreReceivingFilters(route.query,state.filters,'approved');loa
                 <ProductImagePreview :src="productImage(row)" :preview-list="productImage(row) ? [productImage(row)] : []" />
                 <div class="product-cell-meta">
                   <strong>{{ row.product_name || "-" }}</strong>
-                  <span>编码：{{ productCode(row) }}</span>
+                  <span>库存 ID：{{ row.inventory_number || "-" }}</span>
                   <span>SKU：{{ productSkuText(row) }}</span>
                   <span>采购单号：{{ row.purchase_order_no || "-" }}</span>
                   <span>入库记录 ID：{{ row.id }}</span>
