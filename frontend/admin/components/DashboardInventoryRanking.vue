@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { apiClient, currentApiCacheScope } from '../utils/api.js';
+import PlatformBadge from './PlatformBadge.vue';
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
@@ -175,6 +176,9 @@ onBeforeUnmount(() => {
   </small>
   </div>
       <div class="rank-metrics">
+  <div v-if="row.platforms?.length" class="rank-platforms" title="所选日期的成交平台">
+    <PlatformBadge v-for="platform in row.platforms" :key="platform" :platform="platform" :size="18" />
+  </div>
   <span>销售额<strong>{{money(row.revenue)}}</strong>
   </span>
   <span>销量 <b>{{count(row.item_quantity)}} {{row.stock_unit||'件'}}</b>
@@ -185,12 +189,14 @@ onBeforeUnmount(() => {
      </article>
   </template>
      <div class="rank-preview">
-  <strong>{{row.product_name}}</strong>
+  <div class="rank-preview-heading"><strong>{{row.product_name}}</strong>
+    <div class="rank-platforms"><PlatformBadge v-for="platform in row.platforms || []" :key="platform" :platform="platform" :size="22" /></div>
+  </div>
   <p>{{dateText}} · {{money(row.revenue)}} · {{count(row.item_quantity)}} {{row.stock_unit||'件'}} · {{count(row.order_count)}} 单</p>
   <p v-if="previews[row.product_id]?.loading">正在读取店铺与 SKU 概览…</p>
   <p v-else-if="previews[row.product_id]?.error">{{previews[row.product_id].error}}</p>
   <div v-for="sku in previews[row.product_id]?.rows" :key="`${sku.shop_id}:${sku.ozon_sku}`" class="preview-line">
-  <span>{{sku.shop_name}} · SKU {{sku.ozon_sku}}</span>
+  <span class="preview-shop"><PlatformBadge v-for="platform in sku.platforms || []" :key="platform" :platform="platform" :size="20" />{{sku.shop_name}} · SKU {{sku.ozon_sku}}</span>
   <span>{{money(sku.revenue)}} · {{count(sku.item_quantity)}} 件 · {{count(sku.order_count)}} 单</span>
   </div>
   <el-button size="small" @click="openDetail(row)">查看全部店铺 / SKU 明细</el-button>
@@ -214,8 +220,11 @@ onBeforeUnmount(() => {
    <el-alert v-if="detailError" type="error" :title="detailError" :closable="false"/>
   <el-button v-if="detailError" @click="loadDetail">重试</el-button>
    <el-table v-loading="detailLoading" :data="detailRows" max-height="470" empty-text="所选日期暂无对应店铺 / SKU 销售">
-  <el-table-column prop="shop_name" label="店铺" min-width="140"/>
-  <el-table-column prop="ozon_sku" label="Ozon SKU" min-width="150"/>
+  <el-table-column label="平台" width="76">
+  <template #default="{row}"><div class="rank-platforms"><PlatformBadge v-for="platform in row.platforms || []" :key="platform" :platform="platform" :size="24" /></div></template>
+  </el-table-column>
+<el-table-column prop="shop_name" label="店铺" min-width="140"/>
+  <el-table-column prop="ozon_sku" label="平台 SKU" min-width="150"/>
   <el-table-column prop="product_name" label="SKU 商品名称" min-width="230"/>
   <el-table-column label="销售额" width="140">
   <template #default="{row}">{{money(row.revenue)}}</template>
@@ -245,10 +254,14 @@ onBeforeUnmount(() => {
 .rank-name{padding:0;border:0;background:none;text-align:left;cursor:pointer;color:var(--dashboard-text,var(--el-text-color-primary));font:inherit;font-size:13px;font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .rank-name:hover{color:var(--el-color-primary)}
 .rank-copy :deep(.el-button){height:20px;padding:0 5px;margin-left:5px}
-.rank-metrics{display:grid;gap:4px;text-align:right;font-size:11px;color:var(--dashboard-muted,var(--el-text-color-secondary));min-width:0}
+.rank-metrics{display:grid;gap:2px;line-height:1.2;text-align:right;font-size:11px;color:var(--dashboard-muted,var(--el-text-color-secondary));min-width:0}
 .rank-metrics strong{display:block;font-size:13px;color:var(--dashboard-text,var(--el-text-color-primary));white-space:nowrap}
 .rank-metrics b{color:var(--dashboard-text,var(--el-text-color-primary))}
 .ranking-footer{display:flex;align-items:center;justify-content:center;gap:12px;height:30px;flex:none;padding-top:6px}
+.rank-platforms{display:flex;align-items:center;justify-content:flex-end;gap:4px}
+.rank-preview-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.rank-preview-heading strong{min-width:0;overflow-wrap:anywhere}
+.preview-shop{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .rank-preview{font-size:12px}
 .preview-line{display:grid;gap:4px;padding:8px 0;border-top:1px solid var(--el-border-color-lighter);overflow-wrap:anywhere}
 .ranking-note{line-height:1.6}
