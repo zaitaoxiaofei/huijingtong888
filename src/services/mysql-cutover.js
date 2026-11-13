@@ -12452,6 +12452,8 @@ async function tenantProductsMysql(query = {}, tenantId) {
       FROM fbp_transfer_records sort_ftr LEFT JOIN shops sort_ts ON sort_ts.id = sort_ftr.shop_id
       WHERE sort_ftr.product_id = p.id AND ${fbpTransferInTransitWhereMysql('sort_ftr')} AND (sort_ftr.shop_id IS NULL OR ${inventoryTenantSql(scope, 'sort_ts')}))`,
     total_sales_quantity: salesSum('SUM(sort_obr.quantity)'), total_sales_amount: salesAmountSort,
+    total_purchase_quantity: `COALESCE(${procurementSum('SUM(sort_pr.quantity)')}, 0)`,
+    total_outbound_quantity: `(${salesSum('SUM(sort_obr.quantity)')} + ${movementSum('SUM(ABS(sort_im.quantity_delta))', "AND sort_im.source_type = 'manual_outbound'")})`,
     order_count: salesSum('COUNT(DISTINCT sort_obr.order_ref)'),
     total_purchase_amount: `COALESCE(${procurementSum('SUM(sort_pr.amount + COALESCE(sort_pr.shipping_amount, 0))')}, ${movementSum('SUM(CASE WHEN sort_im.quantity_delta > 0 THEN sort_im.amount ELSE 0 END)')})`,
     manual_outbound_quantity: movementSum('SUM(ABS(sort_im.quantity_delta))', "AND sort_im.source_type = 'manual_outbound'"),

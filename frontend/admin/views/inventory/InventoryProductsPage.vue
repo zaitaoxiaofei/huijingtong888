@@ -6,7 +6,7 @@ import InventoryProductHistoryAction from "../../components/inventory/InventoryP
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref, watch } from "vue";
-import { inventoryValuation } from "../../utils/inventory-valuation.js";
+import { inventoryValuation, inventoryValuationExplanation } from "../../utils/inventory-valuation.js";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { View } from "@element-plus/icons-vue";
@@ -1930,7 +1930,7 @@ onActivated(() => {
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>
                 </div>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
-                <div class="product-info-bottom"><span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span><el-button link type="primary" size="small" @click.stop="openInventoryLedger(row)">库存明细</el-button></div>
+                <div class="product-info-bottom"><span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span><el-button plain size="small" @click.stop="openInventoryLedger(row)">库存明细</el-button></div>
               </div>
             </div>
           </template>
@@ -1986,15 +1986,15 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="销售表现" prop="total_sales_amount" min-width="190" align="right" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column label="销售数量" prop="total_sales_quantity" min-width="190" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" plain type="primary" @click.stop="openProductSalesDetails(row)">
+            <button v-if="!isTenantScoped" type="button" class="metric-cell-link" @click.stop="openProductSalesDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
                 <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
                 <span class="muted-text">订单 {{ integer(row.order_count) }} / 均单 ¥{{ money(averageOrderAmount(row)) }}</span>
               </div>
-            </el-button>
+            </button>
             <div v-else class="metric-cell-content cell-stack cell-align-end">
               <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
               <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
@@ -2002,37 +2002,37 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="采购成本" prop="total_purchase_amount" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column label="采购数量" prop="total_purchase_quantity" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" plain type="primary" @click.stop="openProductProcurementDetails(row)">
+            <button v-if="!isTenantScoped" type="button" class="metric-cell-link" @click.stop="openProductProcurementDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
-                <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
-                <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
+                <strong>{{ integer(row.total_purchase_quantity) }} 件</strong>
+                <span class="muted-text">采购额 ¥{{ money(row.total_purchase_amount) }}</span>
                 <span class="muted-text">均成本 ¥{{ money(averagePurchaseCost(row)) }}</span>
               </div>
-            </el-button>
+            </button>
             <div v-else class="metric-cell-content cell-stack cell-align-end">
-              <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
-              <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
+              <strong>{{ integer(row.total_purchase_quantity) }} 件</strong>
+              <span class="muted-text">采购额 ¥{{ money(row.total_purchase_amount) }}</span>
               <span class="muted-text">均成本 ¥{{ money(averagePurchaseCost(row)) }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="历史出库" prop="manual_outbound_quantity" min-width="160" align="right" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column label="历史出库数量" prop="total_outbound_quantity" min-width="160" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" plain type="warning" @click.stop="openManualOutboundRecords(row)">
+            <button type="button" class="metric-cell-link" @click.stop="openManualOutboundRecords(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
-                <strong>共 {{ integer(Number(row.total_sales_quantity||0)+Number(row.manual_outbound_quantity||0)) }} 件</strong>
-                <span class="muted-text">销售出库 {{ integer(row.total_sales_quantity) }} · 人工登记 {{ integer(row.manual_outbound_quantity) }}</span>
-                <span class="muted-text">点击看人工登记记录</span>
+                <strong>{{ integer(Number(row.total_sales_quantity||0)+Number(row.manual_outbound_quantity||0)) }} 件</strong>
+                <span class="muted-text">销售出库 {{ integer(row.total_sales_quantity) }} 件</span>
+                <span class="muted-text">人工出库 {{ integer(row.manual_outbound_quantity) }} 件</span>
               </div>
-            </el-button>
+            </button>
           </template>
         </el-table-column>
         <el-table-column label="库存货值" min-width="185" align="right">
           <template #default="{ row }">
             <div class="inventory-value-cell">
-              <strong>{{ inventoryValuation(row).total == null ? '—' : `¥${money(inventoryValuation(row).total)}` }}</strong>
+              <el-tooltip :content="inventoryValuationExplanation(row)"><strong class="inventory-value-total">{{ inventoryValuation(row).total == null ? '—' : `¥${money(inventoryValuation(row).total)}` }}</strong></el-tooltip>
               <span>本地 {{ inventoryValuation(row).local == null ? '—' : `¥${money(inventoryValuation(row).local)}` }}</span>
               <span>FBP {{ inventoryValuation(row).fbp == null ? '—' : `¥${money(inventoryValuation(row).fbp)}` }}</span>
               <el-tooltip v-if="inventoryValuation(row).reason" :content="`${inventoryValuation(row).reason}。可在库存明细中核查本地和 FBP 库存。`"><span class="valuation-incomplete">{{ inventoryValuation(row).reason }}</span></el-tooltip>
@@ -2047,8 +2047,8 @@ onActivated(() => {
               <InventoryProductHistoryAction :product-id="Number(row.id)"/>
             </div>
             <div class="inventory-action-row">
-              <el-button v-if="canWriteInventory" size="small" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button v-if="canWriteInventory" size="small" link type="danger" @click="removeFromInventory(row)">删除</el-button>
+              <el-button v-if="canWriteInventory" size="small" plain @click="openEditDialog(row)">编辑</el-button>
+              <el-button v-if="canWriteInventory" size="small" plain @click="removeFromInventory(row)">删除</el-button>
             <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button size="small" plain>更多</el-button></template><div class="inventory-more-actions">
               <el-button v-if="canProcure" class="inventory-more-button" size="small" plain @click="openProcurement(row)">创建采购</el-button>
               <el-button v-if="canOutbound" class="inventory-more-button" size="small" plain type="warning" @click="openManualOutbound(row)">手动出库</el-button>
@@ -2841,7 +2841,7 @@ onActivated(() => {
 .product-info-bottom { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .inventory-action-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
 .inventory-value-cell { display:flex; flex-direction:column; align-items:flex-end; gap:4px; font-size:12px; color:var(--el-text-color-secondary); }
-.inventory-value-cell > strong { color:var(--el-text-color-primary); font-size:16px; font-variant-numeric:tabular-nums; }
+.inventory-value-total { color:var(--el-text-color-primary); font-size:16px; font-variant-numeric:tabular-nums; }
 .valuation-incomplete { max-width:170px; white-space:normal; color:var(--el-color-warning); font-size:11px; }
 .fbp-stock-line { display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:12px; color:var(--el-text-color-secondary); }
 .fbp-stock-line strong { font-weight:400; }
@@ -2967,6 +2967,11 @@ onActivated(() => {
 }
 
 .metric-cell-link {
+  appearance: none;
+  font: inherit;
+  color: var(--el-text-color-primary);
+  cursor: pointer;
+  margin: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -2993,8 +2998,11 @@ onActivated(() => {
 }
 
 .metric-cell-link strong {
-  color: var(--erp-detail-primary, #1d4ed8);
+  color: var(--el-text-color-primary);
 }
+
+.metric-cell-link:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
+.metric-cell-content strong { font-size: 15px; font-variant-numeric: tabular-nums; color: var(--el-text-color-primary); }
 
 .metric-cell-link:hover {
   background: var(--el-fill-color-light);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inventoryLabelItems, inventoryLabelType, validateInventoryLabels, wrapLabelName } from '../frontend/admin/utils/inventory-labels.js';
-import { inventoryValuation } from '../frontend/admin/utils/inventory-valuation.js';
+import { inventoryValuation, inventoryValuationExplanation } from '../frontend/admin/utils/inventory-valuation.js';
 const product = { id: 267, inventory_number: '2-6-7', name: '门槛条 VOLGA K40 红色 LOGO定制款 ABS塑料 激光 4个', component_count: 0 };
 test('label task deduplicates product identity and preserves full name and per-product copies', () => {
   const items = inventoryLabelItems([product, product, { ...product, id: 268 }]);
@@ -43,4 +43,11 @@ test('inventory valuation distinguishes known local value from missing FBP and k
   assert.equal(inventoryValuation({ physical_stock: 5, fbp_stock_known: 0 }).total, null);
   assert.match(inventoryValuation({ physical_stock: null, fbp_stock_known: 0, avg_unit_cost: 4 }).reason, /本地/);
   assert.equal(inventoryValuation({ physical_stock: NaN, fbp_stock_known: 0, avg_unit_cost: 4 }).total, null);
+});
+
+test("valuation explains real zero stock independently from historical purchasing",()=>{
+ const row={physical_stock:0,fbp_stock_known:0,avg_unit_cost:41,total_purchase_quantity:100};
+ assert.equal(inventoryValuation(row).total,0);
+ assert.match(inventoryValuationExplanation(row),/本地实物 0.*FBP 实物 0.*¥41.00/);
+ assert.match(inventoryValuationExplanation({...row,fbp_stock_known:null}),/未读取/);
 });

@@ -188,7 +188,7 @@ test('actual inventory and procurement services isolate A, B, and default across
           const text = JSON.stringify(workspace);
           assert.ok(!text.includes(tenant === 2 ? 'B operator' : tenant === 3 ? 'A operator' : 'A operator'));
         }
-        for (const key of ['stock','incoming_stock','fbp_transfer_in_transit_qty','total_sales_quantity','total_sales_amount','order_count','total_purchase_amount','manual_outbound_quantity','manual_outbound_amount','avg_unit_cost','estimated_profit_total','actual_profit_total','profit_rate','inventory_value']) {
+        for (const key of ['stock','incoming_stock','fbp_transfer_in_transit_qty','total_sales_quantity','total_sales_amount','order_count','total_purchase_amount','total_purchase_quantity','total_outbound_quantity','manual_outbound_quantity','manual_outbound_amount','avg_unit_cost','estimated_profit_total','actual_profit_total','profit_rate','inventory_value']) {
           const result = await service.productsMysql({ paged: '1', sortKey: key, sortDir: 'asc' }, tenant);
           const allowed = tenant === 'admin' ? [products[1].id,legacy.id] : [products[tenant].id];
           assert.deepEqual(result.rows.map(row => Number(row.id)).sort((a,b) => a-b), allowed.sort((a,b) => a-b), `${tenant}:${key}`);

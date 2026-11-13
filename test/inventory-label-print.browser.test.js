@@ -14,13 +14,19 @@ test('single and batch inventory labels print immediately and download exact pag
   const output = path.resolve('.verification');
   await fs.mkdir(output, { recursive:true });
   const script = `
-const task=await taskSpace('inventory-labels-20261112'),page=task.page('p1');
+const task=await taskSpace('inventory-metrics-20261113'),page=task.page('p1');
 await page.goto('http://[::1]:8788/admin.html?labels='+Date.now()+'#/inventory/products');
 await page.waitForSelector('.product-inventory-number');console.log('LIST_READY');
 await page.waitForFunction(()=>document.querySelector('.inventory-value-cell').textContent.includes('820.00'));
 await page.evaluate(()=>{
  const rows=[...document.querySelectorAll('.el-table__body-wrapper tr')];
  if(document.querySelectorAll('.product-inventory-number').length!==4)throw Error('Duplicate inventory numbers');
+ const headers=[...document.querySelectorAll('.el-table__header-wrapper th')].map(n=>n.textContent.trim());for(const label of ['销售数量','采购数量','历史出库数量'])if(!headers.includes(label))throw Error('Missing quantity header '+label);
+ const metrics=rows[0].querySelectorAll('.metric-cell-link');if(metrics.length!==3)throw Error('Missing unified metrics');
+ if(JSON.stringify([...metrics].map(n=>n.querySelector('strong').textContent.trim()))!==JSON.stringify(['3 件','10 件','5 件']))throw Error('Metrics do not lead with quantities');
+ for(const metric of metrics){if(getComputedStyle(metric).backgroundColor!=='rgba(0, 0, 0, 0)')throw Error('Metric background not transparent');}
+ for(const b of rows[0].querySelectorAll('.inventory-action-row:last-child>button,.product-info-bottom button')){if(b.classList.contains('is-link')||!b.classList.contains('is-plain'))throw Error('Action must be a bordered button');}
+ document.documentElement.dataset.theme='dark';for(const metric of metrics){if(getComputedStyle(metric).backgroundColor!=='rgba(0, 0, 0, 0)')throw Error('Dark metric background not transparent');}
  for(const row of rows){
   const actions=[...row.querySelectorAll('.inventory-action-row:first-child button')].map(n=>n.textContent.trim());
   if(JSON.stringify(actions)!==JSON.stringify(['打印标签','更新库存','历史版本']))throw Error('Action order '+actions);
