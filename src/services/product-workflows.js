@@ -45,7 +45,8 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     }
     if(kind==='library'||kind==='mapping'){
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
-      const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'"];
+      const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.deleted')), 'false') = 'false'"];
+      if(options.availability!=='all')filters.push(`COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = '${options.availability==='disabled'?'true':'false'}'`);
       const terms=keyword.split(/\s+/).filter(Boolean);if(!terms.length)terms.push('');
       const params=[tenant];for(const term of terms){filters.push(`(LOWER(name) LIKE LOWER(?) OR LOWER(${MATERIAL_SEARCH_TEXT}) LIKE LOWER(?))`);params.push(`%${term}%`,`%${term}%`);}
       if(options.reviewStatus&&['pending','verified'].includes(options.reviewStatus)){filters.push("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reviewStatus')), 'verified') = ?");params.push(options.reviewStatus);}
@@ -123,7 +124,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   async function get(kind,id,session) {
     const {tenant,actor}=await scope(session);
     const row=(await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND id = ?",[tenant,kind,id]))[0];
-    if(!row||(['run','template'].includes(kind)&&JSON.parse(row.payload_json).archived)) throw Object.assign(new Error("当前企业中没有这个工作流记录"),{status:404});return ['material','key_model'].includes(kind)?(await decorate([map(row)],actor))[0]:map(row);
+    if(!row||JSON.parse(row.payload_json).deleted||(['run','template'].includes(kind)&&JSON.parse(row.payload_json).archived)) throw Object.assign(new Error("当前企业中没有这个工作流记录"),{status:404});return ['material','key_model'].includes(kind)?(await decorate([map(row)],actor))[0]:map(row);
   }
   async function save(kind,body,session) {
     const {tenant,actor}=await scope(session);
@@ -167,6 +168,16 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     if(!result.affectedRows)throw Object.assign(new Error('流程已被修改，请刷新后再删除'),{status:409});
     return {ok:true,id:previous.id};
   }
+  async function deleteMaterial(kind,body,session){
+    if(!['material','key_model'].includes(kind))throw workflowError('请选择生产资料');
+    const {tenant}=await scope(session),row=(await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND id = ?",[tenant,kind,String(body.id||'')]))[0];
+    if(!row||JSON.parse(row.payload_json).deleted)throw Object.assign(new Error('当前企业中没有这份资料'),{status:404});
+    if(!Number.isInteger(body.revision)||body.revision!==Number(row.revision))throw Object.assign(new Error('资料已更新，请刷新后再删除'),{status:409});
+    const payload={...JSON.parse(row.payload_json),archived:true,deleted:true};
+    const result=await execute("UPDATE product_workflow_documents SET payload_json = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND kind = ? AND id = ? AND revision = ?",[JSON.stringify(payload),tenant,kind,row.id,body.revision]);
+    if(!result.affectedRows)throw Object.assign(new Error('资料已更新，请刷新后再删除'),{status:409});
+    return {ok:true,id:row.id};
+  }
   async function importMappings(records,session,transaction=withMysqlTransaction){
     const {actor}=await scope(session);
     const brands=await catalogFor(actor);
@@ -197,7 +208,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     for(const row of rows)for(const variant of (typeof row.variants_json==='string'?JSON.parse(row.variants_json):row.variants_json)||[]){const facts=String(variant.values?.facts||'').trim();if(!facts||seen.has(facts))continue;seen.add(facts);result.push({id:`${row.id}:${variant.id}`,runId:row.id,name:row.name,product:variant.label,facts});if(result.length>=40)return result;}
     return result;
   }
-  return {list,get,save,scope,factsHistory,matchingKeys,importMappings,archiveTemplate};
+  return {list,get,save,scope,factsHistory,matchingKeys,importMappings,archiveTemplate,deleteMaterial};
 }
 export const productWorkflowStore=createProductWorkflowStore();
 
