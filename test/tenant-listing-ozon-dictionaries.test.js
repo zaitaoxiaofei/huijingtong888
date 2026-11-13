@@ -45,6 +45,8 @@ test("all Ozon category and attribute refresh paths pass the authenticated sessi
     const start = service.indexOf(`export async function ${name}`);
     assert.notEqual(start, -1, `${name} is present`);
     const body = service.slice(start, service.indexOf("\n}\n", start));
-    assert.match(body, /resolveOzonApiShop\(body\.shop_id \|\| body\.shopId, session\)/, name);
+    assert.match(body, name === "resolveOzonCategoryFromSku"
+      ? /resolveOzonApiShop\(matchedShopId, session\)/
+      : /resolveOzonApiShop\(body\.shop_id \|\| body\.shopId, session\)/, name);
   }
 });

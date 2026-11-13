@@ -1,3 +1,4 @@
+import { readOzonCategoryIdentity, ozonCategoryIdentityError, ozonCategoryProductRefs, findOzonCategoryProduct } from "./ozon-category-identity.js";
 import { retargetVariantVehicleAttributes } from '../shared/variant-vehicle-attributes.js';
 import { vehicleMetaFromTarget } from './product-development-meta.js';
 import { assertVariantCopyIdentity } from '../shared/variant-copy-identity.js';
@@ -18,6 +19,7 @@ import {
   createOzonProductBySku,
   fetchOzonCategoryAttributeValues,
   fetchOzonCategoryAttributes,
+  resolveOzonCategoryIdentity,
   fetchOzonDescriptionCategoryTree,
   fetchOzonProductImportInfo,
   fetchOzonProductContentRating,
@@ -683,7 +685,9 @@ export async function refreshListingCopyJob(jobId, session = null) {
       });
       productDetail = Array.isArray(details) ? details[0] : null;
       if (productDetail && job.template_id) {
-        categoryAttributes = await fetchOzonCategoryAttributesForProduct(shop, productDetail).catch(() => []);
+        const resolvedCategory = await fetchOzonCategoryAttributesForProduct(shop, productDetail, session);
+        categoryAttributes = resolvedCategory.attributes;
+        productDetail = resolvedCategory.detail;
         template = await applyOzonProductDetailToTemplate(job.template_id, productDetail, {
           importInfo: response,
           job,
@@ -5001,38 +5005,44 @@ export async function syncListingOzonCategories(body = {}, session = null) {
 }
 
 export async function resolveOzonCategoryFromSku(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
   await ensureListingAutomationSchema();
   const sku = String(body.sku || body.ozon_sku || body.ozonSku || body.offer_id || body.offerId || "").trim();
-  if (!sku) throw new Error("璇疯緭鍏?Ozon SKU 鎴?offer_id");
+  if (!sku) throw new Error("请输入原商品的 Ozon SKU 或货号（offer_id）");
   let matchedShopId = body.shop_id || body.shopId;
   if (!matchedShopId) {
     const tenantId = listingTenantId(session);
     const scope = tenantId === 'admin' ? "(s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1) OR s.tenant_id IS NULL)" : 's.tenant_id = ?';
-    const matched = await row(`SELECT op.shop_id FROM online_products op JOIN shops s ON s.id = op.shop_id
-      WHERE ${scope} AND s.status <> 'deleted' AND (op.ozon_sku = ? OR op.ozon_product_id = ? OR op.offer_id = ?)
-      ORDER BY op.synced_at DESC, op.updated_at DESC LIMIT 1`, [...(tenantId === 'admin' ? [] : [tenantId]), sku, sku, sku]);
-    matchedShopId = matched?.shop_id;
+    const matched = await all(`SELECT DISTINCT op.shop_id FROM online_products op JOIN shops s ON s.id = op.shop_id
+      WHERE ${scope} AND s.status = 'active' AND COALESCE(NULLIF(s.platform, ''), 'ozon') = 'ozon'
+        AND (op.ozon_sku = ? OR op.ozon_product_id = ? OR op.offer_id = ?)
+      LIMIT 2`, [...(tenantId === 'admin' ? [] : [tenantId]), sku, sku, sku]);
+    if (matched.length > 1) throw ozonCategoryIdentityError('该编号在当前企业匹配到多个店铺，请先选择原商品店铺');
+    if (!matched.length) throw ozonCategoryIdentityError('当前企业在线商品缓存未找到原商品，请先同步在线商品并选择原店铺');
+    matchedShopId = matched[0].shop_id;
   }
   const shop = await resolveOzonApiShop(matchedShopId, session);
-  const localProduct = await row(`
+  const localProducts = await all(`
     SELECT *
     FROM online_products
     WHERE shop_id = ?
       AND (ozon_sku = ? OR ozon_product_id = ? OR offer_id = ?)
-    ORDER BY synced_at DESC, updated_at DESC
-    LIMIT 1
+    LIMIT 2
   `, [shop.id, sku, sku, sku]);
-  if (!localProduct) throw new Error("Local online product cache does not contain this SKU. Sync online products first or try offer_id.");
+  if (localProducts.length !== 1) throw ozonCategoryIdentityError('原店铺缓存未匹配到唯一商品，请同步在线商品或使用明确的货号（offer_id）');
+  const localProduct = localProducts[0];
 
-  const productId = Number(localProduct.ozon_product_id || 0);
-  const details = productId
-    ? await fetchOzonProductInfoAttributes(shop, { productIds: [productId], limit: 1 }).catch(() => [])
-    : [];
-  const detail = details[0] || {};
-  const localAttributes = parseJson(localProduct.attributes_json, {});
-  const descriptionCategoryId = Number(detail.description_category_id || detail.descriptionCategoryId || localAttributes.description_category_id || 0);
-  const typeId = Number(detail.type_id || detail.typeId || localAttributes.type_id || 0);
-  if (!descriptionCategoryId || !typeId) throw new Error("鎵惧埌浜嗗晢鍝侊紝浣嗘病鏈夎鍒?description_category_id/type_id");
+  const refs = ozonCategoryProductRefs({
+    productId: localProduct.ozon_product_id,
+    offerId: localProduct.offer_id,
+    sku: /^\d+$/.test(String(localProduct.ozon_sku || "")) ? localProduct.ozon_sku : ""
+  });
+  if (!refs.productId && !refs.offerId && !refs.sku) throw ozonCategoryIdentityError('原商品缺少可核对的商品编号、货号或 SKU');
+  const filter = refs.productId ? { productIds: [refs.productId] } : refs.offerId ? { offerIds: [refs.offerId] } : { skus: [refs.sku] };
+  const details = await fetchOzonProductInfoAttributes(shop, { ...filter, limit: 1, ...ozonCategoryShopReadOptions(shop, session) });
+  const detail = findOzonCategoryProduct(details, refs);
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(detail);
+  if (!descriptionCategoryId || !typeId) throw ozonCategoryIdentityError('Ozon 原商品未返回完整的新类目字段');
 
   const cached = await row(`
     SELECT *
@@ -5044,9 +5054,9 @@ export async function resolveOzonCategoryFromSku(body = {}, session = null) {
   const category = cached ? normalizeOzonCategoryRow(cached) : normalizeOzonCategoryRow({
     description_category_id: descriptionCategoryId,
     type_id: typeId,
-    name_zh: `寰呯炕璇戠被鐩?${descriptionCategoryId}:${typeId}`,
+    name_zh: `待翻译类目 ${descriptionCategoryId}:${typeId}`,
     name_ru: fallbackName,
-    path_zh: `寰呯炕璇戠被鐩?${descriptionCategoryId}:${typeId}`,
+    path_zh: `待翻译类目 ${descriptionCategoryId}:${typeId}`,
     path_ru: fallbackName,
     raw_json: JSON.stringify(detail || {})
   });
@@ -5067,9 +5077,11 @@ export async function resolveOzonCategoryFromSku(body = {}, session = null) {
 
 export async function listingOzonCategoryAttributes(query = {}, session = null) {
   await ensureListingAutomationSchema();
-  const descriptionCategoryId = Number(query.description_category_id || query.descriptionCategoryId || 0);
-  const typeId = Number(query.type_id || query.typeId || 0);
-  if (!descriptionCategoryId || !typeId) return [];
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(query);
+  if (!descriptionCategoryId || !typeId) {
+    if (descriptionCategoryId || typeId || query.category_id || query.categoryId || query.ozon_category_id) throw ozonCategoryIdentityError();
+    return [];
+  }
   const rows = await all(`
     SELECT *
     FROM ozon_category_attributes
@@ -5085,7 +5097,7 @@ export async function listingOzonCategoryAttributes(query = {}, session = null) 
       sync_values: Boolean(query.sync_values || query.syncValues),
       value_limit: query.value_limit || query.valueLimit || 120,
       return_value_limit: query.value_limit || query.valueLimit || 120
-    }, session).catch(() => null);
+    }, session);
     const syncedRows = await all(`
       SELECT *
       FROM ozon_category_attributes
@@ -5103,9 +5115,8 @@ export async function listingOzonCategoryAttributes(query = {}, session = null) 
 
 export async function syncListingOzonCategoryAttributes(body = {}, session = null) {
   await ensureListingAutomationSchema();
-  const descriptionCategoryId = Number(body.description_category_id || body.descriptionCategoryId || 0);
-  const typeId = Number(body.type_id || body.typeId || 0);
-  if (!descriptionCategoryId || !typeId) throw new Error("Missing description_category_id/type_id for Ozon category attribute sync.");
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(body);
+  if (!descriptionCategoryId || !typeId) throw ozonCategoryIdentityError();
   const shop = await resolveOzonApiShop(body.shop_id || body.shopId, session);
   const attributes = await fetchOzonCategoryAttributes(shop, {
     descriptionCategoryId,
@@ -5185,12 +5196,15 @@ export async function syncListingOzonCategoryAttributes(body = {}, session = nul
 
 export async function listingOzonAttributeValues(query = {}, session = null) {
   await ensureListingAutomationSchema();
-  const descriptionCategoryId = Number(query.description_category_id || query.descriptionCategoryId || 0);
-  const typeId = Number(query.type_id || query.typeId || 0);
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(query);
   const attributeId = Number(query.attribute_id || query.attributeId || 0);
   const keyword = String(query.keyword || query.q || "").trim();
   const limit = Math.min(Math.max(Number(query.limit || 80), 1), 2000);
-  if (!descriptionCategoryId || !typeId || !attributeId) return [];
+  if (!attributeId) return [];
+  if (!descriptionCategoryId || !typeId) {
+    if (descriptionCategoryId || typeId || query.category_id || query.categoryId || query.ozon_category_id) throw ozonCategoryIdentityError();
+    return [];
+  }
   const autoRefresh = query.auto_refresh !== false && query.autoRefresh !== false && String(query.auto_refresh || query.autoRefresh || "").toLowerCase() !== "false";
   if (autoRefresh) {
     await refreshOzonAttributeValuesIfNeeded({
@@ -5369,10 +5383,10 @@ export async function refreshOzonCategoryCache(body = {}, session = null) {
 
 export async function syncListingOzonAttributeValues(body = {}, session = null) {
   await ensureListingAutomationSchema();
-  const descriptionCategoryId = Number(body.description_category_id || body.descriptionCategoryId || 0);
-  const typeId = Number(body.type_id || body.typeId || 0);
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(body);
   const attributeId = Number(body.attribute_id || body.attributeId || 0);
-  if (!descriptionCategoryId || !typeId || !attributeId) throw new Error("Missing category or attribute id for Ozon attribute value sync.");
+  if (!descriptionCategoryId || !typeId) throw ozonCategoryIdentityError();
+  if (!attributeId) throw new Error("缺少 Ozon 属性编号（attribute_id），请先在类目属性中选择要同步的属性");
   const shop = await resolveOzonApiShop(body.shop_id || body.shopId, session);
   const keyword = String(body.keyword || body.value || "").trim();
   const values = await fetchLocalizedOzonAttributeValues(shop, {
@@ -15037,15 +15051,31 @@ async function applyOzonProductDetailToTemplate(templateId, detail, context = {}
   return listingCategoryTemplate(templateId, session);
 }
 
-async function fetchOzonCategoryAttributesForProduct(shop, detail = {}) {
-  const descriptionCategoryId = Number(detail.description_category_id || detail.descriptionCategoryId || 0);
-  const typeId = Number(detail.type_id || detail.typeId || 0);
-  const categoryId = Number(detail.category_id || 0);
-  return fetchOzonCategoryAttributes(shop, {
-    descriptionCategoryId,
-    typeId,
-    categoryId
+function ozonCategoryShopReadOptions(shop, session) {
+  const checkShop = async () => {
+    await authorizeBusinessTaskSession(session);
+    const current = await resolveOzonApiShop(shop.id, session);
+    if (String(current.ozon_client_id) !== String(shop.ozon_client_id) || current.api_key_hint !== shop.api_key_hint) {
+      throw Object.assign(new Error("店铺授权已变化，请重新识别原商品类目"), { statusCode: 409 });
+    }
+    return current;
+  };
+  return { beforeRequest: checkShop, afterRequest: checkShop };
+}
+
+async function fetchOzonCategoryAttributesForProduct(shop, detail = {}, session = null) {
+  const requestOptions = ozonCategoryShopReadOptions(shop, session);
+  const identity = await resolveOzonCategoryIdentity(shop, {
+    ...detail, ...requestOptions,
+    productId: detail.product_id || detail.id || detail.ozon_product_id,
+    offerId: detail.offer_id,
+    sku: detail.sku ?? detail.ozon_sku
   });
+  const attributes = await fetchOzonCategoryAttributes(shop, { ...identity, ...requestOptions });
+  return {
+    attributes,
+    detail: { ...detail, description_category_id: identity.descriptionCategoryId, type_id: identity.typeId }
+  };
 }
 
 function extractImportedProductRefs(response, job = {}) {
@@ -21698,16 +21728,18 @@ async function resolveOzonApiShop(shopId = 0, session = null) {
     SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint
     FROM shops
     WHERE ${tenantScope}
-      AND status <> 'deleted'
+      AND status = 'active'
+      AND COALESCE(NULLIF(platform, ''), 'ozon') = 'ozon'
       AND ozon_client_id IS NOT NULL AND ozon_client_id <> ''
-      AND api_key_hint IS NOT NULL AND api_key_hint <> ''
-      AND api_key_hint NOT LIKE 'demo%'
+      AND COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) IS NOT NULL
+      AND COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) <> ''
+      AND COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) NOT LIKE 'demo%'
       ${id ? "AND id = ?" : ""}
     ORDER BY id DESC
     LIMIT 1
   `, params);
   const shop = rows[0];
-  if (!shop) throw new Error("No shop with valid Ozon API credentials was found; cannot sync real categories");
+  if (!shop) throw Object.assign(new Error("当前企业中所选店铺不存在、未启用或缺少有效的 Ozon 授权。请到「企业店铺 → 编辑」启用该店铺并配置 Client ID 和有效的 API Key，再重新识别类目。"), { statusCode: 409 });
   return shop;
 }
 
