@@ -6,13 +6,12 @@ test('legacy ERP crossed-out fields do not block a native WB draft',()=>{const p
 test('WB keeps the image dialog and native inline fields without invented price attributes',()=>{const s=readFileSync(new URL('../frontend/admin/components/listing/WbListingEditor.vue',import.meta.url),'utf8');assert.match(s,/<el-dialog v-if="active!==null"/);assert.match(s,/:mode="editorMode"/);assert.match(s,/v-for="attribute in attributes"/);assert.ok(!s.includes('common-section"><h3>共用属性'));assert.ok(!s.includes('wbApplyCommon('));assert.ok(!s.includes('old_price'));assert.ok(!s.includes("edit($index,'sizes')"));assert.ok(!s.includes("edit($index,'package')"));assert.match(s,/定价策略/);const child=readFileSync(new URL('../frontend/admin/components/listing/WbListingVariantEditor.vue',import.meta.url),'utf8');for(const mode of ['images','video','sizes','package'])assert.ok(child.includes(`'${mode}'`));});
 test('WB batch stock preview uses only reads and never sends platform stock mutations',()=>{const s=readFileSync(new URL('../frontend/admin/views/inventory/WbStockBatchView.vue',import.meta.url),'utf8');assert.match(s,/api\/wb\/stocks\?/);assert.ok(!s.includes('apiClient.post'));assert.ok(!s.includes('stocks/set'));assert.match(s,/同一基础商品/);});
 
-test('a price API error does not discard WB products that were already loaded',async()=>{
- const s=readFileSync(new URL('../frontend/admin/views/inventory/WbOnlineProductsView.vue',import.meta.url),'utf8');const prices=s.match(/async function loadPrices\([^\n]+/)?.[0],load=s.match(/async function load\(\)\{[^\n]+/)?.[0];assert.ok(prices&&load);
- const rows={value:[]},priceRows={value:[]},priceNotice={value:''},page={value:1},shopId={value:13},loading={value:false},product={nm_id:42,title:'Product'},errors=[];
- const run=new Function('rows','priceRows','priceNotice','page','shopId','loading','currentApiCacheScope','selected','apiClient','ElMessage',`${prices};${load};return load;`)(rows,priceRows,priceNotice,page,shopId,loading,()=>1,()=>13,{get:async url=>{if(url.includes('/products?'))return {rows:[product]};throw Error('price permission denied');}},{error:value=>errors.push(value)});
- await run();assert.deepEqual(rows.value,[product]);assert.match(priceNotice.value,/价格暂未读取成功/);assert.equal(loading.value,false);assert.deepEqual(errors,[]);
+test('WB cached product reads retain rows when a price snapshot is unavailable without extra price requests',async()=>{
+ const s=readFileSync(new URL('../frontend/admin/views/inventory/WbOnlineProductsView.vue',import.meta.url),'utf8'),load=s.match(/async function load\(\)\{[^\n]+/)?.[0];assert.ok(load);
+ const rows={value:[]},page={value:1},shopId={value:13},loading={value:false},notice={value:''},product={nm_id:42,title:'Product',price_info:null,price_error:'permission denied'},calls=[];
+ const run=new Function('rows','page','shopId','loading','notice','currentApiCacheScope','selected','apiClient','ElMessage',`let productRequest=0;${load};return load;`)(rows,page,shopId,loading,notice,()=>1,()=>13,{get:async url=>{calls.push(url);return {rows:[product]};}},{error:assert.fail});
+ await run();assert.deepEqual(rows.value,[product]);assert.equal(loading.value,false);assert.equal(calls.length,1);assert.match(calls[0],/\/products\?/);
 });
-
 test('WB sync refuses malformed successful API responses instead of claiming an empty catalogue',async()=>{
  const {createWbPlatform}=await import('../src/services/wb-platform.js');const writes=[];
  const service=createWbPlatform({query:async(sql)=>{if(/^INSERT|^UPDATE/.test(sql))writes.push(sql);return [{tenant_id:1,shop_id:13,token:'test-only',environment:'production',checked_at:'yes',seller_id:'seller'}];},request:async()=>({})});
@@ -31,7 +30,10 @@ test('unbound WB inventory is readable but cannot be allocated or changed',async
  const input={shop_id:13,nm_id:100,chrt_id:200};const r=await service.stocks(1,input);assert.equal(r.stocks[0].amount,7);assert.equal(r.available,null);assert.match(r.availability_message,/尚未绑定/);await assert.rejects(service.setStocks(1,{...input,quantity:0}),/尚未绑定/);assert.deepEqual(remote,[{path:'/api/v3/stocks/100',method:'POST'}]);
 });
 
-test('an older WB inventory request cannot replace the currently selected size',async()=>{
- const s=readFileSync(new URL('../frontend/admin/views/inventory/WbOnlineProductsView.vue',import.meta.url),'utf8'),fn=s.match(/async function readInventory\(\)\{[^\n]+/)?.[0];assert.ok(fn);const inventoryPreview={row:{nm_id:1,card:{sizes:[{chrtID:1,skus:['A']}]}},chrt:1},shopId={value:13},pending=[];
- const read=new Function('inventoryPreview','shopId','currentApiCacheScope','apiClient',`let inventoryRequest=0;${fn};return readInventory;`)(inventoryPreview,shopId,()=>1,{get:()=>new Promise(resolve=>pending.push(resolve))});const first=read();inventoryPreview.row={nm_id:2,card:{sizes:[{chrtID:2,skus:['B']}]}};inventoryPreview.chrt=2;const second=read();pending[1]({stocks:[{sku:'B',amount:9}],available:10});await second;pending[0]({stocks:[{sku:'A',amount:5}],available:10});await first;assert.equal(inventoryPreview.current,9);assert.equal(inventoryPreview.loading,false);
+test('an older WB product request cannot replace the currently selected shop',async()=>{
+ const s=readFileSync(new URL('../frontend/admin/views/inventory/WbOnlineProductsView.vue',import.meta.url),'utf8'),fn=s.match(/async function load\(\)\{[^\n]+/)?.[0];assert.ok(fn);
+ const rows={value:[]},page={value:1},shopId={value:13},loading={value:false},notice={value:''},pending=[];
+ const load=new Function('rows','page','shopId','loading','notice','currentApiCacheScope','selected','apiClient','ElMessage',`let productRequest=0;${fn};return load;`)(rows,page,shopId,loading,notice,()=>1,()=>shopId.value,{get:()=>new Promise(resolve=>pending.push(resolve))},{error:assert.fail});
+ const first=load();shopId.value=14;const second=load();pending[1]({rows:[{nm_id:200,shop_id:14}]});await second;pending[0]({rows:[{nm_id:100,shop_id:13}]});await first;
+ assert.deepEqual(rows.value,[{nm_id:200,shop_id:14}]);assert.equal(loading.value,false);
 });

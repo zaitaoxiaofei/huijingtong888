@@ -1,3 +1,5 @@
+import {createWbProductWorkspace,saveWbProductCard,wbProductView} from './wb-product-workspace.js';
+import {createWbPublishRecords} from './wb-publish-records.js';
 import {createWbProductOperations} from './wb-product-operations.js';
 import {createWbPublishFlow} from './wb-publish-flow.js';
 import {WB_LISTING_PUBLISH_ENABLED} from '../shared/wb-capabilities.js';
@@ -22,7 +24,7 @@ const positiveId = value => {
 };
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
 
-export function createWbPlatform({ actorId, query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability, loadSourceDraft }) {
+export function createWbPlatform({ actorId, query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability, loadSourceDraft, createInventoryProduct, prepareInventoryProduct }) {
   async function account(tenantId, shopId, allowUnchecked = false) {
     const rows = await query(`SELECT c.*, s.name FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id
       WHERE c.tenant_id=? AND s.tenant_id=? AND c.shop_id=? AND s.platform='wb' AND s.status='active'`,
@@ -146,9 +148,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       if(!Array.isArray(result.cards))throw fail('WB 商品接口未返回商品列表，本次同步未完成，请检查授权并重试。',502);
       const cards = result.cards;
       for (const card of cards) {
-        await query(`INSERT INTO wb_product_cards (tenant_id,shop_id,nm_id,vendor_code,title,raw_json,synced_at) VALUES (?,?,?,?,?,?,UTC_TIMESTAMP())
-          ON DUPLICATE KEY UPDATE vendor_code=VALUES(vendor_code),title=VALUES(title),raw_json=VALUES(raw_json),synced_at=VALUES(synced_at)`,
-        [a.tenant_id, a.shop_id, positiveId(card.nmID), String(card.vendorCode || ''), String(card.title || ''), JSON.stringify(card)]);
+        await saveWbProductCard(query,a,card);
         count++;
       }
       if (cards.length < 100) return { ok: true, count };
@@ -161,9 +161,9 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     const a = await account(tenantId, body.shop_id);
     const rows = await query('SELECT * FROM wb_product_cards WHERE tenant_id=? AND shop_id=? ORDER BY nm_id DESC', [a.tenant_id, a.shop_id]);
     const scope=await resolveInventoryTenantScope(a.tenant_id,query);
-    const mappings = await query(`SELECT sm.ozon_sku,sm.product_id,p.name AS product_name FROM sku_mappings sm
+    const mappings = await query(`SELECT sm.ozon_sku,sm.product_id,p.name AS product_name,p.code AS product_code,p.inventory_number FROM sku_mappings sm
       JOIN products p ON p.id=sm.product_id AND ${inventoryTenantSql(scope,'p')} WHERE sm.tenant_id=? AND sm.shop_id=? AND sm.active=1`, [a.tenant_id,a.shop_id]);
-    return { rows: rows.map(row => ({ ...row, card: parse(row.raw_json), raw_json: undefined,
+    return { rows: rows.map(row => ({ ...wbProductView(row,a),
       mappings: mappings.filter(item=>(parse(row.raw_json).sizes||[]).some(size=>`WB-${size.chrtID}`===item.ozon_sku)) })) };
   }
   async function bindProduct(tenantId, body) {
@@ -177,7 +177,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       const sku = `WB-${chrtId}`;
       const [existing] = await connection.execute('SELECT id,product_id FROM sku_mappings WHERE tenant_id=? AND shop_id=? AND ozon_sku=? FOR UPDATE',[a.tenant_id,a.shop_id,sku]);
       if (existing[0] && Number(existing[0].product_id)!==productId) throw fail('此 WB 规格已绑定其他基础商品，请先核对历史订单与库存，不支持直接覆盖绑定。',409);
-      if (!existing.length) await connection.execute(`INSERT INTO sku_mappings (tenant_id,shop_id,product_id,ozon_sku,offer_id,commission_low,commission_high) VALUES (?,?,?,?,?,0,0)`,[a.tenant_id,a.shop_id,productId,sku,String(body.vendor_code||'')]);
+      if (!existing.length) await connection.execute(`INSERT INTO sku_mappings (tenant_id,shop_id,product_id,ozon_sku,offer_id,commission_low,commission_high) VALUES (?,?,?,?,?,0,0)`,[a.tenant_id,a.shop_id,productId,sku,String(parse(cards[0].raw_json).vendorCode||'')]);
     });
     const orders = await query('SELECT order_id FROM wb_order_details WHERE tenant_id=? AND shop_id=?',[a.tenant_id,a.shop_id]);
     for (const order of orders) await reconcileInventory(order.order_id,a.tenant_id);
@@ -454,8 +454,11 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   async function listingSource(tenantId,body){await catalog.catalogAccount(tenantId,body);if(!loadSourceDraft)throw fail('草稿读取暂不可用。',503);return wbListingSource(await loadSourceDraft(positiveId(body.source_draft_id)));}
   const listing=createWbListingWorkflow({query,request,account,transaction,categoryOptions:catalog.categoryOptions});
   const publishing=createWbPublishFlow({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
+  const workspace=createWbProductWorkspace({query,transaction,request,account,syncProducts,products,createInventoryProduct,prepareInventoryProduct,actorId});
+  const records=createWbPublishRecords({query,request,account,refreshProductSnapshots:workspace.refreshProductSnapshots});
+  async function createProductInventory(tenantId,body){const result=await workspace.createProductInventory(tenantId,body);await bindProduct(tenantId,{...body,product_id:result.product_id});return result;}
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
-  return { cardLimits, pricingCommissions, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  return { cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
@@ -464,7 +467,7 @@ export async function wbPlatform(session, permission = 'operations', signal) {
   const { mysqlQuery, withMysqlTransaction } = await import('../mysql-pool.js');
   const { authorizeBusinessTaskSession } = await import('./business-task-tenant.js');
   const { hasPermission, isEnterpriseAdmin } = await import('../shared/permissions.js');
-  const { reconcileWbOrderInventoryMysql, invalidateWbOrderCachesMysql, productInventoryAvailabilityMysql } = await import('./mysql-cutover.js');
+  const { reconcileWbOrderInventoryMysql, invalidateWbOrderCachesMysql, productInventoryAvailabilityMysql, createProductMysql, prepareInventoryProductCreationMysql } = await import('./mysql-cutover.js');
   const authorize = async () => {
     const current=await authorizeBusinessTaskSession(session);
     if(!(permission==='enterprise.admin'?isEnterpriseAdmin(current):hasPermission(current,permission)))throw fail('当前企业岗位已无权执行该 WB 操作。',403);
@@ -483,6 +486,8 @@ export async function wbPlatform(session, permission = 'operations', signal) {
       const beforeRequest=publishingWrite?async()=>{await authorize();const [latest]=await mysqlQuery("SELECT c.token,c.environment,c.seller_id,c.checked_at FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.shop_id=? AND s.status='active'",[session.tenant.id,a.shop_id]);if(!latest||latest.token!==current[0].token||latest.environment!==current[0].environment||latest.seller_id!==current[0].seller_id||(latest.environment==='production'&&!latest.checked_at))throw fail('WB 授权在等待期间已变化，未发送写入请求，请核对后继续。',409);}:undefined;
       return wbRequest(current[0],service,path,{...options,beforeRequest,signal:options?.signal||signal});
     },invalidate:invalidateWbOrderCachesMysql,
+    prepareInventoryProduct:async()=>{await authorize();await prepareInventoryProductCreationMysql();},
+    createInventoryProduct:async(body,connection,tenant)=>{await authorize();return createProductMysql(body,connection,tenant);},
     reconcileInventory:async(...args)=>{await authorize();return reconcileWbOrderInventoryMysql(...args);},loadAvailability:productInventoryAvailabilityMysql,loadSourceDraft:async id=>{
       const current=await authorize(),key=current.tenant.slug==='default'?'admin':String(current.tenant.id);
       const rows=await mysqlQuery(`SELECT * FROM listing_drafts WHERE id=? AND status<>'deleted' AND (tenant_id=?${key==='admin'?' OR tenant_id IS NULL':''}) LIMIT 1`,[id,key]);
