@@ -1,3 +1,4 @@
+import {wbAttributeDirectory,wbDirectoryOptions} from '../shared/wb-attribute-options.js';
 import {createHash} from 'node:crypto';
 const fail=(message,statusCode=409)=>Object.assign(new Error(message),{statusCode});
 const parse=value=>typeof value==='string'?JSON.parse(value):value;
@@ -57,5 +58,14 @@ export function createWbCategoryCatalog({query,request,account}){
   console.info('[wb-catalog]',JSON.stringify({tenant_id:a.tenant_id,environment:a.environment,subject_id:subject,field_count:result.data.length,source:result.cache.source,stale:result.cache.stale}));
   return {environment:a.environment,subject_id:subject,category_name:categoryName,template_id:template.id,revision:template.revision,attributes:result.data,defaults:parse(template.defaults_json),cache:result.cache};
  }
- return {catalogAccount,categoryParents,catalogCategories,categorySchema};
+ async function categoryOptions(tenantId,body={}){
+  const a=await catalogAccount(tenantId,body),subject=Number(body.subject_id),attributeId=Number(body.attribute_id);
+  if(!Number.isSafeInteger(subject)||subject<=0||!Number.isSafeInteger(attributeId)||attributeId<=0)throw fail('请先选择有效类目和属性。',400);
+  const schema=await cached(a,`schema:${subject}`,'zh',false,()=>request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}}));
+  const attribute=schema.data.find(item=>Number(item.charcID)===attributeId),kind=wbAttributeDirectory(attribute);
+  if(!attribute||!kind)throw fail('该属性不使用 WB 官方选项，请按模板要求填写。',400);
+  const result=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'ru',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'ru',...(kind==='tnved'?{subjectID:subject}:{})}}));
+  return {...result,data:wbDirectoryOptions(result.data,kind)};
+ }
+ return {catalogAccount,categoryParents,catalogCategories,categorySchema,categoryOptions};
 }
