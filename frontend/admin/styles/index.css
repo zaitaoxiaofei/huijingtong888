@@ -69,7 +69,7 @@ body,
   overflow: hidden;
   background: var(--erp-bg);
   color: var(--erp-text);
-  font-family: "DIN Next LT Pro", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 html.admin-login-open,
