@@ -206,7 +206,7 @@ defineExpose({refresh:load});
 </script>
 <template>
  <section class="supply-workspace" :aria-label="entry==='procurement'?'库存采购需求':'库存管理模式'">
-  <div class="supply-heading-actions"><slot name="heading-actions"/></div>
+  <div v-if="$slots['heading-actions']" class="supply-heading-actions"><slot name="heading-actions"/></div>
   <div class="supply-task-cards"><button v-for="task in tasks" :key="task.key" :data-task="task.key" :class="['supply-task',`is-${task.key}`,{'is-active':(workspaceTab==='fbp'?'fbp-receipts':filters.task)===task.key}]" @click="switchTask(task.key)"><component :is="task.icon"/><div><span>{{task.label}}</span><strong>{{taskCount(task.key)}}<span class="supply-task-unit">{{['incoming','receiving','fbp-receipts'].includes(task.key)?'个批次':'项库存'}}</span></strong><small>{{taskHint(task)}}</small></div></button></div>
   <template v-if="workspaceTab==='fbp'"><InventoryFbpReceiptReview :product-id="productId" @saved="queueRefresh();countsAt=0;loadBatchCounts()"/></template>
   <template v-else>

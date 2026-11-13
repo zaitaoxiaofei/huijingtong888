@@ -11,6 +11,6 @@ function clearProduct(){router.replace({query:{...route.query,product_id:undefin
 <template>
  <div class="page-stack">
   <template v-if="legacy"><div><el-button @click="router.push('/purchase-list')">返回收货工作平台</el-button></div><LegacyReceiving/></template>
-  <Workspace v-else entry="inventory" :product-id="Number(route.query.product_id)||0" @clear-product="clearProduct"><template #heading-actions><el-button @click="router.push('/purchase-history')">已入库记录</el-button><el-button plain @click="router.push({path:'/purchase-list',query:{mode:'legacy'}})">旧版收货管理</el-button></template></Workspace>
+  <Workspace v-else entry="inventory" :product-id="Number(route.query.product_id)||0" @clear-product="clearProduct"/>
  </div>
 </template>
