@@ -2,6 +2,12 @@ function knownNumber(value) {
   return value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 }
 
+export function inventoryValuationExplanation(row) {
+  const local = knownNumber(row.physical_stock), fbp = knownNumber(row.fbp_stock_known), cost = knownNumber(row.avg_unit_cost);
+  const quantity = value => value == null ? '未读取' : String(value);
+  return `货值 =（本地实物 ${quantity(local)} + FBP 实物 ${quantity(fbp)}）× 平均采购成本 ${cost == null ? '未填写' : `¥${cost.toFixed(2)}`}。采用当前实物数量，不采用历史采购数量或可用库存；缺失数据不按 0 计算。`;
+}
+
 export function inventoryValuation(row) {
   const local = knownNumber(row.physical_stock), fbp = knownNumber(row.fbp_stock_known);
   const cost = knownNumber(row.avg_unit_cost);
