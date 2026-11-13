@@ -99,6 +99,9 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
     await db.query("SELECT id FROM order_items WHERE id = ? FOR UPDATE", [Number(orderItemId)]);
     const before = await db.queryOne(SNAPSHOT_SQL, [Number(orderItemId)]);
     if (!before) throw new Error("订单商品不存在，无法保存利润计算记录");
+    if (options.expectedProjection && Object.entries(options.expectedProjection).some(([key, value]) => Number(before[key]) !== Number(value))) {
+      throw Object.assign(new Error('订单利润或数量已变化，请重新预览'), { code: 'ORDER_PROFIT_PREVIEW_STALE', statusCode: 409 });
+    }
     const actualReady = before.profit_status === "accrued" && before.settlement_state === "accrued";
     const state = await ensureOrderProfitCalculationState(connection, {
       tenantId: before.tenant_key, orderId: before.order_id, orderItemId: Number(orderItemId),
@@ -108,6 +111,9 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
       initialFormulaVersion: options.initialFormulaVersion,
       rateVersion: before.frozen_logistics_rule_id || null
     });
+    if (options.expectedEstimateRevisionId !== undefined && Number(options.expectedEstimateRevisionId) !== Number(state.current_estimate_revision_id)) {
+      throw Object.assign(new Error('订单预估版本已变化，停止旧同步结果写入，请重新同步'), { code: 'ORDER_PROFIT_ESTIMATE_CHANGED', statusCode: 409 });
+    }
     const version = state.formula_version || "V1";
     const expectedVersion = options.expectedFormulaVersion || options.inputs?.estimate?.formulaVersion;
     if (expectedVersion && expectedVersion !== version) throw Object.assign(new Error('利润公式版本已变化，停止写入并重新计算'), {
@@ -182,7 +188,7 @@ export function profitEstimateInputs({ product, mapping, estimated, quantity, sa
   const pick = (value, keys) => Object.fromEntries(keys.filter((key) => value?.[key] !== undefined).map((key) => [key, value[key]]));
   return {
     quantity, sale_price: salePrice,
-    product: pick(product, ["id", "purchase_cost", "domestic_shipping", "international_shipping", "purchase_quantity", "handling_fee", "package_weight_g", "length_cm", "width_cm", "height_cm", "exchange_rate", "return_rate", "withdrawal_fee_rate", "advertising_rate", "logistics_rule_id", "resolved_logistics_rule_id", "logistics_rule_carrier", "logistics_rule_channel", "logistics_rule_name", "logistics_rule_base_fee_cny", "logistics_rule_per_gram_cny", "logistics_rule_per_ticket_cny", "logistics_rule_min_weight_g", "logistics_rule_max_weight_g", "logistics_rule_min_price_rub", "logistics_rule_max_price_rub", "ogl_parcel_value_rub", "pricing_effective_at"]),
+    product: pick(product, ["id", "purchase_cost", "domestic_shipping", "international_shipping", "purchase_quantity", "handling_fee", "package_weight_g", "shipping_method", "payment_fee_rate", "length_cm", "width_cm", "height_cm", "exchange_rate", "return_rate", "withdrawal_fee_rate", "advertising_rate", "logistics_rule_id", "resolved_logistics_rule_id", "logistics_rule_carrier", "logistics_rule_channel", "logistics_rule_name", "logistics_rule_base_fee_cny", "logistics_rule_per_gram_cny", "logistics_rule_per_ticket_cny", "logistics_rule_min_weight_g", "logistics_rule_max_weight_g", "logistics_rule_min_price_rub", "logistics_rule_max_price_rub", "ogl_parcel_value_rub", "pricing_effective_at"]),
     mapping: pick(mapping, ["id", "commission_low", "commission_high", "commissions_json", "ozon_commissions_json", "commission_json"]),
     order: pick(order, ["status", "tracking_stage", "logistics_status", "ordered_at", "cancel_reason_id", "cancel_initiator", "cancel_type", "cancelled_after_ship", "outcome_type", "loss_profile_code"]),
     item: pick(item, ["id", "quantity", "sale_price", "order_status", "outcome_type", "loss_profile_code"]),

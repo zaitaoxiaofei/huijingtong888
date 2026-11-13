@@ -1,3 +1,5 @@
+import { productProfitParameterChanges } from "../shared/product-profit-parameters.js";
+import { scopedProductProfitRecalculation, preserveOrderEstimateParameters } from "./product-profit-recalculation.js";
 import { WB_REMOTE_WRITES_ENABLED } from "../shared/wb-capabilities.js";
 import { enrichWbOrders } from "./wb-order-dispatch.js";
 import { createOrderBindingIgnoreService } from "./order-binding-ignore.js";
@@ -18264,14 +18266,10 @@ async function upsertOrderOutboundRecordMysql(row = {}, outboundStockLocation = 
   return "inserted";
 }
 
-async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null, connection = null }) {
-  if (estimated?.fxPending) return;
+async function estimateProfitBreakdownMysql({ product, estimated, quantity, salePrice, order = null, item = null, formula = null }) {
   if (usesDailyProfitFx(estimated?.formulaVersion)) salePrice = estimated.salePriceCny;
-  const formula = getProfitFormula(estimated?.formulaVersion || "V1");
+  formula ||= getProfitFormula(estimated?.formulaVersion || "V1");
   const { classifyOrderOutcome, classifyOrderAccounting, resolveReturnLossCostPolicy } = formula.outcome;
-  const db = connection ? profitCalculationDatabase(connection) : { queryOne: mysqlQueryOne, execute: mysqlExecute };
-  const existing = await db.queryOne("SELECT is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
-  if (existing && (Number(existing.is_locked || 0) === 1 || String(existing.profit_status || "") === "accrued") && settlement !== "accrued") return;
   const qty = Number(quantity || 1);
   const rawSaleAmount = Number(salePrice || 0) * qty;
   const outcomeType = classifyOrderOutcome({
@@ -18313,6 +18311,21 @@ async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, 
     packagingCost, commission, ozonServiceFee, otherFee, returnLoss, advertisingCost
   });
   const commissionRate = rawSaleAmount ? commission / rawSaleAmount : 0;
+
+  return { saleAmount, purchaseCost, domesticShipping, internationalShipping, packagingCost, commissionRate,
+    commission, ozonServiceFee, returnLoss, advertisingCost, otherFee, grossProfit, netProfit };
+}
+
+async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null, connection = null }) {
+  if (estimated?.fxPending) return;
+  if (usesDailyProfitFx(estimated?.formulaVersion)) salePrice = estimated.salePriceCny;
+  const formula = getProfitFormula(estimated?.formulaVersion || "V1");
+  const db = connection ? profitCalculationDatabase(connection) : { queryOne: mysqlQueryOne, execute: mysqlExecute };
+  const existing = await db.queryOne("SELECT is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
+  if (existing && (Number(existing.is_locked || 0) === 1 || String(existing.profit_status || "") === "accrued") && settlement !== "accrued") return;
+  const { saleAmount, purchaseCost, domesticShipping, internationalShipping, packagingCost, commissionRate,
+    commission, ozonServiceFee, returnLoss, advertisingCost, otherFee, grossProfit, netProfit } =
+    await estimateProfitBreakdownMysql({ product, estimated, quantity, salePrice, order, item, formula });
 
   await db.execute(`
     INSERT INTO order_profit_items
@@ -19422,12 +19435,19 @@ function persistedPlatformFeeMysql(estimated, returnLossEstimate) {
   return (estimated.commission || 0) + (estimated.paymentFee || 0) + (estimated.withdrawalFee || 0) + returnLossEstimate;
 }
 
-async function persistRecalculatedItemMysql({ itemId, mapping, product, estimated, settlement, returnLossEstimate, estimatedProfit, quantity, salePrice, order = null, item = null }) {
+async function persistRecalculatedItemMysql({ itemId, mapping, product, estimated, settlement, returnLossEstimate, estimatedProfit, quantity, salePrice, order = null, item = null, pendingOnly = false, inventorySnapshot = null, expectedProjection = null, expectedEstimateRevisionId = undefined, reason = "业务数据同步" }) {
   return withVersionedOrderProfitWrite(itemId, {
-    layer: "estimate", source: "order_recalculation",
+    layer: "estimate", source: "order_recalculation", reason, expectedProjection, expectedEstimateRevisionId,
     inputs: profitEstimateInputs({ product, mapping, estimated, quantity, salePrice, order, item })
   }, async ({ connection, db }) => {
   if (estimated?.fxPending) return;
+  if (inventorySnapshot) {
+    const currentProduct = await db.queryOne('SELECT * FROM products WHERE id = ? FOR UPDATE', [inventorySnapshot.id]);
+    if (!currentProduct || !Number(currentProduct.active) || String(currentProduct.tenant_id) !== String(inventorySnapshot.tenant_id)
+      || productProfitParameterChanges(inventorySnapshot, currentProduct).length) {
+      throw Object.assign(new Error('库存参数已变化，请重新预览'), { statusCode: 409 });
+    }
+  }
   if (usesDailyProfitFx(estimated?.formulaVersion)) await db.execute("UPDATE order_items SET sale_price = ? WHERE id = ?", [estimated.salePriceCny, itemId]);
   const existingStageRow = await db.queryOne(`
     SELECT oi.settlement_state,
@@ -19450,6 +19470,9 @@ async function persistRecalculatedItemMysql({ itemId, mapping, product, estimate
     GROUP BY oi.id, oi.settlement_state, oi.actual_profit, opi.net_profit_cny, opi.profit_status, opi.is_locked, opi.lock_reason,
       o.status, o.tracking_stage, o.logistics_status, o.delivered_at, o.accrued_at
   `, [itemId]);
+  if (pendingOnly && (Number(existingStageRow?.is_locked) === 1 || existingStageRow?.profit_status === 'accrued' || existingStageRow?.settlement_state === 'accrued')) {
+    throw Object.assign(new Error('订单已结算或锁定，请重新预览'), { statusCode: 409 });
+  }
   const existingStage = resolveProfitStageMysql(existingStageRow || { ...order, ...item, settlement_state: settlement });
   // A normal estimate must never undo an already accrued, protected finance
   // projection merely because this small query lacks full finance aggregates.
@@ -20035,10 +20058,13 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
     const product = mapping && (!profitFxState || profitFxState.orderFx) ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, { ...posting, order_id: orderId }) : mapping ? await productForProfitEstimateMysql(mapping.product_id) : null;
     const existingItem = await mysqlQueryOne("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?", [orderId, item.ozon_sku]);
     if (existingItem) {
+      const preservedInput = product && mapping ? await preserveOrderEstimateParameters({ query: mysqlQuery, tenantKey: shop.tenant_id || "admin" }, existingItem.id, { product, mapping }) : { product, mapping };
+      const estimateProduct = preservedInput.product;
+      const estimateMapping = preservedInput.mapping;
       const previousQuantity = Number(existingItem.quantity || 0);
       const nextQuantity = Number(item.quantity || 1);
       // Validate the pinned formula before metadata or inventory adjustments.
-      const estimated = product && mapping ? await estimatePinnedOrderItemProfit(existingItem.id, { salePrice: item.sale_price, quantity: nextQuantity, product, mapping, fxState: profitFxState }) : null;
+      const estimated = product && mapping ? await estimatePinnedOrderItemProfit(existingItem.id, { salePrice: item.sale_price, quantity: nextQuantity, product: estimateProduct, mapping: estimateMapping, fxState: profitFxState }) : null;
       await mysqlExecute(`
         UPDATE order_items
         SET sku_mapping_id = COALESCE(?, sku_mapping_id),
@@ -20075,12 +20101,13 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
       }
       if (product && mapping) {
         const settlement = resolveProfitSettlementStatusMysql(posting);
-        const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: posting, item, product, estimated, quantity: nextQuantity, salePrice: item.sale_price });
-        const estimatedProfit = estimatedProfitValueMysql({ order: posting, item, product, estimated, returnLossEstimate });
+        const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: posting, item, product: estimateProduct, estimated, quantity: nextQuantity, salePrice: item.sale_price });
+        const estimatedProfit = estimatedProfitValueMysql({ order: posting, item, product: estimateProduct, estimated, returnLossEstimate });
         await persistRecalculatedItemMysql({
           itemId: existingItem.id,
-          mapping,
-          product,
+          expectedEstimateRevisionId: preservedInput.expectedEstimateRevisionId,
+          mapping: estimateMapping,
+          product: estimateProduct,
           estimated,
           settlement,
           returnLossEstimate,
@@ -21011,6 +21038,7 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
   if (orderedDateKey && options.refresh_snapshots !== false) {
     await refreshTenantOrderAnalyticsMysql(tenantScope.id, { from: orderedDateKey, to: orderedDateKey });
   }
+  invalidateOrderReadCache();
   return { ok: true, updated, unbound, order_date: orderedDateKey || "" };
 }
 
@@ -21558,6 +21586,20 @@ export async function repairHistoricalFinanceProfitFactsMysql(body = {}, tenantI
 
 export async function recalculateOrderProfitsForProductMysql(productId, options = {}) {
   ensureMysqlCutoverEnabled();
+  if (options.recalculation_scope) return scopedProductProfitRecalculation({
+    orderListTenantScopeMysql, assertOrderTaskAccessMysql, mysqlQueryOne, mysqlQuery, orderTenantPredicateMysql,
+    chinaDateSqlMysql, productForProfitEstimateMysql, readableLogisticsTenantScopeMysql, productWithOglOrderRateMysql,
+    productWithLogisticsRuleMysql, estimatePinnedOrderItemProfit, estimateProfitBreakdownMysql,
+    roundMoneyMysql, persistRecalculatedItemMysql, invalidateOrderReadCache,
+    readProfitFxState: (tenantId, orderId) => readOrderProfitFxState({ query: mysqlQuery }, tenantId, orderId),
+    refreshProfitSnapshots: async (tenantId, items) => {
+      await refreshOrderProfitDetailSnapshotsMysql({ order_ids: [...new Set(items.map(item => Number(item.order_id)))] }, tenantId);
+      const dates = [...new Set(items.map(item => chinaDateKeyMysql(item.ordered_at)).filter(Boolean))].sort();
+      if (dates.length && (new Date(dates.at(-1)) - new Date(dates[0])) / 86400000 < 31) {
+        await refreshTenantOrderAnalyticsMysql(tenantId, { from: dates[0], to: dates.at(-1) });
+      }
+    }
+  }, productId, options);
   const tenantScope = await orderListTenantScopeMysql(options.tenantId || "admin");
   await assertOrderTaskAccessMysql(tenantScope, options, ["inventory.write"]);
   const product = await mysqlQueryOne(`SELECT id FROM products WHERE id = ? AND active = 1 AND ${orderTenantPredicateMysql("products", tenantScope)}`, [Number(productId)]);

@@ -1,13 +1,13 @@
 import {pathToFileURL} from 'node:url';
 import {WB_SCHEMA} from '../src/services/wb-schema.js';
-const descriptors={wb_catalog_cache:{columns:['tenant_id','environment','resource_key','locale','payload_json','checked_at'],unique:['tenant_id,environment,resource_key,locale']},wb_listing_templates:{columns:['id','tenant_id','name','subject_id','attributes_json','defaults_json','revision'],unique:['id','tenant_id,name']},wb_listing_drafts:{columns:['id','tenant_id','shop_id','template_id','vendor_code','payload_json','status','revision'],unique:['id','shop_id,vendor_code']}};
+const descriptors={wb_publish_jobs:{columns:['id','tenant_id','shop_id','draft_id','draft_revision','person_id','environment','seller_id','review_hash','status','payload_json','state_json','message','lease_token','lease_until','next_run_at'],unique:['id','draft_id,draft_revision']},wb_catalog_cache:{columns:['tenant_id','environment','resource_key','locale','payload_json','checked_at'],unique:['tenant_id,environment,resource_key,locale']},wb_listing_templates:{columns:['id','tenant_id','name','subject_id','attributes_json','defaults_json','revision'],unique:['id','tenant_id,name']},wb_listing_drafts:{columns:['id','tenant_id','shop_id','template_id','vendor_code','payload_json','status','revision'],unique:['id','shop_id,vendor_code']}};
 export async function inspectWbCatalogSchema(query){
  const missing=[],problems=[];
  for(const [name,expected] of Object.entries(descriptors)){
   const columns=await query('SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=?',[name]);
   if(!columns.length){missing.push(name);continue;}
   const names=new Set(columns.map(c=>c.COLUMN_NAME));for(const field of expected.columns)if(!names.has(field))problems.push(`${name}.${field}`);
-  for(const c of columns)if(['payload_json','attributes_json','defaults_json'].includes(c.COLUMN_NAME)&&c.DATA_TYPE!=='json')problems.push(`${name}.${c.COLUMN_NAME}:type`);
+  for(const c of columns)if(['payload_json','state_json','attributes_json','defaults_json'].includes(c.COLUMN_NAME)&&c.DATA_TYPE!=='json')problems.push(`${name}.${c.COLUMN_NAME}:type`);
   const keys=await query('SELECT INDEX_NAME,GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS cols FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name=? AND NON_UNIQUE=0 GROUP BY INDEX_NAME',[name]);
   for(const key of expected.unique)if(!keys.some(k=>k.cols===key))problems.push(`${name}:unique:${key}`);
  }

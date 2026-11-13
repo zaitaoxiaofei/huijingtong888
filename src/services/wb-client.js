@@ -6,7 +6,7 @@ const nextAt = new Map();
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now } = {}) {
-  return async function request(account, service, path, { method = 'GET', body, query, signal } = {}) {
+  return async function request(account, service, path, { method = 'GET', body, query, signal, beforeRequest } = {}) {
     if (!HOSTS[service] || !path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('WB 接口地址无效');
     if (!account?.token) throw Object.assign(new Error('缺少 WB API 授权，请到企业店铺编辑该 WB 店铺，填写 API Token 并检查授权。'), { statusCode: 409 });
     const readOnly=method==='GET'||(method==='POST'&&(['/api/v3/orders/status','/api/v3/orders/stickers','/content/v2/get/cards/list','/content/v2/get/cards/trash','/content/v2/cards/error/list'].includes(path)||/^\/api\/v3\/stocks\/\d+$/.test(path)));
@@ -24,6 +24,8 @@ export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now
       const delay = (nextAt.get(key) || 0) - now();
       if (delay > 10000) throw Object.assign(new Error('WB 请求额度尚未恢复，请稍后再试。'), { statusCode:429 });
       if (delay > 0) await sleep(delay);
+      signal?.throwIfAborted();
+      await beforeRequest?.();
       signal?.throwIfAborted();
       nextAt.set(key, now() + 1100);
       let response;
