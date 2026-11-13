@@ -3,6 +3,6 @@
 export const WB_REMOTE_WRITES_ENABLED = false;
 export const WB_REMOTE_WRITE_ACTIONS = new Set(['bindProduct','publish','uploadMedia','setPrice','setStocks','prepare','stickers','supplyAction','enrollPromotion']);
 
-// Only the reviewed, durable new-product publishing flow is enabled.
-// Standalone price, stock, existing-card edits and fulfillment stay gated above.
+// Reviewed, durable publishing and existing-product operations are enabled.
+// Standalone low-level writes, stock and fulfillment stay gated above.
 export const WB_LISTING_PUBLISH_ENABLED = true;

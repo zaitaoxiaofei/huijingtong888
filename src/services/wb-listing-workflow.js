@@ -39,14 +39,10 @@ export function createWbListingWorkflow({query,request,account,transaction,categ
     await q('SELECT id FROM shops WHERE id=? AND tenant_id=? FOR UPDATE',[a.shop_id,a.tenant_id]);
     const previous=body.draft_id?(await q('SELECT * FROM wb_listing_drafts WHERE id=? AND tenant_id=? AND shop_id=? FOR UPDATE',[id(body.draft_id),a.tenant_id,a.shop_id]))[0]:null;
     if(body.draft_id&&!previous)throw fail('WB 草稿不存在或不属于当前店铺。',404);
-    if(previous&&!['draft','published','publishing'].includes(previous.status))throw fail('草稿正在发布处理，不能覆盖；请到上架记录继续核对。');
-    const submitted=['published','publishing'].includes(previous?.status);
-    if(submitted){const original=parse(previous.payload_json);if(Number(original.subject_id)!==Number(payload.subject_id)||JSON.stringify(wbListingVariants(original).map(v=>v.card.vendorCode))!==JSON.stringify(vendors))throw fail('已提交草稿不能更换类目或变体货号；本次编辑仅保存本地资料。');}
     const existing=await q('SELECT id,payload_json FROM wb_listing_drafts WHERE tenant_id=? AND shop_id=? AND id<>?',[a.tenant_id,a.shop_id,Number(body.draft_id||0)]);
     const used=new Set(existing.flatMap(row=>wbListingVariants(parse(row.payload_json)).map(v=>String(v.card?.vendorCode||'').trim())));
-    const online=await q('SELECT vendor_code,nm_id FROM wb_product_cards WHERE tenant_id=? AND shop_id=?',[a.tenant_id,a.shop_id]);
-    for(const row of variants){const code=String(row.card.vendorCode).trim();if(used.has(code)||!submitted&&online.some(item=>item.vendor_code===code&&Number(item.nm_id)!==Number(row.card.nmID)))throw fail('变体货号已在当前 WB 店铺使用：'+code+'，请重新生成或编辑已有草稿。');}
-    if(previous){if(previous.vendor_code!==vendor)throw fail('草稿货号已变化，不能覆盖。');const r=await q('UPDATE wb_listing_drafts SET template_id=?,payload_json=?,revision=revision+1 WHERE id=? AND tenant_id=? AND shop_id=? AND revision=? AND status=?',[selected.id,JSON.stringify(saved),previous.id,a.tenant_id,a.shop_id,Number(body.revision),previous.status]);if(!r.affectedRows)throw fail('草稿已在其他窗口修改，请刷新后重试。');return {ok:true,draft_id:previous.id,revision:Number(previous.revision)+1};}
+    for(const code of vendors)if(used.has(code))throw fail('当前店铺已有使用此货号的本地草稿：'+code+'，请编辑该草稿或使用其他货号。');
+    if(previous){try{const r=await q("UPDATE wb_listing_drafts SET vendor_code=?,template_id=?,payload_json=?,revision=revision+1,status='draft' WHERE id=? AND tenant_id=? AND shop_id=? AND revision=?",[vendor,selected.id,JSON.stringify(saved),previous.id,a.tenant_id,a.shop_id,Number(body.revision)]);if(!r.affectedRows)throw fail('草稿已在其他窗口修改，请刷新后重试。');return {ok:true,draft_id:previous.id,revision:Number(previous.revision)+1};}catch(error){if(error.code==='ER_DUP_ENTRY')throw fail('当前店铺已有使用此货号的草稿，请编辑该草稿或使用其他货号。');throw error;}}
     try{const r=await q("INSERT INTO wb_listing_drafts (tenant_id,shop_id,template_id,vendor_code,payload_json,status) VALUES (?,?,?,?,?,'draft')",[a.tenant_id,a.shop_id,selected.id,vendor,JSON.stringify(saved)]);return {ok:true,draft_id:r.insertId,revision:1};}catch(error){if(error.code==='ER_DUP_ENTRY')throw fail('该 WB 店铺已存在此货号草稿，请在草稿列表继续编辑。');throw error;}
     });
   }

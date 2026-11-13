@@ -15,3 +15,5 @@ export function wbApplyCommon(rows,values,attributes){
  const common=new Set(attributes.filter(a=>a.isVariable!==true).map(a=>Number(a.charcID)));
  for(const row of rows){row.card.characteristics=[...(row.card.characteristics||[]).filter(v=>!common.has(Number(v.id))),...clone(values)];}
 }
+// Include both old and desired articles while an existing-card operation renames one.
+export function wbPayloadVendorCodes(payload={}){return [...new Set([...wbListingVariants(payload).map(v=>v.card?.vendorCode),...(payload.targets||[]).flatMap(t=>[t.vendor_code,t.before_card?.vendorCode,t.update_card?.vendorCode])].filter(Boolean).map(v=>String(v).trim()))];}
