@@ -1,3 +1,4 @@
+import { readOzonCategoryIdentity, ozonCategoryIdentityError, ozonCategoryProductRefs, findOzonCategoryProduct } from "./services/ozon-category-identity.js";
 import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js";
 import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
 import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
@@ -980,7 +981,8 @@ export async function importOzonProducts(shop, payload = {}, options = {}) {
 export async function fetchOzonProductInfoAttributes(shop, options = {}) {
   const productIds = [...new Set((options.productIds || options.product_id || []).map(Number).filter(Boolean))];
   const offerIds = [...new Set((options.offerIds || options.offer_id || []).map((item) => String(item || "").trim()).filter(Boolean))];
-  if (!productIds.length && !offerIds.length) return [];
+  const skus = [...new Set(normalizeArray(options.skus ?? options.sku).map(item => String(item || "").trim()).filter(Boolean))];
+  if (!productIds.length && !offerIds.length && !skus.length) return [];
   if (!hasRealOzonCredentials(shop)) {
     const productId = productIds[0] || Number(String(offerIds[0] || "").replace(/\D/g, "")) || Date.now();
     return [{
@@ -1006,6 +1008,7 @@ export async function fetchOzonProductInfoAttributes(shop, options = {}) {
   const filter = {};
   if (productIds.length) filter.product_id = productIds;
   if (offerIds.length) filter.offer_id = offerIds;
+  if (skus.length) filter.sku = skus;
   const limit = Math.min(Math.max(Number(options.limit || 100), 1), 1000);
   const rows = [];
   const seenCursors = new Set();
@@ -1073,11 +1076,32 @@ export async function fetchOzonProductContentRating(shop, options = {}) {
   return normalizeArray(result.products || result.items || result.ratings || result);
 }
 
+export async function resolveOzonCategoryIdentity(shop, options = {}) {
+  throwIfAborted(options.signal);
+  let { descriptionCategoryId, typeId } = readOzonCategoryIdentity(options);
+  if (!descriptionCategoryId || !typeId) {
+    const refs = ozonCategoryProductRefs(options);
+    const hasReference = refs.productId || refs.offerId || refs.sku;
+    if (!hasReference) throw ozonCategoryIdentityError();
+    if (!hasRealOzonCredentials(shop)) throw ozonCategoryIdentityError('店铺缺少有效 Ozon Client ID／API Key，不能从原商品核对类目');
+    const filter = refs.productId ? { productIds: [refs.productId] } : refs.offerId ? { offerIds: [refs.offerId] } : { skus: [refs.sku] };
+    const rows = await fetchOzonProductInfoAttributes(shop, {
+      ...filter, limit: 1, signal: options.signal,
+      beforeRequest: options.beforeRequest, afterRequest: options.afterRequest
+    });
+    const product = findOzonCategoryProduct(rows, refs);
+    const current = readOzonCategoryIdentity(product);
+    if (!current.descriptionCategoryId || !current.typeId) throw ozonCategoryIdentityError('Ozon 原商品未返回完整的新类目字段');
+    if ((descriptionCategoryId && descriptionCategoryId !== current.descriptionCategoryId) || (typeId && typeId !== current.typeId)) {
+      throw ozonCategoryIdentityError('当前类目字段与 Ozon 原商品不一致，未自动覆盖原选择');
+    }
+    ({ descriptionCategoryId, typeId } = current);
+  }
+  return { descriptionCategoryId, typeId };
+}
+
 export async function fetchOzonCategoryAttributes(shop, options = {}) {
-  const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
-  const typeId = Number(options.typeId || options.type_id || 0);
-  const categoryId = Number(options.categoryId || options.category_id || 0);
-  if (!descriptionCategoryId && !typeId && !categoryId) return [];
+  const { descriptionCategoryId, typeId } = await resolveOzonCategoryIdentity(shop, options);
   if (!hasRealOzonCredentials(shop)) {
     return [
       { id: 85, name: "品牌", is_required: true, type: "String", dictionary_id: 971082, is_collection: false },
@@ -1086,28 +1110,21 @@ export async function fetchOzonCategoryAttributes(shop, options = {}) {
       { id: 8229, name: "颜色", is_required: false, type: "String", dictionary_id: 0, is_collection: false }
     ];
   }
-
-  if (descriptionCategoryId && typeId) {
-    const data = await ozonRequest(shop, "/v1/description-category/attribute", {
-      description_category_id: descriptionCategoryId,
-      type_id: typeId,
-      language: options.language || "DEFAULT"
-    }, options);
-    return normalizeOzonCategoryAttributeResponse(data);
-  }
-
-  const data = await ozonRequest(shop, "/v3/category/attribute", {
-    attribute_type: "ALL",
-    category_id: [categoryId],
+  throwIfAborted(options.signal);
+  const data = await ozonRequest(shop, "/v1/description-category/attribute", {
+    description_category_id: descriptionCategoryId,
+    type_id: typeId,
     language: options.language || "DEFAULT"
   }, options);
+  await options.afterRequest?.();
+  throwIfAborted(options.signal);
   return normalizeOzonCategoryAttributeResponse(data);
 }
 
 export async function fetchOzonCategoryAttributeValues(shop, options = {}) {
-  const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
-  const typeId = Number(options.typeId || options.type_id || 0);
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(options);
   const attributeId = Number(options.attributeId || options.attribute_id || 0);
+  if (attributeId && (!descriptionCategoryId || !typeId) && (descriptionCategoryId || typeId || options.categoryId || options.category_id || options.ozon_category_id)) throw ozonCategoryIdentityError();
   if (!descriptionCategoryId || !typeId || !attributeId) return [];
   if (!hasRealOzonCredentials(shop)) {
     return [
@@ -1142,9 +1159,9 @@ export async function fetchOzonCategoryAttributeValues(shop, options = {}) {
 }
 
 export async function searchOzonCategoryAttributeValues(shop, options = {}) {
-  const descriptionCategoryId = Number(options.descriptionCategoryId || options.description_category_id || 0);
-  const typeId = Number(options.typeId || options.type_id || 0);
+  const { descriptionCategoryId, typeId } = readOzonCategoryIdentity(options);
   const attributeId = Number(options.attributeId || options.attribute_id || 0);
+  if (attributeId && (!descriptionCategoryId || !typeId) && (descriptionCategoryId || typeId || options.categoryId || options.category_id || options.ozon_category_id)) throw ozonCategoryIdentityError();
   const value = String(options.value || options.keyword || "").trim();
   if (!descriptionCategoryId || !typeId || !attributeId || !value) return [];
   if (!hasRealOzonCredentials(shop)) {
@@ -1172,11 +1189,15 @@ export async function fetchOzonDescriptionCategoryTree(shop, options = {}) {
 }
 
 function normalizeOzonCategoryAttributeResponse(data = {}) {
-  const result = data.result || data.items || data;
-  if (Array.isArray(result)) return result.flatMap((item) => Array.isArray(item?.attributes) ? item.attributes : [item]);
-  if (Array.isArray(result.attributes)) return result.attributes;
-  if (Array.isArray(result.items)) return result.items.flatMap((item) => Array.isArray(item?.attributes) ? item.attributes : [item]);
-  return [];
+  const result = data?.result ?? data?.items ?? data;
+  let attributes;
+  if (Array.isArray(result)) attributes = result.flatMap(item => Array.isArray(item?.attributes) ? item.attributes : [item]);
+  else if (Array.isArray(result?.attributes)) attributes = result.attributes;
+  else if (Array.isArray(result?.items)) attributes = result.items.flatMap(item => Array.isArray(item?.attributes) ? item.attributes : [item]);
+  if (!attributes || attributes.some(item => !item || typeof item !== "object" || !Number.isSafeInteger(Number(item.id ?? item.attribute_id)) || Number(item.id ?? item.attribute_id) <= 0)) {
+    throw new Error("Ozon 类目属性响应格式已变化，请重新同步类目属性；未按空属性列表处理");
+  }
+  return attributes;
 }
 
 function normalizeOzonAttributeValuesResponse(data = {}) {

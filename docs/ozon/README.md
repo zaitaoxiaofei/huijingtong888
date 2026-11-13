@@ -23,4 +23,5 @@ This directory records Ozon seller API behavior that affects local sync logic.
 - [finance-posting-reconciliation.md](./finance-posting-reconciliation.md): verified postings contract, read-only order-fee inspection, enterprise boundaries and unresolved live throttling.
 
 - [product-attributes-pagination.md](./product-attributes-pagination.md): complete v4 attribute reads and original error propagation.
+- [legacy-category-compatibility.md](./legacy-category-compatibility.md): exact legacy category conversion, same-shop original-product recovery and manual-selection boundaries.
 - [remaining-contract-audit-20261112.md](./remaining-contract-audit-20261112.md): current Seller path coverage, unlisted compatibility paths and next local adaptation sequence.
