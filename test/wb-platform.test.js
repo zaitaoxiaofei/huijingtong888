@@ -69,6 +69,6 @@ test('WB routes take tenant exclusively from a freshly authorized session',async
 });
 
 test('WB official option directory has an operations read gate and no write alias',()=>{
- assert.equal(wbRoutePermission(['api','wb','catalog','options'],'GET'),'operations');
+ assert.equal(wbRoutePermission(['api','wb','catalog','options'],'GET'),'operations');assert.equal(wbRoutePermission(['api','wb','catalog','brands'],'GET'),'operations');assert.equal(wbRoutePermission(['api','wb','catalog','brands'],'POST'),null);
  assert.equal(wbRoutePermission(['api','wb','catalog','options'],'POST'),null);
 });

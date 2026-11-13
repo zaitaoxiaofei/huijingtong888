@@ -46,7 +46,7 @@ export function createWbListingWorkflow({query,request,account,transaction,categ
     });
   }
   async function validateListingDraft(tenantId,body){const {a,payload}=await owned(tenantId,body),selected=await template(a.tenant_id,payload.template_id);const current=await request(a,'content',`/content/v2/object/charcs/${selected.subject_id}`,{query:{locale:'zh'}});const result=await validatePayload(a.tenant_id,{shop_id:a.shop_id,payload},current.data||[]);if(payload.currency!=='CNY')result.errors.push('售价币种：请选择人民币 CNY。');return {...result,ok:!result.errors.length,review_only:true,message:'本次只校验资料，不会向 WB 创建商品、生成条码、发布价格或库存。'};}
-  async function workbenchDrafts(tenantId){const rows=await query(`SELECT d.*,s.name AS shop_name FROM wb_listing_drafts d JOIN shops s ON s.id=d.shop_id AND s.tenant_id=d.tenant_id WHERE d.tenant_id=? AND s.platform='wb' AND s.status='active' ORDER BY d.updated_at DESC LIMIT 200`,[id(tenantId)]);return {rows:rows.map(row=>({...row,payload:parse(row.payload_json),payload_json:undefined}))};}
+  async function workbenchDrafts(tenantId){const rows=await query(`SELECT d.*,s.name AS shop_name,t.category_name FROM wb_listing_drafts d JOIN wb_listing_templates t ON t.id=d.template_id AND t.tenant_id=d.tenant_id JOIN shops s ON s.id=d.shop_id AND s.tenant_id=d.tenant_id WHERE d.tenant_id=? AND s.platform='wb' AND s.status='active' ORDER BY d.updated_at DESC LIMIT 200`,[id(tenantId)]);return {rows:rows.map(row=>({...row,payload:parse(row.payload_json),payload_json:undefined}))};}
   async function validatePayload(tenantId,body,attributes){
     const result=wbListingValidation(body.payload,attributes);
     for(const attribute of attributes.filter(a=>wbAttributeDirectory(a))){

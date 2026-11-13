@@ -176,7 +176,7 @@ export const router = createRouter({
         { path: "collector-box", name: "collector-box", component: CollectorBoxView, meta: { title: "采集箱", breadcrumb: ["商品管理", "采集箱"], tabKey: "workbench" } },
         { path: "listing-records", name: "listing-records", component: productPlatformModule(ListingPublishRecordsView,() => import('../views/inventory/WbDraftsView.vue'),'草稿箱','/wb/listing'), meta: { title: "草稿箱", breadcrumb: ["商品管理", "草稿箱"], recordMode: "drafts" } },
         { path: "listing-publish-records", name: "listing-publish-records", component: productPlatformModule(ListingPublishRecordsView,() => import('../views/inventory/WbModuleStatusView.vue'),'上架记录','/wb/listing'), meta: { title: "上架记录", breadcrumb: ["商品管理", "上架记录"], recordMode: "publish" } },
-        { path: "batch-stock-update", name: "batch-stock-update", component: productPlatformModule(OnlineProductsView,() => import('../views/inventory/WbModuleStatusView.vue'),'批量改库存','/wb/online-products'), meta: { title: "批量改库存", breadcrumb: ["商品管理", "批量改库存"] } },
+        { path: "batch-stock-update", name: "batch-stock-update", component: productPlatformModule(OnlineProductsView,() => import('../views/inventory/WbStockBatchView.vue'),'批量改库存','/wb/online-products'), meta: { title: "批量改库存", breadcrumb: ["商品管理", "批量改库存"] } },
         {
           path: "listing-records/edit",
           name: "listing-record-editor",

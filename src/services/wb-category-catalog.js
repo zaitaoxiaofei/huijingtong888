@@ -1,3 +1,4 @@
+import {wbLocalizedOptions} from '../shared/wb-display.js';
 import {wbAttributeDirectory,wbDirectoryOptions} from '../shared/wb-attribute-options.js';
 import {createHash} from 'node:crypto';
 const fail=(message,statusCode=409)=>Object.assign(new Error(message),{statusCode});
@@ -65,7 +66,12 @@ export function createWbCategoryCatalog({query,request,account}){
   const attribute=schema.data.find(item=>Number(item.charcID)===attributeId),kind=wbAttributeDirectory(attribute);
   if(!attribute||!kind)throw fail('该属性不使用 WB 官方选项，请按模板要求填写。',400);
   const result=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'ru',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'ru',...(kind==='tnved'?{subjectID:subject}:{})}}));
-  return {...result,data:wbDirectoryOptions(result.data,kind)};
+  const localized=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'zh',...(kind==='tnved'?{subjectID:subject}:{})}}));
+  return {...result,data:wbDirectoryOptions(result.data,kind),options:wbLocalizedOptions(result.data,localized.data,kind),cache:{...result.cache,stale:result.cache.stale||localized.cache.stale}};
  }
- return {catalogAccount,categoryParents,catalogCategories,categorySchema,categoryOptions};
+ async function categoryBrands(tenantId,body={}){
+  const a=await catalogAccount(tenantId,body),subject=Number(body.subject_id);if(!Number.isSafeInteger(subject)||subject<=0)throw fail('请先选择有效类目。',400);
+  const result=await cached(a,`brands:${a.shop_id}:${subject}`,'ru',false,async()=>{const r=await request(a,'content','/api/content/v1/brands',{query:{subjectId:subject}});if(!Array.isArray(r.brands))throw fail('品牌目录暂时不可用，请稍后重试。',502);return {data:r.brands.map(b=>String(b.name||'')).filter(Boolean)};});return result;
+ }
+ return {catalogAccount,categoryParents,catalogCategories,categorySchema,categoryOptions,categoryBrands};
 }
