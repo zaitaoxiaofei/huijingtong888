@@ -80,7 +80,7 @@ if (props.modelValue) items.value = inventoryLabelItems(props.products);
       <img v-if="preview" :src="preview" class="inventory-label-preview" :alt="`${items[previewIndex]?.number} 标签预览`" />
       <el-alert v-else title="标签内容不完整或过长，请先编辑库存编号和名称" type="warning" :closable="false" />
     </div>
-    <p class="label-print-hint">每张标签独占一页。打印时选择 70 × 30 mm 标签纸、100% 实际大小，关闭页眉页脚。</p>
+    <p class="label-print-hint">数量默认取本地实物库存；零库存或数量未知时默认 1 张，可手动调整。在库存商品页面选择“库存编号精确”，点击搜索框后扫码并回车，即可查看对应库存和图片。每张标签独占一页，打印时选择 70 × 30 mm 标签纸、100% 实际大小，关闭页眉页脚。</p>
     <div v-if="result" class="label-print-ready" role="status">已生成 {{ result.total }} 张标签的 PDF。</div>
     <template #footer>
       <el-button @click="visible = false">关闭</el-button>
