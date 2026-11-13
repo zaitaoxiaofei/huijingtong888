@@ -84,6 +84,9 @@ export function createStaticHandler(publicDir, options = {}) {
   function sendFile(filePath, cleanPath, req, res) {
     const ext = path.extname(filePath);
     const headers = { "Content-Type": CONTENT_TYPES[ext] || "application/octet-stream" };
+    if (cleanPath === "/admin.html") {
+      headers["Permissions-Policy"] = "camera=(self), microphone=(), geolocation=()";
+    }
     const isAiWorkbenchProxyAsset = /^\/ai-workbench-proxy\/assets\/.+\.(css|js)$/i.test(cleanPath);
     const isVueAppAsset = /\/vue-apps\/assets\/.+\.(css|js)$/i.test(cleanPath);
     const isVersionedAsset = isVersionedVueAssetPath(cleanPath);
