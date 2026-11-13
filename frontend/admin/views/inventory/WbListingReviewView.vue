@@ -19,7 +19,7 @@ async function choose(category,refresh=false,restored=null){
  const requestId=++categorySequence,scope=currentApiCacheScope();busy.value=true;
  const previous=restored|| (editor.value?editor.value.getContext():context.value);
  try{
-  const r=await apiClient.get(`/api/wb/catalog/schema?subject_id=${category.subjectID}&category_name=${encodeURIComponent(category.subjectName||schema.value?.category_name||'')}${previous?.target_shop_id||previous?.shop_id?`&shop_id=${previous.target_shop_id||previous.shop_id}`:''}${refresh?'&refresh=1':''}`,{noCache:true});if(scope!==currentApiCacheScope()||requestId!==categorySequence)return;
+  const r=await apiClient.get(`/api/wb/catalog/schema?background=1&subject_id=${category.subjectID}&category_name=${encodeURIComponent(category.subjectName||schema.value?.category_name||'')}${previous?.target_shop_id||previous?.shop_id?`&shop_id=${previous.target_shop_id||previous.shop_id}`:''}${refresh?'&refresh=1':''}`,{noCache:true});if(scope!==currentApiCacheScope()||requestId!==categorySequence)return;
   if(previous?.payload){const p=JSON.parse(JSON.stringify(previous.payload));const same=Number(p.subject_id)===Number(r.subject_id);p.subject_id=r.subject_id;p.template_id=Number(r.template_id);const ids=new Set(r.attributes.map(a=>Number(a.charcID)));for(const row of [p,...(p.variants||[])])row.card.characteristics=same?(row.card.characteristics||[]).filter(a=>ids.has(Number(a.id))):JSON.parse(JSON.stringify(r.defaults?.characteristics||[]));context.value={...previous,payload:p};}
   else context.value=null;
   schema.value=r;generation.value++;

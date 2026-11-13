@@ -1,6 +1,7 @@
 import {wbLocalizedOptions} from '../shared/wb-display.js';
 import {wbAttributeDirectory,wbDirectoryOptions,wbTemplateOptions} from '../shared/wb-attribute-options.js';
 import {createHash} from 'node:crypto';
+import {wbListingVariants} from '../shared/wb-listing-variants.js';
 const fail=(message,statusCode=409)=>Object.assign(new Error(message),{statusCode});
 const parse=value=>typeof value==='string'?JSON.parse(value):value;
 export const WB_CATALOG_CACHE_SCHEMA=`CREATE TABLE IF NOT EXISTS wb_catalog_cache (
@@ -20,32 +21,35 @@ export function createWbCategoryCatalog({query,request,account}){
   if(!rows[0])throw fail('请先在企业店铺配置并检查一家具备 Content 权限的 WB 店铺，系统才能读取类目；目标上架店铺可以稍后选择。');
   return account(tenantId,rows[0].shop_id);
  }
- async function cached(a,key,locale,refresh,load){
+ async function cached(a,key,locale,refresh,load,{background=false}={}){
   const [row]=await query('SELECT payload_json,TIMESTAMPDIFF(SECOND,checked_at,UTC_TIMESTAMP()) AS age FROM wb_catalog_cache WHERE tenant_id=? AND environment=? AND resource_key=? AND locale=?',[a.tenant_id,a.environment,key,locale]);
   if(row&&Number(row.age)>=0&&Number(row.age)<21600&&!refresh)return {...parse(row.payload_json),cache:{source:'local',stale:false,age_seconds:Number(row.age)}};
   const identity=`${a.tenant_id}:${a.environment}:${locale}:${key}`;
-  if(pending.has(identity))return pending.get(identity);
+  const cachedWhileRefreshing=()=>({...parse(row.payload_json),cache:{source:'local',stale:true,revalidating:true,age_seconds:Number(row.age)}});
+  if(pending.has(identity))return row&&background&&!refresh?cachedWhileRefreshing():pending.get(identity);
   const run=(async()=>{try{
     const result=await load();
     if(!Array.isArray(result.data))throw fail('WB 类目接口没有返回完整字段，请稍后刷新。',502);
     await query('INSERT INTO wb_catalog_cache (tenant_id,environment,resource_key,locale,payload_json,checked_at) VALUES (?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE payload_json=VALUES(payload_json),checked_at=VALUES(checked_at)',[a.tenant_id,a.environment,key,locale,JSON.stringify(result)]);
     return {...result,cache:{source:'wb',stale:false,age_seconds:0}};
   }catch(error){if(!row)throw error;return {...parse(row.payload_json),cache:{source:'local',stale:true,age_seconds:Number(row.age),message:'WB 暂时无法更新，当前显示上次缓存；正式校验时仍需核对最新字段。'}};}})();
-  pending.set(identity,run);try{return await run;}finally{pending.delete(identity);}
+  const tracked=run.finally(()=>pending.delete(identity));pending.set(identity,tracked);
+  if(row&&background&&!refresh){tracked.catch(error=>console.warn('[wb-catalog] 后台更新失败',{resource:key,status:error.statusCode||502}));return cachedWhileRefreshing();}
+  return tracked;
  }
- async function categoryParents(tenantId,body={}){const a=await catalogAccount(tenantId,body);return cached(a,'parents','zh',body.refresh===true||body.refresh==='1',()=>request(a,'content','/content/v2/object/parent/all',{query:{locale:'zh'}}));}
+ async function categoryParents(tenantId,body={}){const a=await catalogAccount(tenantId,body);return cached(a,'parents','zh',body.refresh===true||body.refresh==='1',()=>request(a,'content','/content/v2/object/parent/all',{query:{locale:'zh'}}),{background:body.background==='1'});}
  async function catalogCategories(tenantId,body={}){
   const a=await catalogAccount(tenantId,body),offset=Number(body.offset||0),search=String(body.search||'').trim(),parent=body.parent_id?Number(body.parent_id):null;
   if(!Number.isSafeInteger(offset)||offset<0||offset>100000||search.length>100||(parent!==null&&(!Number.isSafeInteger(parent)||parent<=0)))throw fail('类目筛选条件无效，请重新搜索。',400);
   const options={locale:'zh',name:search,limit:100,offset,...(parent?{parentID:parent}:{})};
   const key='categories:'+createHash('sha256').update(JSON.stringify(options)).digest('hex');
-  const result=await cached(a,key,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content','/content/v2/object/all',{query:options}));
+  const result=await cached(a,key,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content','/content/v2/object/all',{query:options}),{background:body.background==='1'});
   return {...result,offset,next_offset:result.data.length===100?offset+100:null};
  }
  async function categorySchema(tenantId,body={}){
   const a=await catalogAccount(tenantId,body),subject=Number(body.subject_id);
   if(!Number.isSafeInteger(subject)||subject<=0)throw fail('请先选择 WB 商品类目。',400);
-  const result=await cached(a,`schema:${subject}`,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}}));
+  const result=await cached(a,`schema:${subject}`,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}}),{background:body.background==='1'});
   const candidates=await query('SELECT * FROM wb_listing_templates WHERE tenant_id=? AND subject_id=? ORDER BY id',[a.tenant_id,subject]);
   const existing=candidates.find(row=>(parse(row.defaults_json).environment||'production')===a.environment);
   const categoryName=String(result.data[0]?.subjectName||String(body.category_name||'').slice(0,200)||`WB 类目 ${subject}`);
@@ -62,17 +66,20 @@ export function createWbCategoryCatalog({query,request,account}){
  async function categoryOptions(tenantId,body={}){
   const a=await catalogAccount(tenantId,body),subject=Number(body.subject_id),attributeId=Number(body.attribute_id);
   if(!Number.isSafeInteger(subject)||subject<=0||!Number.isSafeInteger(attributeId)||attributeId<=0)throw fail('请先选择有效类目和属性。',400);
-  const schema=await cached(a,`schema:${subject}`,'zh',false,()=>request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}}));
+  const background=body.background==='1'||body.background===true;
+  const schema=await cached(a,`schema:${subject}`,'zh',false,()=>request(a,'content',`/content/v2/object/charcs/${subject}`,{query:{locale:'zh'}}),{background});
   const attribute=schema.data.find(item=>Number(item.charcID)===attributeId),kind=wbAttributeDirectory(attribute);
   if(!attribute)throw fail('该属性不属于当前类目，请重新选择类目。',400);
   if(!kind){
    const options=wbTemplateOptions(attribute),seen=new Set(options.map(item=>item.value));
    const cards=await query("SELECT raw_json FROM wb_product_cards WHERE tenant_id=? AND shop_id=? AND CAST(JSON_UNQUOTE(JSON_EXTRACT(raw_json,'$.subjectID')) AS UNSIGNED)=? ORDER BY synced_at DESC LIMIT 200",[a.tenant_id,a.shop_id,subject]);
-   for(const row of cards){const card=parse(row.raw_json);for(const value of card.characteristics||[]){if(Number(value.id)!==attributeId||!Array.isArray(value.value))continue;for(const text of value.value){if(typeof text!=='string'||!text.trim()||text.length>500||seen.has(text))continue;seen.add(text);options.push({value:text,label:text});}}}
+   const drafts=await query("SELECT d.payload_json FROM wb_listing_drafts d JOIN wb_listing_templates t ON t.id=d.template_id AND t.tenant_id=d.tenant_id WHERE d.tenant_id=? AND d.shop_id=? AND t.subject_id=? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.defaults_json,'$.environment')),'production')=? ORDER BY d.updated_at DESC LIMIT 200",[a.tenant_id,a.shop_id,subject,a.environment]);
+   const history=[...cards.map(row=>parse(row.raw_json)),...drafts.flatMap(row=>wbListingVariants(parse(row.payload_json)).map(v=>v.card))];
+   for(const card of history){for(const value of card.characteristics||[]){if(Number(value.id)!==attributeId||!Array.isArray(value.value))continue;for(const text of value.value){if(typeof text!=='string'||!text.trim()||text.length>500||seen.has(text))continue;seen.add(text);options.push({value:text,label:text});}}}
    return {data:options.map(item=>item.value),options,source:wbTemplateOptions(attribute).length?'template':'shop_history',allow_custom:true};
   }
-  const result=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'ru',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'ru',...(kind==='tnved'?{subjectID:subject}:{})}}));
-  const localized=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'zh',...(kind==='tnved'?{subjectID:subject}:{})}}));
+  const result=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'ru',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'ru',...(kind==='tnved'?{subjectID:subject}:{})}}),{background});
+  const localized=await cached(a,`options:${kind}:${kind==='tnved'?subject:0}`,'zh',body.refresh===true||body.refresh==='1',()=>request(a,'content',`/content/v2/directory/${kind}`,{query:{locale:'zh',...(kind==='tnved'?{subjectID:subject}:{})}}),{background});
   return {...result,source:'official',allow_custom:false,data:wbDirectoryOptions(result.data,kind),options:wbLocalizedOptions(result.data,localized.data,kind),cache:{...result.cache,stale:result.cache.stale||localized.cache.stale}};
  }
  async function categoryBrands(tenantId,body={}){

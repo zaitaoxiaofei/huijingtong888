@@ -21,7 +21,10 @@ test('WB dynamic category templates cache schemas, switch categories and isolate
  await t.test('text suggestions stay within the chosen shop, tenant and subject',async()=>{
   await service.categorySchema(2,{subject_id:300,shop_id:a.id});
   for(const [tenant,shop,nm,subject,value] of [[2,a.id,1,300,'real value'],[2,a.id,2,100,'wrong category'],[3,b.id,3,300,'foreign value']])await query('INSERT INTO wb_product_cards(tenant_id,shop_id,nm_id,vendor_code,title,raw_json,synced_at) VALUES(?,?,?,?,?,?,UTC_TIMESTAMP())',[tenant,shop,nm,'P'+nm,'Product',JSON.stringify({subjectID:subject,characteristics:[{id:3000,value:[value]}]})]);
-  const result=await service.categoryOptions(2,{shop_id:a.id,subject_id:300,attribute_id:3000});assert.deepEqual(result.data,['real value']);assert.equal(result.source,'shop_history');assert.equal(result.allow_custom,true);
+  const ownSchema=await service.categorySchema(2,{subject_id:300,shop_id:a.id});
+  const otherShop=await service.saveShop(2,{name:'Other shop',user_id:2,wb_token:'test-only'});
+  for(const [shop,code,value] of [[a.id,'draft-own','saved draft value'],[otherShop.id,'draft-other','other shop value']])await query("INSERT INTO wb_listing_drafts(tenant_id,shop_id,template_id,vendor_code,payload_json,status) VALUES(2,?,?,?,?,'draft')",[shop,ownSchema.template_id,code,JSON.stringify({variants:[{card:{characteristics:[{id:3000,value:[value]}]}}]})]);
+  const result=await service.categoryOptions(2,{shop_id:a.id,subject_id:300,attribute_id:3000});assert.deepEqual(result.data,['real value','saved draft value']);assert.equal(result.source,'shop_history');assert.equal(result.allow_custom,true);
  });
  await t.test('catalog and workbench preview never call remote publishing APIs',async()=>{const category=await service.categorySchema(2,{subject_id:200});const r=await service.previewListingPayload(2,{payload:{template_id:category.template_id,subject_id:200,currency:'CNY',card:{},images:[]}});assert.equal(r.review_only,true);assert.ok(r.errors.some(e=>e.includes('店铺')));assert.ok(remote.every(r=>r.method==='GET'));});
  }finally{await f.cleanup();}
