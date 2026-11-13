@@ -33,7 +33,6 @@ test("actual dashboard queries and persisted snapshots isolate A/B/default", {
         assert.equal(result.commerce.today.effective_revenue, id * 100);
         assert.deepEqual(result.commerce.shops.map(row => Number(row.shop_id)), [id * 10]);
         assert.equal(result.commerce.profit_trend.month_total_revenue, id * 100);
-        assert.deepEqual(result.commerce.profit_trend.daily, [{ date_key: "2026-10-02", revenue: id * 100, profit: id * 10 }]);
         assert.equal(result.commerce.advertising.today.spend_cny, id);
         assert.equal(result.summary.month_shipping_cost.revenue, id * 100);
         assert.deepEqual(result.summary.scheduled_jobs, {});
@@ -104,7 +103,6 @@ test("actual dashboard queries and persisted snapshots isolate A/B/default", {
       assert.equal(safe.summary.month_shipping_cost.purchase_cost, undefined);
       assert.equal(safe.summary.month_shipping_cost.shipping_cost, undefined);
       assert.equal(safe.summary.fbp_inventory_value, undefined);
-      assert(safe.commerce.profit_trend.daily.every(row => row.profit === undefined));
       assert.equal(req._sensitiveResponse, true);
       const raw = await service.dashboardMysql({ date: '2026-10-02', snapshotOnly: '1' }, '2');
       assert.equal(typeof raw.commerce.today.profit, 'number', 'shared cached administrator data is never mutated by projection');
@@ -112,7 +110,6 @@ test("actual dashboard queries and persisted snapshots isolate A/B/default", {
       const mobileResult = await mobile({ _session: staleAdmin, query: { ...req.query, view: 'mobile' } });
       assert.equal(mobileResult.metrics.today_revenue, 250);
       assert.equal(mobileResult.metrics.today_profit, undefined);
-      assert(mobileResult.trend.every(row => row.profit === undefined));
       await assert.rejects(mobile({ _session: staleAdmin, query: { view: 'mobile-finance', date: '2026-10-02' } }), { statusCode: 403 });
       await query('UPDATE tenant_members SET active=0 WHERE person_id=2 AND tenant_id=2');
       await assert.rejects(handler(req), { statusCode: 403 });

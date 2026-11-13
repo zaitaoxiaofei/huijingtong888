@@ -57,7 +57,7 @@ export function mobileDashboard(payload = {}, session = {}) {
   return {
     date_key: payload.commerce?.date_key,
     snapshot: Object.fromEntries(['status', 'updated_at', 'generated_at', 'partial'].filter(k => payload.snapshot?.[k] !== undefined).map(k => [k, payload.snapshot[k]])),
-    financial, metrics, trend: (Array.isArray(trend.daily) ? trend.daily : []).map(row => ({ date_key: row.date_key, revenue: row.revenue, ...(financial ? { profit: row.profit } : {}) })), ad_date_key: ad.date_key || payload.commerce?.advertising?.date_key,
+    financial, metrics, ad_date_key: ad.date_key || payload.commerce?.advertising?.date_key,
     currency: 'CNY'
   };
 }

@@ -58,12 +58,9 @@ test('ranking rows and both mobile projections enforce the same sensitive-field 
  const mobile = mobileDashboard(payload, staff);
  assert.equal(mobile.financial, false);
  assert.equal(mobile.metrics.today_revenue, 4200);
- assert.equal(mobile.trend[0].revenue, 4200);
  assert.ok(!JSON.stringify(mobile).includes('7777'));
- assert.equal(mobile.trend[0].profit, undefined);
  const financial = mobileDashboard(payload, admin);
  assert.equal(financial.metrics.month_shipping_cost, 777703);
- assert.equal(financial.trend[0].profit, 777711);
 });
 
 test('desktop refresh and snapshot polls use fresh membership, scoped enterprise and no-store, including downgrades', async () => {

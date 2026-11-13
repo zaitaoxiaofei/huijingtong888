@@ -39,9 +39,7 @@ test("dashboard consolidates repeated commerce ranges into bounded aggregate que
   assert.match(recentCommerce, /o\.last_status_changed_at/);
   assert.match(recentCommerce, /eventReturnRows/);
   assert.match(recentCommerce, /return_quantity: Number\(eventSummary\.return_quantity/);
-  assert.equal((trend.match(/FROM analytics_shop_daily/g) || []).length, 2); // Existing aggregates plus one bounded 30-day series.
-  assert.match(trend, /GROUP BY date_key ORDER BY date_key/);
-  assert.match(trend, /addDaysMysql\(current, -29\)/);
+  assert.equal((trend.match(/FROM analytics_shop_daily/g) || []).length, 1);
   assert.match(trend, /SUM\(CASE WHEN date_key >= \? AND date_key <= \? THEN current_profit/);
   assert.doesNotMatch(trend, /profitSummaryOverviewMysql\(/);
 });
