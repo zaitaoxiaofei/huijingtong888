@@ -13,7 +13,7 @@ test('inventory leaderboard aggregates before paging and keeps SKU details/date/
   try {
     await createOrderFixtureSchema(f.connection);
     await q("INSERT INTO tenants(id,slug,name) VALUES(1,'default','Default'),(2,'a','A'),(3,'b','B')");
-    await q("INSERT INTO shops(id,tenant_id,name) VALUES(20,2,'A one'),(21,2,'A two'),(30,3,'B private')");
+    await q("INSERT INTO shops(id,tenant_id,name,platform) VALUES(20,2,'A one','ozon'),(21,2,'A two','wb'),(30,3,'B private','wb')");
     for (let id = 1; id <= 13; id++) {
       await q('INSERT INTO products(id,tenant_id,name,code,inventory_number,stock_unit,active) VALUES(?,2,?,?,?,\'件\',1)', [id,`Inventory ${id}`,`P${id}`,`1-${id}`]);
       await q('INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku,active) VALUES(?,2,20,?,?,1)', [id,id,`sku${id}`]);
@@ -45,6 +45,8 @@ test('inventory leaderboard aggregates before paging and keeps SKU details/date/
     const rankingSql=calls.find(c=>c.sql.includes('AS revenue')&&c.sql.includes('GROUP BY p.id'))?.sql||'';
     assert.ok(rankingSql);assert.doesNotMatch(rankingSql,/order_outcomes|opi\.net_profit_cny|commission_fee/,'inventory paging must not recalculate unrelated finance fields');
     assert.equal(first.rows[0].product_id,1);
+    assert.deepEqual(Array.from(first.rows[0].platforms),['ozon','wb']);
+    assert.deepEqual(Array.from(first.rows[1].platforms),['ozon']);
     assert.equal(first.rows[0].revenue,240);
     assert.equal(first.rows[0].profit,undefined,'inventory sales responses must not claim zero profit');
     assert.equal(Number(first.rows[0].item_quantity),4);
@@ -59,12 +61,21 @@ test('inventory leaderboard aggregates before paging and keeps SKU details/date/
     assert.equal(exact.total,12);
     const details = await service.profitRankingMysql({...base,dimension:'sku',productId:1},'2');
     assert.equal(details.total,3);
+    assert.deepEqual(Array.from(details.rows.find(r=>r.shop_id===21).platforms),['wb']);
+    assert.ok(details.rows.filter(r=>r.shop_id===20).every(r=>JSON.stringify(r.platforms)==='["ozon"]'));
     assert.equal(details.rows.reduce((sum,r)=>sum+r.revenue,0),240);
     assert.equal(details.rows.reduce((sum,r)=>sum+Number(r.item_quantity),0),4);
     assert.equal((await service.profitRankingMysql({...base,dimension:'sku',productId:30},'2')).total,0);
     const other = await service.profitRankingMysql(base,'3');
     assert.equal(other.total,1);
     assert.equal(other.rows[0].product_id,30);
+    assert.deepEqual(Array.from(other.rows[0].platforms),['wb']);
     assert.ok(!JSON.stringify(first).includes('B private'));
+    // A cancelled/out-of-range WB sale cannot add a WB badge to an Ozon-only product.
+    await q("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku,active) VALUES(40,2,21,2,'wb-only-cancelled',1)");
+    await order(21,[[40,'wb-only-cancelled',1,100]],'cancelled');
+    await order(21,[[40,'wb-only-cancelled',1,100]],'awaiting_packaging','2026-10-29 15:59:59');
+    const filtered = await service.profitRankingMysql({...base,fast:'1'},'2');
+    assert.deepEqual(Array.from(filtered.rows.find(r=>r.product_id===2).platforms),['ozon']);
   } finally { await f.cleanup(); }
 });

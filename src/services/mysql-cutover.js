@@ -27687,7 +27687,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin", { group
       COUNT(DISTINCT o.shop_id) AS shop_count,COUNT(DISTINCT o.shop_id,oi.ozon_sku) AS sku_count`;
     groupFields = "p.id";
     joinSql = `LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", tenantScope)} LEFT JOIN products p ON p.id = sm.product_id AND ${orderTenantPredicateMysql("p", tenantScope)}`;
-    if (inventoryMode) joinSql = inventoryMappingJoin;
+    if (inventoryMode) joinSql = `JOIN shops s ON s.id=o.shop_id ${inventoryMappingJoin}`;
     if (keyword) {
       where.push("(LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?)");
       whereParams.push(`%${keyword}%`, `%${keyword}%`);
@@ -27702,6 +27702,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin", { group
       whereParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
     }
   }
+  if (inventoryMode) selectFields += ", GROUP_CONCAT(DISTINCT COALESCE(NULLIF(s.platform,''),'ozon') ORDER BY COALESCE(NULLIF(s.platform,''),'ozon') SEPARATOR ',') AS platforms";
   const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
   const params = [...(inventoryMode ? [] : dateFilter.params), ...dateFilter.params, ...whereParams];
   const baseSql = `
@@ -27768,7 +27769,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin", { group
   }
   return {
     dimension,
-    rows: rows.map((row) => inventoryMode ? ({ ...row, item_quantity: Number(row.item_quantity || 0), revenue: roundMoneyMysql(row.revenue) }) : ({
+    rows: rows.map((row) => inventoryMode ? ({ ...row, platforms: String(row.platforms || "").split(",").filter(Boolean), item_quantity: Number(row.item_quantity || 0), revenue: roundMoneyMysql(row.revenue) }) : ({
       ...row,
       item_quantity: Number(row.item_quantity || row.quantity || 0),
       revenue: roundMoneyMysql(row.revenue),

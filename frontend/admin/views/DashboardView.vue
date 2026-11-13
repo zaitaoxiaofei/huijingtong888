@@ -26,6 +26,7 @@ import {
 } from "lucide-vue-next";
 import { apiClient, currentApiCacheScope } from "../utils/api";
 import DashboardInventoryRanking from "../components/DashboardInventoryRanking.vue";
+import PlatformBadge from "../components/PlatformBadge.vue";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { shanghaiDateKey } from "../utils/shanghai-date.js";
 import DailyExchangeRateCard from "../components/DailyExchangeRateCard.vue";
@@ -1555,7 +1556,10 @@ onBeforeUnmount(() => {
             <div v-if="availableLimitRows.length" class="limit-chart">
               <article v-for="row in availableLimitRows" :key="row.shop_id" class="limit-chart-row">
                 <div class="limit-chart-label">
-                  <strong>{{ row.platform === "wb" ? "WB · " : "" }}{{ row.shop_name }}</strong>
+                  <div class="limit-shop-identity">
+                    <PlatformBadge :platform="row.platform" />
+                    <strong :title="row.shop_name">{{ row.shop_name }}</strong>
+                  </div>
                   <span v-if="row.platform === 'wb' && row.ok">商品卡总额度</span>
                   <span v-else-if="row.ok">今日已用 {{ numberText(row.today_usage) }}</span>
                   <span v-else :title="row.error">额度暂不可用</span>
@@ -1793,6 +1797,13 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+}
+
+.limit-shop-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .limit-chart-label strong {
