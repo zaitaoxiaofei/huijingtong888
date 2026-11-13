@@ -24,7 +24,7 @@ export function createOrderSplitService({query,execute,authorize,splitRemote,fet
    if(!fetchSiblings || (operation.state!=='unknown'&&!staleSubmitting))fail('拆单请求仍在处理中或结果未核实，请稍后重新同步结果；不能重复拆单或自动备货');
    context=await authorize(operation.order_id);
    const siblings=await fetchSiblings(context);
-   const postings=siblings.map(p=>({posting_number:p.posting_number,products:(p.items||[]).map(i=>({product_id:Number(i.ozon_product_id),quantity:Number(i.quantity)}))}));
+   const postings=siblings.map(p=>({posting_number:p.posting_number,products:(p.items||[]).map(i=>({product_id:Number(i.ozon_sku),quantity:Number(i.quantity)}))}));
    const receipt=validateSplitReceipt({parent_posting:{posting_number:operation.posting_number},postings},operation.posting_number,parse(operation.request_json).packages);
    await execute("UPDATE order_split_operations SET state='confirmed',result_json=? WHERE tenant_id=? AND id=?",[JSON.stringify(receipt),context.tenantId,operation.id]);
    operation={...operation,result_json:receipt,state:'confirmed'};
@@ -36,11 +36,11 @@ export function createOrderSplitService({query,execute,authorize,splitRemote,fet
    const posting=await fetchRemote(context.shop,number);
    if(posting?.posting_number!==number)fail(`子单 ${number} 的官方详情尚未返回，请稍后重新同步；未自动备货`);
    const expectedPosting=receipt.postings.find(p=>p.posting_number===number);
-   if(expectedPosting&&!sameProducts(expectedPosting.products,(posting.items||[]).map(i=>({product_id:Number(i.ozon_product_id),quantity:Number(i.quantity)}))))fail(`子单 ${number} 的官方商品分配与拆单回执不一致，请核对后重新同步；未自动备货`);
+   if(expectedPosting&&!sameProducts(expectedPosting.products,(posting.items||[]).map(i=>({product_id:Number(i.ozon_sku),quantity:Number(i.quantity)}))))fail(`子单 ${number} 的官方商品分配与拆单回执不一致，请核对后重新同步；未自动备货`);
    postings.push(posting);
   }
   const expected=receipt.postings.flatMap(p=>p.products);
-  const actual=postings.filter(p=>receipt.postings.some(r=>r.posting_number===p.posting_number)).flatMap(p=>(p.items||[]).map(i=>({product_id:Number(i.ozon_product_id),quantity:Number(i.quantity)})));
+  const actual=postings.filter(p=>receipt.postings.some(r=>r.posting_number===p.posting_number)).flatMap(p=>(p.items||[]).map(i=>({product_id:Number(i.ozon_sku),quantity:Number(i.quantity)})));
   if(!sameProducts(expected,actual))fail('子单官方商品数量尚未与拆单回执一致，请核对后重新同步；未自动备货');
   context=await authorize(operation.order_id);
   // Import children first: a partial sync must not release the original demand before child demand exists.
@@ -75,7 +75,7 @@ export function createOrderSplitService({query,execute,authorize,splitRemote,fet
   catch(error) { error.validation={...error.validation,split_retry_safe:true};throw error; }
   context=await authorize(orderId);
   if(live?.posting_number!==context.order.posting_number||live.status!=='awaiting_packaging')fail('Ozon 订单已不在待备货状态，请同步后核对，不能拆单或自动备货');
-  const items=context.items.map(item=>{const match=(live.items||[]).filter(r=>String(r.ozon_sku)===String(item.ozon_sku));if(match.length!==1||Number(match[0].quantity)!==Number(item.quantity))fail('Ozon 商品数量已变化，请刷新订单后重新分配');return {...item,product_id:Number(match[0].ozon_product_id)};});
+  const items=context.items.map(item=>{const match=(live.items||[]).filter(r=>String(r.ozon_sku)===String(item.ozon_sku));if(match.length!==1||Number(match[0].quantity)!==Number(item.quantity))fail('Ozon 商品数量已变化，请刷新订单后重新分配');return {...item,product_id:Number(match[0].ozon_sku)};});
   if(items.length!==(live.items||[]).length||items.some(i=>!Number.isSafeInteger(i.product_id)||i.product_id<=0))fail('Ozon 商品组成尚未核实，请同步订单后重试');
   const packages=buildSplitShippingPackagesMysql(items,body.packages);
   let operationId;

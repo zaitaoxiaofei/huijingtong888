@@ -62,7 +62,7 @@ test("fetchOzonPostings uses v4 cursors when Ozon returns a short page", async (
       postings: [{
         posting_number: `POST-${page}`,
         status_alias: page === 1 ? "awaiting_packaging" : "delivered",
-        products: [{ product_id: "123", product_offer_id: "offer-123", product_name: "Product", price: { amount: "1200.5" } }]
+        products: [{ sku: "123", product_id: "900123", product_offer_id: "offer-123", product_name: "Product", price: { amount: "1200.5" } }]
       }, ...(page === 2 ? [{ posting_number: "POST-3", status: "cancelled", products: [] }] : [])],
       has_next: page === 1,
       cursor: page === 1 ? "next-page" : ""
@@ -89,6 +89,7 @@ test("fetchOzonPostings uses v4 cursors when Ozon returns a short page", async (
   assert.deepEqual(result.postings.map((row) => row.posting_number), ["POST-1", "POST-2"]);
   assert.equal(result.postings[0].status, "awaiting_packaging");
   assert.equal(result.postings[0].items[0].ozon_sku, "123");
+  assert.equal(result.postings[0].items[0].ozon_product_id, "900123");
   assert.equal(result.postings[0].items[0].offer_id, "offer-123");
   assert.equal(result.postings[0].items[0].sale_price, 1200.5);
 });

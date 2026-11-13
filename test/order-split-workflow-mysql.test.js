@@ -25,12 +25,12 @@ test('split-only SQL workflow never prepares on failure or success and keeps own
   await query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(2,2,'member',JSON_ARRAY('packing','technical'))");
   await query("INSERT INTO shops(id,tenant_id,name,status,ozon_client_id,ozon_api_key) VALUES(20,2,'Own','active','fixture','fixture'),(30,3,'Foreign','active','fixture','fixture')");
   await query("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(20,20,'PARENT','awaiting_packaging','2026-10-31'),(30,30,'FOREIGN','awaiting_packaging','2026-10-31')");
-  await query("INSERT INTO order_items(id,order_id,ozon_sku,ozon_product_id,quantity,sale_price) VALUES(20,20,'S',100,2,10),(30,30,'FOREIGN',200,2,99)");
-  let splitCalls=0,imports=0,authorized=true,remote=(number)=>({posting_number:number,status:'awaiting_packaging',items:[{ozon_sku:'S',ozon_product_id:100,quantity:splitCalls?1:2}]}),mutate=async()=>receipt;
+  await query("INSERT INTO order_items(id,order_id,ozon_sku,ozon_product_id,quantity,sale_price) VALUES(20,20,'100',100,2,10),(30,30,'FOREIGN',200,2,99)");
+  let splitCalls=0,imports=0,authorized=true,remote=(number)=>({posting_number:number,status:'awaiting_packaging',items:[{ozon_sku:'100',ozon_product_id:999,quantity:splitCalls?1:2}]}),mutate=async()=>receipt;
   const authorize=async id=>{if(!authorized)throw Object.assign(Error('revoked'),{statusCode:403});const order=(await query('SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.id=? AND s.tenant_id=2',[id]))[0];if(!order)throw Object.assign(Error('foreign'),{statusCode:404});return{tenantId:2,shop:{id:20},order,items:await query('SELECT * FROM order_items WHERE order_id=?',[id])};};
-  const service=createOrderSplitService({query,execute,authorize,fetchRemote:async(_s,n)=>remote(n),splitRemote:async()=>{splitCalls++;return mutate();},importPostings:async(_ctx,rows)=>{imports++;return rows.map((p,i)=>({id:20+i,posting_number:p.posting_number,status:p.status}));},fetchSiblings:async()=>['PARENT','CHILD'].map(n=>remote(n))});
+  const service=createOrderSplitService({query,execute,authorize,fetchRemote:async(_s,n)=>remote(n),splitRemote:async(_shop,_number,packages)=>{assert.ok(packages.flatMap(p=>p.products).every(p=>p.product_id===100),'split API requires SKU, not catalog ID');splitCalls++;return mutate();},importPostings:async(_ctx,rows)=>{imports++;return rows.map((p,i)=>({id:20+i,posting_number:p.posting_number,status:p.status}));},fetchSiblings:async()=>['PARENT','CHILD'].map(n=>remote(n))});
   const body={order_id:20,client_request_id:'test-split-request',packages:allocation};
-  const reset=async()=>{await query('DELETE FROM order_split_operations WHERE tenant_id=2');splitCalls=0;imports=0;authorized=true;remote=n=>({posting_number:n,status:'awaiting_packaging',items:[{ozon_sku:'S',ozon_product_id:100,quantity:splitCalls?1:2}]});mutate=async()=>receipt;};
+  const reset=async()=>{await query('DELETE FROM order_split_operations WHERE tenant_id=2');splitCalls=0;imports=0;authorized=true;remote=n=>({posting_number:n,status:'awaiting_packaging',items:[{ozon_sku:'100',ozon_product_id:999,quantity:splitCalls?1:2}]});mutate=async()=>receipt;};
   const before=await query('SELECT * FROM orders ORDER BY id'),itemsBefore=await query('SELECT * FROM order_items ORDER BY id');
   await t.test('authorization and already-prepared orders cannot become split success',async()=>{
    await reset();await assert.rejects(service({...body,order_id:30},2),/foreign/);remote=()=>({posting_number:'PARENT',status:'awaiting_deliver',items:[]});await assert.rejects(service(body,2),/不在待备货/);assert.equal(splitCalls,0);
@@ -74,7 +74,7 @@ test('split-only SQL workflow never prepares on failure or success and keeps own
    await query('INSERT INTO inventory_current(real_product_id,available_stock) VALUES(20,9)');
    const writer=loadOrderProfitWriter(c);let compensated=0;
    const {service}=loadTenantOrderService(c,{extraMethods:['reconcileRemovedPostingItemsMysql'],withVersionedOrderProfitWrite:writer.withVersionedOrderProfitWrite,postProductInventoryWithComponentsMysql:async(connection,body,tenant)=>{assert.equal(connection,c);assert.equal(tenant,2);assert.equal(body.quantity_delta,1);compensated++;await execute('UPDATE inventory_current SET available_stock=available_stock+? WHERE real_product_id=?',[body.quantity_delta,body.product_id]);}});
-   const original={posting_number:'PARENT',status:'awaiting_packaging',raw:{products:[{sku:'S',quantity:2}]},items:[{ozon_sku:'S',quantity:2}]};
+   const original={posting_number:'PARENT',status:'awaiting_packaging',raw:{products:[{sku:'100',quantity:2}]},items:[{ozon_sku:'100',quantity:2}]};
    const options={session:{personId:2,tenant:{id:2,slug:'a'}}};
    const foreignBefore=await query('SELECT * FROM order_items WHERE order_id=30');
    await query("UPDATE ozon_orders_raw SET raw_json=JSON_SET(raw_json,'$.parent_posting_number','UNRELATED') WHERE store_id=20 AND posting_number='CHILD'");

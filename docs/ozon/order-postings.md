@@ -43,3 +43,16 @@ Verified against live posting responses and ERP sync history: 2026-10-21.
 - Persist the merge under a row lock. All raw-posting writers, including shipping reconciliation, must use the same persistence boundary and use its returned tracking fields. An asynchronous detail response only supplements the row read under that lock; it must not restore business fields from the snapshot captured before the request.
 - List sync attempts at most 20 missing-method detail lookups per shop, each bounded to 20 seconds. Scheduled detail reconciliation prioritizes FBP postings with missing methods, including cancelled postings. No carrier, official service class or transport mode is inferred from a provider ID, another order, dimensions or a billing rule.
 - `scripts/repair-fbp-order-logistics.mjs` provides a shop/date-scoped dry run and an explicit metadata-only write with a new private backup. It must not call order upsert, inventory posting or profit recalculation.
+
+## Posting SKU and catalog identity
+
+Verified: 2026-11-12 against the official Seller API Swagger schemas.
+
+- `/v4/posting/fbs/list`, `/v3/posting/fbs/get`, and the FBP list/get methods expose the marketplace identity as `products[].sku`.
+- In FBS and FBP list financial rows, `financial_data.products[].product_id` means marketplace **SKU**, not the seller catalog product ID. FBP get financial rows instead expose `sku`. Never fill `ozon_product_id` by copying an indexed financial row: its field has a different meaning and row order is not an identity join.
+- Keep an explicit product-level catalog ID if supplied, but do not infer a missing posting SKU from that catalog ID or from the seller's `offer_id`. Product catalog normalization remains separate.
+- `/v1/posting/fbs/split` and `/v4/posting/fbs/ship` name their request field `product_id`, but both officially define that value as SKU. Build those requests and compare split receipts using the verified live posting's `ozon_sku`, including recovery after an unknown split response. A different catalog ID must not replace it.
+- This correction applies to future normalization and request construction. It does not rewrite saved historical orders, mutate historical split receipts, or recalculate profit. Historical receipts containing the wrong identity may require manual verification; mismatches remain blocked rather than auto-resubmitting a split.
+- Local validation: 33 unit/contract tests, 13 isolated MySQL split workflow tests, and 44 isolated MySQL shipping/enterprise tests passed. No real shipment or split was submitted. Production rollout requires separate approval.
+
+References: [FBS list](https://docs.ozon.ru/api/seller/#operation/PostingFbsList), [split](https://docs.ozon.ru/api/seller/#operation/FbsSplit), [ship](https://docs.ozon.ru/api/seller/#operation/PostingAPI_ShipFbsPostingV4).
