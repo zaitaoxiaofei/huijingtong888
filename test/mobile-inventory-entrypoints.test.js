@@ -6,6 +6,16 @@ import {component} from './mobile-performance-profile.test.js';
 const settle=async()=>{await nextTick();await new Promise(setImmediate);};
 const ledger={revision:'current',physical_estimate:7,open_order_demand:2,fbp_reserved:0,flow_summary:{safety:0}};
 
+test('scanned inventory resets unrelated filters and page, uses exact search, and clears scanner on scope change',async()=>{
+ const h=await component('views/mobile/MobileInventoryView.vue',{get:async()=>({rows:[{id:7,inventory_number:'1-7'}],total:1})}),sut=h.definition.setup({}, {expose(){}});
+ sut.page.value=3;sut.filters.inventoryType='combo';sut.filters.searchMode='name';sut.filters.inventoryCategory='门槛条';sut.scannerVisible.value=true;
+ sut.scanned('1-7');await settle();
+ const query=new URL(h.calls.at(-1).path,'http://localhost:8788').searchParams;
+ assert.equal(query.get('query'),'1-7');assert.equal(query.get('searchMode'),'inventory_id');assert.equal(query.get('page'),'1');assert.equal(query.get('inventoryType'),'all');assert.equal(query.has('inventoryCategory'),false);
+ assert.equal(sut.rows.value[0].id,7);assert.equal(sut.scannerVisible.value,false);assert.equal(h.calls.some(call=>call.method==='POST'),false);
+ sut.scannerVisible.value=true;sut.clearScope();assert.equal(sut.scannerVisible.value,false);assert.equal(sut.rows.value.length,0);
+});
+
 test('saving inventory identity keeps current search and page and refreshes only current-page local quantities',async()=>{
  const h=await component('views/mobile/MobileInventoryView.vue',{get:async()=>({rows:[{id:101,name:'新名称',inventory_number:'1-3-201'}],total:80})});
  const sut=h.definition.setup({}, {expose(){}}),refreshes=[];sut.local.refresh=async force=>refreshes.push(force);
