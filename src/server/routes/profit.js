@@ -1,8 +1,14 @@
+import { authorizeDashboardSession } from '../../services/dashboard-access.js';
+import { dashboardMetricsForSession } from '../../shared/dashboard-visibility.js';
 import { tenantIdFromRequest } from "../tenant-context.js";
 
-export function createProfitRoutes({ services, readJson }) {
+export function createProfitRoutes({ services, readJson, authorize = authorizeDashboardSession }) {
   return {
-    "GET /api/profit-ranking": (req, url) => services.profitRanking(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/profit-ranking": async (req, url) => {
+      const current = await authorize(req._session);
+      req._sensitiveResponse = true;
+      return dashboardMetricsForSession(await services.profitRanking(Object.fromEntries(url.searchParams.entries()), current.tenant.id), current);
+    },
     "GET /api/profit-reconciliation": (req, url) => services.profitReconciliation(Object.fromEntries(url.searchParams.entries())),
     "GET /api/pending-settlement-costs": (req, url) => services.pendingSettlementCosts(Object.fromEntries(url.searchParams.entries())),
     "GET /api/profit-reconciliation/products": (req, url) => services.profitReconciliation({

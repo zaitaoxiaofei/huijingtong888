@@ -864,7 +864,7 @@ onBeforeUnmount(() => {
             <template v-for="menu in visibleNavigationMenus" :key="menu.key">
               <el-sub-menu v-if="menu.children?.length" :index="menu.key" :disabled="menu.disabled" :title="menu.disabledReason">
                 <template #title>
-                  <el-icon><component :is="menu.icon" /></el-icon>
+                  <el-icon class="erp-navigation-icon"><component :is="menu.icon" :size="20" :stroke-width="1.8" aria-hidden="true" /></el-icon>
                   <span>{{ menu.label }}{{ menu.disabled ? "（暂未开放）" : "" }}</span>
                 </template>
                 <el-menu-item
@@ -886,7 +886,7 @@ onBeforeUnmount(() => {
                 @mouseenter="prefetchMenuRoute(menu.route)"
                 @focus="prefetchMenuRoute(menu.route)"
               >
-                <el-icon><component :is="menu.icon" /></el-icon>
+                <el-icon class="erp-navigation-icon"><component :is="menu.icon" :size="20" :stroke-width="1.8" aria-hidden="true" /></el-icon>
                 <span>{{ menu.label }}</span>
               </el-menu-item>
             </template>
@@ -1229,6 +1229,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.erp-navigation-icon{width:20px!important;height:20px!important;flex:none;font-size:20px!important}.erp-navigation-icon :deep(svg){width:20px;height:20px;stroke-width:1.8;flex:none}
+@media(max-width:767px){.erp-sidebar :deep(.el-menu-item),.erp-sidebar :deep(.el-sub-menu__title){min-height:44px}}
+
 .erp-menu-platform-logo{margin-right:8px}
 .erp-menu-legacy-badge { margin-left: 8px; }
 .erp-header-left { flex: 1; overflow: hidden; }

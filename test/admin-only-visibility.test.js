@@ -19,9 +19,10 @@ test("finance belongs to enterprise administrators while system navigation requi
   const platformKeys = navigationMenusForRole(platform).map((item) => item.key);
   const operatorRoutes = navigationMenusForRole(operator).flatMap((item) => item.children || [item]).map((item) => item.route);
 
-  assert.equal(operatorKeys.includes("finance"), false);
+  // Ordinary members keep the shared reimbursement entry, not financial reports.
+  assert.equal(operatorKeys.includes("finance"), true);
   assert.equal(operatorKeys.includes("settings"), false);
-  assert.equal(managerKeys.includes("finance"), false);
+  assert.equal(managerKeys.includes("finance"), true);
   assert.equal(managerKeys.includes("settings"), false);
   assert.equal(ownerKeys.includes("finance"), true);
   assert.equal(ownerKeys.includes("settings"), false);
@@ -40,11 +41,11 @@ test("finance belongs to enterprise administrators while system navigation requi
   assert.equal(operatorRoutes.some((route) => String(route || "").startsWith("/profit/")), false);
 });
 
-test("dashboard hides only profit cards and profit trend from non-admin users", () => {
+test("dashboard hides all confidential financial groups from non-admin users", () => {
   assert.match(dashboardSource, /v-if="isAdmin" class="primary-metric profit-card"/);
   assert.match(dashboardSource, /v-if="isAdmin" class="primary-metric month-profit-card"/);
-  assert.match(dashboardSource, /isAdmin\.value \|\| card\.title !== "利润趋势"/);
+  assert.match(dashboardSource, /isAdmin\.value \|\| !\["利润趋势", "售后损失"\]\.includes\(card\.title\)/);
   assert.doesNotMatch(dashboardSource, /首页经营数据仅管理员可见/);
-  assert.match(serverSource, /dashboardForSession/);
-  assert.match(serverSource, /includes\("profit"\)/);
+  assert.match(serverSource, /createDashboardHandler/);
+  assert.match(dashboardSource, /v-if="isAdmin" class="primary-metric inventory-value-card"/);
 });

@@ -21,7 +21,7 @@ test('active enterprises can enter AI skills with existing business roles; missi
 
 test('the customer skill menu is clickable and credits remain available', () => {
   const source = readFileSync(new URL('../frontend/admin/constants/navigation.js', import.meta.url), 'utf8').replace(/^import .*;\r?\n/gm, '').replaceAll('export ', '');
-  const icons = Object.fromEntries('ChatDotRound Coin DataAnalysis Document Finished Goods House MagicStick Setting ShoppingCart Tools WarningFilled'.split(' ').map(name => [name, name]));
+  const icons = Object.fromEntries('House ListChecks ChartNoAxesCombined ChartColumn Store Sparkles Package Warehouse ShoppingCart TriangleAlert Wrench Settings MessageCircle'.split(' ').map(name => [name, name]));
   const context = vm.createContext({ ...icons, ...permissions, ...access }); vm.runInContext(source, context);
   const menus = context.navigationMenusForRole(customer), skills = menus.find(menu => menu.key === 'ai-skills');
   assert.ok(skills.children.length > 0); assert.ok(!skills.disabled); assert.ok(skills.children.every(child => !child.disabled));

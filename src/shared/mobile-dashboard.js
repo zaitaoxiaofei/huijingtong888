@@ -1,4 +1,4 @@
-import { hasPermission } from './permissions.js';
+import { canViewDashboardFinance } from './dashboard-visibility.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
 
 const validCalendarDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
@@ -23,7 +23,7 @@ export function mobileDashboardPeriod(date) {
 
 // An explicit allow-list: mobile staff responses never contain hidden financial sections.
 export function mobileDashboard(payload = {}, session = {}) {
-  const financial = Boolean(session.tenant?.id) && hasPermission(session, 'finance');
+  const financial = canViewDashboardFinance(session);
   const today = payload.commerce?.today || {}, trend = payload.commerce?.profit_trend || {};
   const month = payload.summary?.month_shipping_cost || {}, outcomes = payload.summary?.month_order_outcomes || {};
   const ad = payload.commerce?.advertising?.today || {};
@@ -35,6 +35,7 @@ export function mobileDashboard(payload = {}, session = {}) {
     ad_roas: ad.roi,
     month_quantity: month.item_quantity,
     month_orders: trend.month_effective_orders ?? outcomes.effective_orders,
+    month_cancelled: trend.month_cancelled_orders ?? outcomes.cancelled_orders,
     return_rate: payload.summary?.aftersales_loss?.return_rate
   };
   const cancelled = trend.month_cancelled_orders ?? outcomes.cancelled_orders;
@@ -49,13 +50,14 @@ export function mobileDashboard(payload = {}, session = {}) {
     month_revenue: trend.month_total_revenue,
     month_profit: trend.month_total_profit,
     month_purchase_cost: month.purchase_cost,
+    month_shipping_cost: month.shipping_cost,
     month_ad_spend: payload.commerce?.advertising?.month?.spend_cny,
     fbp_inventory_value: payload.summary?.fbp_inventory_value
   });
   return {
     date_key: payload.commerce?.date_key,
     snapshot: Object.fromEntries(['status', 'updated_at', 'generated_at', 'partial'].filter(k => payload.snapshot?.[k] !== undefined).map(k => [k, payload.snapshot[k]])),
-    financial, metrics, ad_date_key: ad.date_key || payload.commerce?.advertising?.date_key,
+    financial, metrics, trend: (Array.isArray(trend.daily) ? trend.daily : []).map(row => ({ date_key: row.date_key, revenue: row.revenue, ...(financial ? { profit: row.profit } : {}) })), ad_date_key: ad.date_key || payload.commerce?.advertising?.date_key,
     currency: 'CNY'
   };
 }

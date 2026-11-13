@@ -16,9 +16,9 @@ const busy = ref(false);
 const moreError = ref('');
 const scrollBox = ref(null);
 const root = ref(null);
-const visibleCount = ref(10);
+const visibleCount = ref(5);
 const scrolling = ref(false);
-let resizeObserver, scrollTimer;
+let scrollTimer;
 const PAGE_SIZE = 15;
 const detail = ref(null);
 const detailRows = ref([]);
@@ -30,11 +30,7 @@ const previews = reactive({});
 let version = 0;
 let detailVersion = 0;
 const allRows = computed(() => expanded.value ? [...props.rows, ...extra.value] : props.rows.slice(0, visibleCount.value));
-const groups = computed(() => {
-  const result = [];
-  for (let i = 0; i < allRows.value.length; i += visibleCount.value) result.push(allRows.value.slice(i, i + visibleCount.value));
-  return result;
-});
+const groups = computed(() => props.rows.length ? [props.rows.slice(0, visibleCount.value)] : []);
 const money = value => `CNY ${Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}`;
 const count = value => Number(value || 0).toLocaleString('zh-CN');
 function fetchRows(values) {
@@ -133,22 +129,17 @@ watch(() => props.rows, reset);
 watch(() => props.hasMore, value => { if (!expanded.value) more.value = value; });
 onMounted(() => {
   window.addEventListener('erp:auth-scope-changed', reset);
-  resizeObserver = new ResizeObserver(entries => {
-    const width = entries[0]?.contentRect.width || 0;
-    visibleCount.value = width >= 1450 ? 15 : width >= 1100 ? 12 : 10;
-  });
-  if (root.value) resizeObserver.observe(root.value);
+
 });
 onBeforeUnmount(() => {
   ++version;
   ++detailVersion;
   window.removeEventListener('erp:auth-scope-changed', reset);
-  resizeObserver?.disconnect();
   clearTimeout(scrollTimer);
 });
 </script>
 <template>
- <section ref="root" class="overview-panel inventory-ranking" :style="{'--ranking-columns': visibleCount>10?3:2, '--ranking-rows': visibleCount===12?4:5}" aria-label="库存商品销售榜单">
+ <section ref="root" class="overview-panel inventory-ranking" :style="{'--ranking-columns': 1, '--ranking-rows': 5}" aria-label="库存商品销售榜单">
   <header class="ranking-heading">
   <div>
   <span>TOP PRODUCTS</span>
@@ -156,7 +147,7 @@ onBeforeUnmount(() => {
   </div>
   <small>{{dateText}} · 按销售额排序</small>
   </header>
-  <div ref="scrollBox" class="ranking-scroll" :class="{'is-expanded':expanded}" @scroll.passive="onScroll">
+  <div class="ranking-scroll">
    <el-alert v-if="error" type="warning" :title="error" :closable="false"/>
   <el-button v-if="error" size="small" @click="emit('retry')">重新读取榜单</el-button>
    <div v-for="(group,groupIndex) in groups" :key="groupIndex" class="ranking-group">
@@ -179,12 +170,8 @@ onBeforeUnmount(() => {
   <div v-if="row.platforms?.length" class="rank-platforms" title="所选日期的成交平台">
     <PlatformBadge v-for="platform in row.platforms" :key="platform" :platform="platform" :size="18" />
   </div>
-  <span>销售额<strong>{{money(row.revenue)}}</strong>
-  </span>
-  <span>销量 <b>{{count(row.item_quantity)}} {{row.stock_unit||'件'}}</b>
-  </span>
-  <span>单量 <b>{{count(row.order_count)}} 单</b>
-  </span>
+  <span><strong>{{money(row.revenue)}}</strong></span>
+  <span><b>{{count(row.item_quantity)}} {{row.stock_unit||'件'}}</b> · {{count(row.order_count)}} 单</span>
   </div>
      </article>
   </template>
@@ -207,7 +194,7 @@ onBeforeUnmount(() => {
   <el-empty v-else-if="!rows.length&&!error" description="所选日期暂无已绑定库存商品的有效销售" :image-size="72"/>
   </div>
   <footer class="ranking-footer">
-  <el-button v-if="!expanded&&rows.length" size="small" @click="startMore">往下查看更多</el-button>
+  <el-button v-if="!expanded&&rows.length" size="small" @click="startMore">查看完整排行</el-button>
   <template v-else-if="expanded">
   <span v-if="busy">正在加载…</span>
   <el-button v-else-if="moreError" size="small" @click="loadMore">加载失败，点击重试</el-button>
@@ -215,6 +202,18 @@ onBeforeUnmount(() => {
   <el-button size="small" @click="collapse">收起</el-button>
   </template>
   </footer>
+  <el-dialog v-if="expanded" :model-value="true" title="完整库存商品排行" width="min(1080px,96vw)" top="6vh" append-to-body destroy-on-close @close="collapse">
+   <div ref="scrollBox" class="ranking-expanded-scroll" @scroll.passive="onScroll">
+    <el-table :data="allRows" empty-text="暂无库存商品排行">
+     <el-table-column label="商品图片" width="90"><template #default="{row}"><el-image class="expanded-rank-image" :src="row.image_url" fit="cover" :preview-src-list="row.image_url?[`/api/products/${row.product_id}/image`]:[]" preview-teleported><template #error>无图</template></el-image></template></el-table-column>
+     <el-table-column label="库存商品" min-width="210"><template #default="{row}"><button class="rank-name" type="button" @click="openDetail(row)">{{row.product_name}}</button><small>{{count(row.shop_count)}} 家店铺 · {{count(row.sku_count)}} 个 SKU</small></template></el-table-column>
+     <el-table-column label="销售额" min-width="130"><template #default="{row}">{{money(row.revenue)}}</template></el-table-column>
+     <el-table-column label="销量 / 单量" min-width="130"><template #default="{row}">{{count(row.item_quantity)}} {{row.stock_unit||'件'}} / {{count(row.order_count)}} 单</template></el-table-column>
+     <el-table-column label="明细" width="80"><template #default="{row}"><el-button link type="primary" @click="openDetail(row)">明细</el-button></template></el-table-column>
+    </el-table>
+   </div>
+   <template #footer><span>已展示 {{allRows.length}} 个库存商品</span><el-button v-if="more||moreError" :loading="busy" @click="loadMore">{{moreError?'加载失败，重试':'加载更多'}}</el-button><el-button @click="collapse">关闭</el-button></template>
+  </el-dialog>
   <el-dialog v-if="detail" :model-value="true" :title="`${detail.product_name} · 销售明细`" width="min(1100px,94vw)" top="7vh" append-to-body destroy-on-close @close="detail=null;++detailVersion">
    <p>{{dateText}} · 库存 {{detail.inventory_number||detail.product_id}} · {{money(detail.revenue)}} · 有效销量 {{count(detail.item_quantity)}} {{detail.stock_unit||'件'}} · 有效订单 {{count(detail.order_count)}} 单</p>
    <el-alert v-if="detailError" type="error" :title="detailError" :closable="false"/>
@@ -272,4 +271,14 @@ onBeforeUnmount(() => {
 .inventory-rank-card{height:98px;grid-template-columns:20px 64px minmax(0,1fr) 88px;gap:7px}
 .ranking-heading{align-items:start}
 .ranking-heading small{max-width:140px;text-align:right}}
+
+/* The homepage always keeps five compact rows; the complete list opens above it. */
+.inventory-ranking{height:400px}
+.ranking-heading{align-items:center;margin-bottom:10px;gap:8px}
+.ranking-heading h2{font-size:16px;margin:3px 0 0}
+.ranking-heading small{font-size:11px}
+.ranking-group{height:290px;grid-template-columns:minmax(0,1fr);grid-template-rows:repeat(5,minmax(0,1fr));grid-auto-flow:row;gap:0;margin:0}
+.inventory-rank-card{height:58px;grid-template-columns:20px 40px minmax(0,1fr) 105px;padding:3px 0;border:0;border-radius:0;border-bottom:1px solid var(--el-border-color-lighter);background:transparent;gap:8px}
+.rank-image{width:40px;height:52px;border-radius:5px}.rank-number{font-size:13px}.rank-copy{gap:1px}.rank-copy small{font-size:11px}.rank-name{font-size:12px;-webkit-line-clamp:1}.rank-metrics{font-size:10px}.rank-metrics strong{font-size:12px}.rank-copy small> :deep(.el-button){display:none}.rank-platforms :deep(img){max-width:16px;max-height:16px}.ranking-footer{height:28px;padding-top:8px}.ranking-heading>div>span{font-size:10px;font-weight:500}.ranking-expanded-scroll{max-height:65vh;overflow-y:auto;overscroll-behavior:contain}.expanded-rank-image{width:64px;height:84px}.ranking-expanded-scroll small{display:block;color:var(--el-text-color-secondary);font-size:12px}
+@media(max-width:600px){.inventory-ranking{height:400px}.ranking-heading small{max-width:130px;font-size:10px}.inventory-rank-card{grid-template-columns:18px 40px minmax(0,1fr) 85px;gap:6px;height:58px}.rank-metrics{font-size:10px}.rank-metrics strong{font-size:11px}.rank-copy small{font-size:10px}.rank-name{font-size:12px}.ranking-footer :deep(.el-button){min-height:34px}.ranking-group{height:290px;grid-template-rows:repeat(5,minmax(0,1fr))}}
 </style>

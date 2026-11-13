@@ -1,3 +1,5 @@
+import { aiSkillsAvailable } from '../src/shared/ai-skills-access.js';
+import { planFeatureMessage } from '../src/shared/subscription-plan-features.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -40,8 +42,8 @@ function tabsFixture() {
 }
 
 test("removed onboarding navigation and orphan frontend files stay absent while ordinary navigation remains", () => {
-  const icons = Object.fromEntries("ChatDotRound Coin DataAnalysis Document Finished Goods House MagicStick Setting ShoppingCart Tools WarningFilled".split(" ").map(name => [name, name]));
-  const context = vm.createContext({ ...icons, canAccessPage });
+  const icons = Object.fromEntries("House ListChecks ChartNoAxesCombined ChartColumn Store Sparkles Package Warehouse ShoppingCart TriangleAlert Wrench Settings MessageCircle".split(" ").map(name => [name, name]));
+  const context = vm.createContext({ ...icons, canAccessPage, hasPermission, needsMembershipActivation, aiSkillsAvailable, planFeatureMessage });
   vm.runInContext(moduleBody(read("../frontend/admin/constants/navigation.js")), context);
   const routes = context.navigationMenusForRole(employee).flatMap(menu => menu.children || [menu]).map(item => item.route);
   assert.equal(routes.includes("/onboarding"), false);

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted } from "vue";
 import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
-import { ArrowLeft, Box, House, Monitor, Refresh, ShoppingCart, Tickets } from "@element-plus/icons-vue";
+import { ArrowLeft, Warehouse, House, Monitor, RefreshCw, ShoppingCart, Package, UserRound } from "lucide-vue-next";
 import { useAuthStore } from "../stores/auth";
 
 import {hasPermission} from "../../../src/shared/permissions.js";
@@ -59,7 +59,7 @@ onBeforeUnmount(() => {setMobileViewportState(false);window.visualViewport?.remo
       </div>
 
       <button type="button" class="mobile-icon-button" aria-label="刷新" @click="refreshPage">
-        <el-icon><Refresh /></el-icon>
+        <el-icon><RefreshCw /></el-icon>
       </button>
       <button type="button" class="mobile-icon-button" aria-label="电脑版" @click="openDesktop">
         <el-icon><Monitor /></el-icon>
@@ -80,19 +80,21 @@ onBeforeUnmount(() => {setMobileViewportState(false);window.visualViewport?.remo
         <span>采购</span>
       </RouterLink>
       <RouterLink v-if="hasPermission(authStore.user,'inventory.read')" to="/mobile/inventory" class="mobile-tabbar__item">
-        <el-icon><Box /></el-icon>
+        <el-icon><Warehouse /></el-icon>
         <span>库存</span>
       </RouterLink>
       <RouterLink v-if="hasPermission(authStore.user,'orders.read')" to="/mobile/orders" class="mobile-tabbar__item">
-        <el-icon><Tickets /></el-icon>
+        <el-icon><Package /></el-icon>
         <span>订单</span>
       </RouterLink>
-      <RouterLink to="/mobile/account" class="mobile-tabbar__item"><el-icon><House /></el-icon><span>我的</span></RouterLink>
+      <RouterLink to="/mobile/account" class="mobile-tabbar__item"><el-icon><UserRound /></el-icon><span>我的</span></RouterLink>
     </nav>
   </main>
 </template>
 
 <style scoped>
+.mobile-icon-button :deep(svg),.mobile-tabbar__item :deep(svg){width:21px;height:21px;stroke-width:1.8}
+
 .mobile-shell {
   position: fixed;
   inset: 0;
@@ -114,7 +116,7 @@ onBeforeUnmount(() => {setMobileViewportState(false);window.visualViewport?.remo
   top: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px 38px;
+  grid-template-columns: 44px minmax(0, 1fr) 44px 44px;
   gap: 8px;
   align-items: center;
   padding: max(10px, env(safe-area-inset-top)) 12px 10px;
@@ -124,8 +126,8 @@ onBeforeUnmount(() => {setMobileViewportState(false);window.visualViewport?.remo
 }
 
 .mobile-icon-button {
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   display: grid;
   place-items: center;
   border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
