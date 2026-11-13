@@ -14,6 +14,11 @@ import { normalizeWorkflowKeyModel, normalizeWorkflowMaterial } from "../shared/
 // Model words must match business data, never media hosts, hashes or internal IDs.
 const MATERIAL_SEARCH_TEXT=`CONCAT_WS(' ',${['name','label','brand','model','coreName','searchTerms','notes','moldCode','shape','material','category','listingCategory.name','bindings[*].brand','bindings[*].models'].map(key=>`JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.${key}'))`).join(',')})`;
 
+// Resolve custom node IDs in SQL so list thumbnails do not load full snapshots.
+const workflowNodeIdSql=(field,value)=>`JSON_UNQUOTE(JSON_EXTRACT(payload_json, REPLACE(JSON_UNQUOTE(JSON_SEARCH(payload_json, 'one', '${value}', NULL, '$.definition.nodes[*].${field}')), '.${field}', '.id')))`;
+const workflowMainImageSql=`JSON_UNQUOTE(JSON_EXTRACT(payload_json, CONCAT('$.outputs.', JSON_QUOTE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[0].id'))), '.', JSON_QUOTE(${workflowNodeIdSql('role','main')}), '.url')))`;
+const workflowProductImageSql=`JSON_UNQUOTE(JSON_EXTRACT(payload_json, CONCAT('$.variants[0].values.', JSON_QUOTE(${workflowNodeIdSql('referenceRole','product')}), '[0]')))`;
+
 const SCHEMA=`CREATE TABLE IF NOT EXISTS product_workflow_documents (
   id VARCHAR(36) NOT NULL, tenant_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL,
   name VARCHAR(200) NOT NULL, revision INT NOT NULL DEFAULT 1, payload_json LONGTEXT NOT NULL,
@@ -59,9 +64,29 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
       return {items:await decorate(rows.map(map),actor),total,page,pageSize:size};
     }
+    if(kind==='run'&&options.page!==undefined){
+      const size=Math.max(1,Math.min(100,Number.parseInt(options.pageSize,10)||20)),keyword=String(options.keyword||'').trim().slice(0,200);
+      const filters=["tenant_id = ?", "kind = ?", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'"];
+      const params=[tenant,kind];
+      if(options.section==='results')filters.push("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')), '') NOT IN ('', 'null')");
+      else filters.push("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')), '') IN ('', 'null')");
+      if(keyword){filters.push("CONCAT_WS(' ', name, JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[*].label')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[*].fitments')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.sharedValues.__fitments'))) LIKE ?");params.push(`%${keyword}%`);}
+      const filter=filters.join(' AND '),total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
+      const page=Math.max(1,Math.min(Math.ceil(total/size)||1,Number.parseInt(options.page,10)||1));
+      const rows=await query(`SELECT id, name, revision, updated_at,
+        JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) AS draft_id,
+        JSON_LENGTH(JSON_EXTRACT(payload_json, '$.variants')) AS variant_count,
+        JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[0].label')) AS product_label,
+        ${workflowMainImageSql} AS main_image, ${workflowProductImageSql} AS product_image,
+        COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.name'))) AS category_name,
+        JSON_EXTRACT(payload_json, '$.sharedValues.__fitments', '$.variants[*].values.__fitments', '$.variants[*].fitments') AS fitments_json
+        FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
+      const items=rows.map(row=>{const main=row.main_image&&row.main_image!=='null'?row.main_image:'',product=row.product_image&&row.product_image!=='null'?row.product_image:'';return {...row,preview_image:main||product,preview_source:main?'generated':product?'product':'',draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision),...workflowRunIdentity(row.fitments_json)};});
+      return {items,total,page,pageSize:size};
+    }
     if(kind==='template'&&options.page!==undefined){
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
-      const filter="tenant_id = ? AND kind = ? AND (name LIKE ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) LIKE ?)";
+      const filter="tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (name LIKE ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) LIKE ?)";
       const params=[tenant,'template',`%${keyword}%`,`%${keyword}%`];
       let total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
       // First visit provisions an editable sample within this tenant only. No customer assets are copied.
@@ -93,12 +118,12 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.productionMode')) AS production_mode,
       COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.name'))) AS category_name,
       JSON_EXTRACT(payload_json, '$.sharedValues.__fitments', '$.variants[*].values.__fitments') AS fitments_json
-      FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT 100`,[tenant,kind])).map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision),...workflowRunIdentity(row.fitments_json)}));
+      FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' ORDER BY updated_at DESC LIMIT 100`,[tenant,kind])).map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision),...workflowRunIdentity(row.fitments_json)}));
   }
   async function get(kind,id,session) {
     const {tenant,actor}=await scope(session);
     const row=(await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND id = ?",[tenant,kind,id]))[0];
-    if(!row) throw Object.assign(new Error("当前企业中没有这个工作流记录"),{status:404});return ['material','key_model'].includes(kind)?(await decorate([map(row)],actor))[0]:map(row);
+    if(!row||(['run','template'].includes(kind)&&JSON.parse(row.payload_json).archived)) throw Object.assign(new Error("当前企业中没有这个工作流记录"),{status:404});return ['material','key_model'].includes(kind)?(await decorate([map(row)],actor))[0]:map(row);
   }
   async function save(kind,body,session) {
     const {tenant,actor}=await scope(session);
@@ -135,6 +160,13 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     catch(error){if(body.creationId&&error.code==='ER_DUP_ENTRY')return get(kind,id,session);throw error;}
     return {id,kind,name,payload,revision:1};
   }
+  async function archiveTemplate(body,session){
+    const {tenant}=await scope(session),previous=await get('template',String(body.id||''),session);
+    if(!Number.isInteger(body.revision)||body.revision!==previous.revision)throw Object.assign(new Error('流程已被修改，请刷新后再删除'),{status:409});
+    const result=await execute("UPDATE product_workflow_documents SET payload_json = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND kind = 'template' AND id = ? AND revision = ?",[JSON.stringify({...previous.payload,archived:true}),tenant,previous.id,body.revision]);
+    if(!result.affectedRows)throw Object.assign(new Error('流程已被修改，请刷新后再删除'),{status:409});
+    return {ok:true,id:previous.id};
+  }
   async function importMappings(records,session,transaction=withMysqlTransaction){
     const {actor}=await scope(session);
     const brands=await catalogFor(actor);
@@ -165,7 +197,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     for(const row of rows)for(const variant of (typeof row.variants_json==='string'?JSON.parse(row.variants_json):row.variants_json)||[]){const facts=String(variant.values?.facts||'').trim();if(!facts||seen.has(facts))continue;seen.add(facts);result.push({id:`${row.id}:${variant.id}`,runId:row.id,name:row.name,product:variant.label,facts});if(result.length>=40)return result;}
     return result;
   }
-  return {list,get,save,scope,factsHistory,matchingKeys,importMappings};
+  return {list,get,save,scope,factsHistory,matchingKeys,importMappings,archiveTemplate};
 }
 export const productWorkflowStore=createProductWorkflowStore();
 

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { restoreBusinessTaskSession, authorizeBusinessTaskSession, assertBusinessTaskPermission } from './business-task-tenant.js';
 import { productWorkflowStore, importProductWorkflowDraft } from './product-workflows.js';
-import { createAiGenerationTasks, aiGenerationTasks, retryAiGenerationTask } from './ai-generation-tasks.js';
+import {workflowAiTaskAccess} from './product-workflow-ai-tasks.js';
 import { advanceProductWorkflow, invalidateWorkflowResults, isConfirmedImageTaskFailure } from './product-workflow-execution.js';
 import { buildWorkflowDraft, workflowInputContext, workflowError } from '../shared/product-workflow.js';
 
@@ -72,9 +72,9 @@ async function processNextWorkflowJob() {
       };
       const result=document.payload.draftId?{status:'imported'}:await advanceProductWorkflow(document,{
         commit,guard,
-        findTask:async id=>(await aiGenerationTasks({taskIds:id,includePayload:1},actor))[0],
-        createTask:body=>createAiGenerationTasks(body,actor),
-        retryTask:id=>retryAiGenerationTask(id,actor)
+        findTask:id=>workflowAiTaskAccess.find(job.run_id,id,actor),
+        createTask:body=>workflowAiTaskAccess.submit(job.run_id,body,actor),
+        retryTask:id=>workflowAiTaskAccess.retry(job.run_id,id,actor)
       });
       const automaticReady=result.status==='ready'&&document.payload.definition.reviewMode==='automatic';
       // Keep automatic imports recoverable if the process stops after the checkpoint.
@@ -90,15 +90,25 @@ async function processNextWorkflowJob() {
 }
 
 
-export async function productWorkflowAction(body,session) {
-  const {tenant,actor}=await productWorkflowStore.scope(session);
-  await ensureProductWorkflowJobs();
-  await withMysqlTransaction(async connection=>{
+export async function productWorkflowAction(body,session,{store=productWorkflowStore,transaction=withMysqlTransaction,ensureJobs=ensureProductWorkflowJobs,tasks=(id,workflowId,actor)=>workflowAiTaskAccess.find(workflowId,id,actor),startRunner=startProductWorkflowRunner}={}) {
+  const {tenant,actor}=await store.scope(session);
+  if(!body||typeof body.id!=='string'||!['start','approve-all','approve','save-copy','retry','archive'].includes(body.action))throw workflowError('请选择有效的任务操作');
+  await ensureJobs();
+  await transaction(async connection=>{
     const [jobs]=await connection.execute("SELECT *, lease_until > UTC_TIMESTAMP() AS busy FROM product_workflow_jobs WHERE tenant_id = ? AND run_id = ? FOR UPDATE",[tenant,body.id]);
     if(Number(jobs[0]?.busy))throw Object.assign(new Error('后台正在更新该任务，请稍后重试'),{status:409});
     const [rows]=await connection.execute("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' AND id = ? FOR UPDATE",[tenant,body.id]);
     if(!rows[0])throw Object.assign(new Error('当前企业中没有这个任务'),{status:404});
     const payload=JSON.parse(rows[0].payload_json);
+    if(payload.archived)throw Object.assign(new Error('该任务已删除，请刷新列表'),{status:404});
+    if(body.action==='archive'){
+      if(!Number.isInteger(body.revision)||body.revision!==Number(rows[0].revision))throw Object.assign(new Error('任务已更新，请刷新后再删除'),{status:409});
+      if(['queued','running'].includes(jobs[0]?.status))throw Object.assign(new Error('任务正在生成，请等待完成或失败后再删除'),{status:409});
+      payload.archived=true;
+      await connection.execute("UPDATE product_workflow_documents SET payload_json = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND kind = 'run' AND id = ?",[JSON.stringify(payload),tenant,body.id]);
+      await connection.execute("UPDATE product_workflow_jobs SET status = 'archived', lease_token = NULL, lease_until = NULL WHERE tenant_id = ? AND run_id = ?",[tenant,body.id]);
+      return;
+    }
     if(payload.draftId||payload.draftImportStatus==='unknown')throw workflowError('该任务已进入操作箱，请在操作箱编辑或核对导入状态');
     let next='queued';
     if(body.action!=='start'&&body.action!=='approve-all') {
@@ -121,7 +131,7 @@ export async function productWorkflowAction(body,session) {
         const retained={...state,text,approved:false};invalidateWorkflowResults(payload,variant.id,node.id);results[node.id]=retained;
       }else if(body.action==='retry') {
         if(['running','submitting'].includes(state?.status))throw workflowError('该节点仍在生成，请等待后台更新');
-        const original=node.type==='image'&&state?.taskId&&!state.url?(await aiGenerationTasks({taskIds:state.taskId,includePayload:1},actor))[0]:null;
+        const original=node.type==='image'&&state?.taskId&&!state.url?await tasks(state.taskId,body.id,actor):null;
         if(body.recoverOnly&&isConfirmedImageTaskFailure(original)){state.status='failed';state.failureKind='provider_confirmed';state.error=original.error?.message||'供应商已确认失败，请确认后重新生成';}
         else if(state?.status==='unknown'||node.type==='image'&&state?.taskId&&!state.url&&!isConfirmedImageTaskFailure(original))state.status='resubmit';
         else invalidateWorkflowResults(payload,variant.id,node.id);
@@ -141,11 +151,15 @@ export async function productWorkflowAction(body,session) {
     await connection.execute(`INSERT INTO product_workflow_jobs (tenant_id, run_id, person_id, status) VALUES (?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE status = VALUES(status), person_id = VALUES(person_id), error_message = NULL, lease_token = NULL, lease_until = NULL, next_tick_at = UTC_TIMESTAMP()`,[tenant,body.id,actor.personId,next]);
   });
-  await startProductWorkflowRunner();
-  return productWorkflowStore.get('run',body.id,actor);
+  if(body.action==='archive')return {ok:true,id:body.id};
+  await startRunner();
+  return store.get('run',body.id,actor);
 }
 
-export async function workflowJobStates(session) {
+export async function workflowJobStates(session,options={}) {
   const {tenant}=await productWorkflowStore.scope(session);await ensureProductWorkflowJobs();
-  return mysqlQuery('SELECT run_id, status, error_message FROM product_workflow_jobs WHERE tenant_id = ?',[tenant]);
+  const ids=options.ids===undefined?null:String(options.ids).split(',').filter(Boolean);
+  if(ids&&(ids.length>201||ids.some(id=>! /^[0-9a-f-]{36}$/i.test(id))))throw workflowError('生产任务筛选格式无效');
+  if(ids&&!ids.length)return [];
+  return mysqlQuery(`SELECT run_id, status, error_message FROM product_workflow_jobs WHERE tenant_id = ? AND status <> 'archived'${ids?` AND run_id IN (${ids.map(()=>'?').join(',')})`:''}`,[tenant,...(ids||[])]);
 }
