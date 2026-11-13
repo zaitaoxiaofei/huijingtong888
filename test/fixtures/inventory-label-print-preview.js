@@ -7,11 +7,12 @@ export const labelProducts = [
  { id:270,inventory_number:'99-1-1',name:'包装耗材 气泡袋 1个',avg_unit_cost:0.5,is_consumable:1,component_count:0,stock_unit:'个',bound_sku_count:0 }
 ];
 export async function startLabelPrintPreview() {
-const rows = labelProducts;
+const rows = labelProducts.map(row=>({...row,image_url:`/api/products/${row.id}/image`}));
 const calls = [];
 const server = await startPagedWorkspacePreview({ stableDeps:true, host: '::1', user:{...demoUser,tenant:{...demoUser.tenant,id:1,slug:'default'}}, apiHandler(req,res,url,send){
  calls.push({ method:req.method,path:url.pathname });
- if(url.pathname==='/api/products'){send({rows,total:rows.length});return true;}
+ if(/^\/api\/products\/\d+\/image$/.test(url.pathname)){res.setHeader('Content-Type','image/png');res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=','base64'));return true;}
+ if(url.pathname==='/api/products'){const matches=url.searchParams.get('query')?rows.filter(row=>row.inventory_number===url.searchParams.get('query')):rows;send({rows:matches,total:matches.length});return true;}
  if(url.pathname==='/api/inventory-workflow'&&url.searchParams.get('view')==='local'){send({rows:rows.map((row,i)=>({product_id:row.id,physical_stock:20,workflow_free:15,fbp_stock_known:i===1?null:0}))});return true;}
  if(url.pathname==='/api/people'){send([{id:1,name:'负责人',active:1}]);return true;}
  if(url.pathname==='/api/inventory/ledger'||url.pathname==='/api/procurement/ledger'){

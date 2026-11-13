@@ -1,3 +1,5 @@
+import bwipjs from 'bwip-js/browser';
+
 export const INVENTORY_LABEL_SIZE = { width: 70, height: 30 };
 export const MAX_INVENTORY_LABELS = 1000;
 
@@ -15,7 +17,7 @@ export function inventoryLabelItems(products) {
       number: String(product.inventory_number || product.inventory_id || product.code || '').trim(),
       name: String(product.name || '').replace(/\s+/g, ' ').trim(),
       type: inventoryLabelType(product),
-      quantity: 1
+      quantity: Number.isSafeInteger(Number(product.physical_stock)) && Number(product.physical_stock) > 0 ? Number(product.physical_stock) : 1
     }));
 }
 
@@ -64,23 +66,34 @@ export function renderInventoryLabel(item) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#000';
   ctx.textBaseline = 'alphabetic';
-  let numberSize = 148;
+  let numberSize = 128;
   do { ctx.font = `800 ${numberSize}px ${family}`; numberSize -= 1; }
-  while (ctx.measureText(item.number).width > 610 && numberSize >= 40);
-  if (ctx.measureText(item.number).width > 610) throw new Error(`${item.number}：编号过长，无法完整排入标签`);
+  while (ctx.measureText(item.number).width > 380 && numberSize >= 40);
+  if (ctx.measureText(item.number).width > 380) throw new Error(`${item.number}：编号过长，无法完整排入标签`);
   ctx.fillText(item.number, 30, 157);
 
-  ctx.font = `700 32px ${family}`;
+  ctx.font = `700 28px ${family}`;
   const badgeWidth = 104, badgeX = canvas.width - 30 - badgeWidth;
   ctx.lineWidth = item.type === '配件' ? 4 : 2;
   if (item.type === '套装' || item.type === '耗材') {
-    ctx.fillRect(badgeX, 30, badgeWidth, 50);
+    ctx.fillRect(badgeX, 20, badgeWidth, 44);
     ctx.fillStyle = '#fff';
-  } else ctx.strokeRect(badgeX, 30, badgeWidth, 50);
-  ctx.fillText(item.type, badgeX + (badgeWidth - ctx.measureText(item.type).width) / 2, 66);
+  } else ctx.strokeRect(badgeX, 20, badgeWidth, 44);
+  ctx.fillText(item.type, badgeX + (badgeWidth - ctx.measureText(item.type).width) / 2, 52);
   ctx.fillStyle = '#000';
+  const barcode = document.createElement('canvas');
+  bwipjs.toCanvas(barcode, { bcid: 'code128', text: item.number, height: 8, scale: 3, includetext: false, paddingwidth: 10 });
+  if (barcode.width > 360) bwipjs.toCanvas(barcode, { bcid: 'code128', text: item.number, height: 8, scale: 2, includetext: false, paddingwidth: 10 });
+  // Keep module edges crisp and quiet zones intact at the label's 300 dpi resolution.
+  if (barcode.width > 360) throw new Error(`${item.number}：条形码过长，无法清晰排入标签`);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(barcode, 437 + Math.floor((360 - barcode.width) / 2), 78, barcode.width, 84);
+  ctx.font = `400 19px ${family}`;
+  ctx.textAlign = 'center';
+  ctx.fillText(item.number, 617, 184);
+  ctx.textAlign = 'start';
   ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(30, 195); ctx.lineTo(797, 195); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(30, 203); ctx.lineTo(797, 203); ctx.stroke();
 
   let lines, size = 40;
   do {
