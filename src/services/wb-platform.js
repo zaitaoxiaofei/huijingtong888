@@ -139,8 +139,9 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
     const a = await account(tenantId, body.shop_id);
     let cursor = { limit: 100 }, count = 0;
     for (let page = 0; page < 1000; page++) {
-      const result = await request(a, 'content', '/content/v2/get/cards/list', { method: 'POST', body: { settings: { cursor, filter: { withPhoto: -1 } } } });
-      const cards = result.cards || [];
+      const result = await request(a, 'content', '/content/v2/get/cards/list', { method: 'POST', query:{locale:'zh'}, body: { settings: { cursor, filter: { withPhoto: -1 } } } });
+      if(!Array.isArray(result.cards))throw fail('WB 商品接口未返回商品列表，本次同步未完成，请检查授权并重试。',502);
+      const cards = result.cards;
       for (const card of cards) {
         await query(`INSERT INTO wb_product_cards (tenant_id,shop_id,nm_id,vendor_code,title,raw_json,synced_at) VALUES (?,?,?,?,?,?,UTC_TIMESTAMP())
           ON DUPLICATE KEY UPDATE vendor_code=VALUES(vendor_code),title=VALUES(title),raw_json=VALUES(raw_json),synced_at=VALUES(synced_at)`,
@@ -207,24 +208,24 @@ export function createWbPlatform({ query, transaction, request = wbRequest, inva
     return { task:await request(a,'prices','/api/v2/history/tasks',{query:{uploadID}}),
       details:await request(a,'prices','/api/v2/history/goods/task',{query:{uploadID,limit:100,offset:0}}) };
   }
-  async function stockContext(tenantId,body) {
+  async function stockContext(tenantId,body,readOnly=false) {
     const a=await account(tenantId,body.shop_id);
     if(!a.wb_warehouse_id)throw fail('缺少 WB 卖家仓绑定，请由企业管理员在企业店铺中绑定 WB 仓库。',409);
     const cards=await query('SELECT raw_json FROM wb_product_cards WHERE tenant_id=? AND shop_id=? AND nm_id=?',[a.tenant_id,a.shop_id,positiveId(body.nm_id)]);
     const size=cards[0]&&(parse(cards[0].raw_json).sizes||[]).find(item=>Number(item.chrtID)===positiveId(body.chrt_id));
     if(!size?.skus?.length)throw fail('WB 商品规格或条码不存在，请先同步商品。',404);
     const mappings=await query('SELECT product_id FROM sku_mappings WHERE tenant_id=? AND shop_id=? AND ozon_sku=? AND active=1',[a.tenant_id,a.shop_id,`WB-${positiveId(body.chrt_id)}`]);
-    if(!mappings[0])throw fail('该 WB 规格尚未绑定基础商品，请先绑定库存。',409);
-    if(!loadAvailability)throw fail('本地库存核对暂不可用，未推送库存。',503);
+    if(!mappings[0]){if(readOnly)return {a,size,available:null,availability_message:'该规格尚未绑定基础商品，无法核对本地可分配量。'};throw fail('该 WB 规格尚未绑定基础商品，请先绑定库存。',409);}
+    if(!loadAvailability){if(readOnly)return {a,size,available:null,availability_message:'本地库存核对暂不可用。'};throw fail('本地库存核对暂不可用，未推送库存。',503);}
     const scope=await resolveInventoryTenantScope(a.tenant_id,query);
     const value=await loadAvailability({productIds:String(mappings[0].product_id)},scope.isDefault?'admin':String(a.tenant_id));
     const local=value.rows.find(row=>Number(row.product_id)===Number(mappings[0].product_id));
-    if(!local||local.inventory_needs_review)throw fail('本地库存需要核对，未推送 WB 库存，请先在库存总览处理。',409);
+    if(!local||local.inventory_needs_review){if(readOnly)return {a,size,available:null,availability_message:'本地库存需要在库存总览核对。'};throw fail('本地库存需要核对，未推送 WB 库存，请先在库存总览处理。',409);}
     return {a,size,available:Math.max(0,Math.floor(Number(local.local_available??local.available_stock??0)))};
   }
   async function stocks(tenantId,body) {
-    const {a,size,available}=await stockContext(tenantId,body);
-    return {available,warehouse_id:a.wb_warehouse_id,...await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'POST',body:{skus:[size.skus[0]]}})};
+    const {a,size,available,availability_message}=await stockContext(tenantId,body,true);
+    return {...await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'POST',body:{skus:[size.skus[0]]}}),available,availability_message,warehouse_id:a.wb_warehouse_id};
   }
   async function setStocks(tenantId,body) {
     const {a,size,available}=await stockContext(tenantId,body),amount=Number(body.quantity);

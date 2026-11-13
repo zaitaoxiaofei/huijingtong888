@@ -1,3 +1,4 @@
+import {wbListingPrice} from './wb-listing-prices.js';
 import {wbListingVariants,wbVariantPayload} from './wb-listing-variants.js';
 const clean = value => String(value ?? '').trim();
 function validateOne(payload = {}, attributes = []) {
@@ -13,6 +14,7 @@ function validateOne(payload = {}, attributes = []) {
   const sizes = card.sizes || [], barcodes = new Set();
   if (!sizes.length || sizes.length > 30) errors.push('规格：请填写 1–30 个规格。');
   for (const [index,size] of sizes.entries()) {
+    if(size.old_price!==undefined&&size.old_price!==null&&size.old_price!==''){try{if(!Number.isSafeInteger(Number(size.old_price))||Number(size.old_price)<=0)throw Error('划线价须为大于零的整数。');const computed=wbListingPrice(Number(size.price),1,Number(size.old_price)/Number(size.price));if(!computed.exact)errors.push(`规格 ${index+1}：WB 使用整数百分比折扣，当前折扣后为 ${computed.effective_price}，请调整划线价。`);}catch(e){errors.push(`规格 ${index+1}：${e.message}`);}}
     if (!clean(size.techSize)) errors.push(`规格 ${index+1}：请填写规格名称；无尺码商品填写 0。`);
     if (!Number.isInteger(Number(size.price)) || Number(size.price) <= 0) errors.push(`规格 ${index+1}：请填写大于零的整数售价（店铺币种）。`);
     if (!Array.isArray(size.skus) || !size.skus.length) errors.push(`规格 ${index+1}：请填写条码，或点击生成条码。`);
@@ -27,7 +29,7 @@ function validateOne(payload = {}, attributes = []) {
   }
   for (const attribute of attributes.filter(a=>a.required&&!a.existNamedField&&Number(a.charcType)!==0)) {
     const value = values.find(v=>Number(v.id)===Number(attribute.charcID))?.value;
-    if (value === undefined || value === null || (Array.isArray(value) && !value.length)) errors.push(`类目必填属性：${attribute.name}，请在类目属性中补全。`);
+    if (value === undefined || value === null || (Array.isArray(value) && !value.length)) errors.push(`类目必填属性：${attribute.name}，请在商品表格的对应属性列补全。`);
   }
   if (!Array.isArray(payload.images) || !payload.images.length || payload.images.length > 30) errors.push('商品图片：请选择 1–30 张图片，第一张为主图。');
   for (const image of payload.images || []) { try { const url=new URL(image);if(url.protocol!=='https:'||url.username||url.password||!(/\.(jpe?g|png|webp|gif|bmp)$/i.test(url.pathname)))throw Error(); } catch { errors.push('商品图片：请使用无需登录、以图片扩展名结尾的 HTTPS 直链。');break; } }
@@ -56,7 +58,7 @@ export function wbListingValidation(payload={},attributes=[]){
    if(clean(row.card?.brand)!==clean(variants[0].card?.brand))errors.push(prefix+'合并商品品牌必须相同，请使用同首行或选择独立商品。');
    for(const attribute of attributes.filter(a=>a.isVariable!==true&&!a.existNamedField&&Number(a.charcType)!==0)){
     const value=r=>{const v=r.card?.characteristics?.find(c=>Number(c.id)===Number(attribute.charcID))?.value;return JSON.stringify(Array.isArray(v)?[...v].sort():v);};
-    if(value(row)!==value(variants[0]))errors.push(prefix+`${attribute.name} 不允许作为变体差异，请在共用属性中统一填写。`);
+    if(value(row)!==value(variants[0]))errors.push(prefix+`${attribute.name} 不允许作为变体差异，请使用该属性列的“同首行”统一填写，或改为独立商品。`);
    }
   }
  }

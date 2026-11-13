@@ -14,7 +14,7 @@ const shops=ref([]),schema=ref(null),busy=ref(false),drafts=ref([]),drawer=ref(f
 const time=v=>shanghaiDateTimeText(v,{assumeUtcWhenNaive:true});
 async function loadDrafts(){const scope=currentApiCacheScope();const r=await apiClient.get('/api/wb/workbench-drafts',{noCache:true});if(scope===currentApiCacheScope())drafts.value=r.rows||[];}
 async function choose(category,refresh=false,restored=null){
- if(!restored&&!refresh&&schema.value&&Number(category.subjectID)!==Number(schema.value.subject_id)&&editor.value?.getPayload()?.card.characteristics?.length){try{await ElMessageBox.confirm('更换类目会清空当前类目属性。标题、图片、包装和价格保留，请按新类目重新填写属性。','更换产品类目',{type:'warning'});}catch{return;}}
+ if(!restored&&!refresh&&schema.value&&Number(category.subjectID)!==Number(schema.value.subject_id)&&(editor.value?.getPayload()?.variants||[{card:editor.value?.getPayload()?.card}]).some(row=>row.card?.characteristics?.length)){try{await ElMessageBox.confirm('更换类目会清空当前类目属性。标题、图片、包装和价格保留，请按新类目重新填写属性。','更换产品类目',{type:'warning'});}catch{return;}}
  const requestId=++categorySequence,scope=currentApiCacheScope();busy.value=true;
  const previous=restored|| (editor.value?editor.value.getContext():context.value);
  try{
