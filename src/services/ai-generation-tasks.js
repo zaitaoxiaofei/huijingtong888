@@ -1204,3 +1204,5 @@ export const __test__ = {
   extractVehicleModels,
   hasCjkText
 };
+
+export {mapTaskRow as mapAiGenerationTaskRow};

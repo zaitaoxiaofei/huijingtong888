@@ -24,7 +24,7 @@ const routes = new Set([
   'GET product-workflows/prompts', 'POST product-workflows/prompts',
   'GET product-workflows/optimizations', 'POST product-workflows/optimizations',
   'GET product-workflows/templates', 'POST product-workflows/templates',
-  'GET product-workflows/runs', 'POST product-workflows/runs', 'POST product-workflows/import-draft',
+  'GET product-workflows/runs', 'POST product-workflows/runs', 'POST product-workflows/archive', 'POST product-workflows/import-draft',
   'GET product-workflows/facts-history', 'GET product-workflows/material-library', 'GET product-workflows/mold-mappings', 'POST product-workflows/mold-mappings', 'GET product-workflows/key-model-matches',
   'GET product-workflows/materials', 'POST product-workflows/materials',
   'GET product-workflows/key-models', 'POST product-workflows/key-models',
