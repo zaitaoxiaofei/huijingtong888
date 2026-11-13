@@ -8,9 +8,9 @@ const {productWorkflowAction}=await import('../src/services/product-workflow-run
 const actor={personId:1,roles:['operations'],tenant:{id:2,slug:'example',role:'member'}};
 test('production pagination counts the entire tenant result set and clamps the last page',async()=>{
  const calls=[];
- const store=createProductWorkflowStore({authorize:async s=>s,loadCatalog:null,ensureSchema:async()=>{},query:async(sql,params)=>{calls.push({sql,params});if(sql.includes('COUNT(*)'))return[{total:137}];return[{id:'one',name:'钥匙壳',revision:3,category_name:'保护套',product_label:'黑色',variant_count:1,fitments_json:JSON.stringify([{brand:'TENET',model:'PLUS L6'}]),draft_id:88}];}});
+ const store=createProductWorkflowStore({authorize:async s=>s,loadCatalog:null,ensureSchema:async()=>{},query:async(sql,params)=>{calls.push({sql,params});if(sql.includes('COUNT(*)'))return[{total:137}];return[{id:'one',name:'钥匙壳',revision:3,category_name:'保护套',product_label:'黑色',variant_count:1,fitments_json:JSON.stringify([{brand:'TENET',model:'PLUS L6'}]),draft_id:88,main_image:'https://example.test/generated.png',product_image:'https://example.test/product.png'}];}});
  const page=await store.list('run',actor,{page:99,pageSize:20,section:'results',keyword:'TENET'});
- assert.equal(page.total,137);assert.equal(page.page,7);assert.equal(page.items[0].models,'TENET PLUS L6');assert.equal(page.items[0].draft_id,88);
+ assert.equal(page.total,137);assert.equal(page.page,7);assert.equal(page.items[0].models,'TENET PLUS L6');assert.equal(page.items[0].draft_id,88);assert.equal(page.items[0].preview_image,'https://example.test/generated.png');assert.equal(page.items[0].preview_source,'generated');
  assert.ok(calls.every(c=>c.params[0]==='2'&&c.sql.includes('$.archived')&&c.sql.includes('$.draftId')));assert.deepEqual(calls[1].params.slice(-2),[20,120]);assert.ok(calls[1].params.includes('%TENET%'));
 });
 test('template removal is tenant-scoped, optimistic and preserves the definition snapshot',async()=>{
@@ -42,4 +42,9 @@ test('record deletion route is available only to tenant operators',()=>{
  assert.equal(authorizeApiRequest({method:'POST',_session:actor},['api','product-workflows','archive']).allowed,true);
  assert.equal(tenantIsolationDecision(actor,['api','product-workflows','archive'],'POST').allowed,true);
  assert.equal(authorizeApiRequest({method:'POST',_session:{...actor,roles:['packing']}},['api','product-workflows','archive']).allowed,false);
+});
+
+test('unfinished runs show uploaded product thumbnails instead of treating them as generated images',async()=>{
+ const store=createProductWorkflowStore({authorize:async s=>s,loadCatalog:null,ensureSchema:async()=>{},query:async(sql)=>sql.includes('COUNT(*)')?[{total:1}]:[{id:'run',revision:1,draft_id:null,main_image:'null',product_image:'https://example.test/uploaded.png'}]});
+ const page=await store.list('run',actor,{page:1,section:'tasks'});assert.equal(page.items[0].preview_source,'product');assert.equal(page.items[0].preview_image,'https://example.test/uploaded.png');
 });

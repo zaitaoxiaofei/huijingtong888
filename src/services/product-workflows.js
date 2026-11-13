@@ -14,6 +14,11 @@ import { normalizeWorkflowKeyModel, normalizeWorkflowMaterial } from "../shared/
 // Model words must match business data, never media hosts, hashes or internal IDs.
 const MATERIAL_SEARCH_TEXT=`CONCAT_WS(' ',${['name','label','brand','model','coreName','searchTerms','notes','moldCode','shape','material','category','listingCategory.name','bindings[*].brand','bindings[*].models'].map(key=>`JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.${key}'))`).join(',')})`;
 
+// Resolve custom node IDs in SQL so list thumbnails do not load full snapshots.
+const workflowNodeIdSql=(field,value)=>`JSON_UNQUOTE(JSON_EXTRACT(payload_json, REPLACE(JSON_UNQUOTE(JSON_SEARCH(payload_json, 'one', '${value}', NULL, '$.definition.nodes[*].${field}')), '.${field}', '.id')))`;
+const workflowMainImageSql=`JSON_UNQUOTE(JSON_EXTRACT(payload_json, CONCAT('$.outputs.', JSON_QUOTE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[0].id'))), '.', JSON_QUOTE(${workflowNodeIdSql('role','main')}), '.url')))`;
+const workflowProductImageSql=`JSON_UNQUOTE(JSON_EXTRACT(payload_json, CONCAT('$.variants[0].values.', JSON_QUOTE(${workflowNodeIdSql('referenceRole','product')}), '[0]')))`;
+
 const SCHEMA=`CREATE TABLE IF NOT EXISTS product_workflow_documents (
   id VARCHAR(36) NOT NULL, tenant_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL,
   name VARCHAR(200) NOT NULL, revision INT NOT NULL DEFAULT 1, payload_json LONGTEXT NOT NULL,
@@ -72,10 +77,11 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
         JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) AS draft_id,
         JSON_LENGTH(JSON_EXTRACT(payload_json, '$.variants')) AS variant_count,
         JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[0].label')) AS product_label,
+        ${workflowMainImageSql} AS main_image, ${workflowProductImageSql} AS product_image,
         COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.name'))) AS category_name,
         JSON_EXTRACT(payload_json, '$.sharedValues.__fitments', '$.variants[*].values.__fitments', '$.variants[*].fitments') AS fitments_json
         FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
-      const items=rows.map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision),...workflowRunIdentity(row.fitments_json)}));
+      const items=rows.map(row=>{const main=row.main_image&&row.main_image!=='null'?row.main_image:'',product=row.product_image&&row.product_image!=='null'?row.product_image:'';return {...row,preview_image:main||product,preview_source:main?'generated':product?'product':'',draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision),...workflowRunIdentity(row.fitments_json)};});
       return {items,total,page,pageSize:size};
     }
     if(kind==='template'&&options.page!==undefined){
