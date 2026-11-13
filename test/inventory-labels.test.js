@@ -27,6 +27,14 @@ test('invalid or excessive label copies and incomplete inventories cannot genera
   assert.throws(() => validateInventoryLabels([{ ...item, quantity: 1000 }, { ...item, id: 268 }]), /分批/);
   assert.equal(validateInventoryLabels([{ ...item, quantity: 1000 }]), 1000);
 });
+test('label copies default to physical local stock, independently of reserved or FBP quantities', () => {
+  assert.equal(inventoryLabelItems([{ ...product, physical_stock: 12, workflow_free: 7, fbp_stock_known: 100 }])[0].quantity, 12);
+  for (const physical_stock of [undefined, null, 0, -2, NaN, Infinity, 1.5]) {
+    assert.equal(inventoryLabelItems([{ ...product, physical_stock }])[0].quantity, 1);
+  }
+  assert.equal(inventoryLabelItems([{ ...product, physical_stock: '12' }])[0].quantity, 12);
+  assert.throws(() => validateInventoryLabels(inventoryLabelItems([{ ...product, physical_stock: 1001 }])), /数量/);
+});
 test('wrapping Chinese names retains every visible character without ellipsis', () => {
   const name = '门槛条VOLGAK40红色LOGO定制款ABS塑料激光4个';
   const lines = wrapLabelName(name, text => [...text].length * 10, 120);
