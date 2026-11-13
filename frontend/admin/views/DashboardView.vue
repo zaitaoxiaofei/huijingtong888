@@ -1,6 +1,8 @@
 <script setup>
+import { dashboardForSession, canViewDashboardFinance } from "../../../src/shared/dashboard-visibility.js";
+import DashboardPerformance from "../components/DashboardPerformance.vue";
+import DashboardShopCapacity from "../components/DashboardShopCapacity.vue";
 import { mergeDashboardSections } from "../../../src/shared/dashboard-sections.js";
-import { hasPermission } from "../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -26,7 +28,6 @@ import {
 } from "lucide-vue-next";
 import { apiClient, currentApiCacheScope } from "../utils/api";
 import DashboardInventoryRanking from "../components/DashboardInventoryRanking.vue";
-import PlatformBadge from "../components/PlatformBadge.vue";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { shanghaiDateKey } from "../utils/shanghai-date.js";
 import DailyExchangeRateCard from "../components/DailyExchangeRateCard.vue";
@@ -34,7 +35,7 @@ import DailyExchangeRateCard from "../components/DailyExchangeRateCard.vue";
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const isAdmin = computed(() => hasPermission(authStore.user, "finance"));
+const isAdmin = computed(() => canViewDashboardFinance(authStore.user) && dashboard.value.financial !== false);
 const loading = ref(false);
 const refreshing = ref(false);
 const snapshotBuilding = ref(false);
@@ -52,7 +53,7 @@ const selectedDate = ref(/^\d{4}-\d{2}-\d{2}$/.test(String(route.query.date || "
 let dashboardSnapshotRefreshTimer = null;
 let dashboardSnapshotRefreshAttempts = 0;
 let dashboardRequestSeq = 0;
-const DASHBOARD_SESSION_CACHE_PREFIX = "erp:dashboard:last-success:v2:";
+const DASHBOARD_SESSION_CACHE_PREFIX = "erp:dashboard:last-success:v3:";
 
 const dashboard = ref({
   summary: {},
@@ -110,7 +111,6 @@ const availableLimitRows = computed(() => shopProductLimits.value.map((row) => {
     ok: row.ok !== false && (row.platform === "wb" ? total.limit !== null && total.limit !== undefined : dailyCreate.remaining !== null && dailyCreate.remaining !== undefined)
   };
 }));
-const maxAvailableLimit = computed(() => Math.max(1, ...availableLimitRows.value.map((row) => row.today_available)));
 const selectedDateText = computed(() => {
   const [year, month, day] = selectedDate.value.split("-");
   return `${year}年${Number(month)}月${Number(day)}日`;
@@ -125,7 +125,7 @@ function clearDashboardSnapshotReload() {
 function readDashboardSessionCache(dateKey) {
   try {
     const cached = JSON.parse(window.sessionStorage?.getItem(dashboardSessionCacheKey(dateKey)) || "null");
-    return cached && typeof cached === "object" ? cached : null;
+    return cached && typeof cached === "object" ? dashboardForSession({ ...cached, financial: false }, authStore.user) : null;
   } catch {
     return null;
   }
@@ -133,7 +133,7 @@ function readDashboardSessionCache(dateKey) {
 
 function writeDashboardSessionCache(dateKey, payload) {
   try {
-    window.sessionStorage?.setItem(dashboardSessionCacheKey(dateKey), JSON.stringify(payload));
+    window.sessionStorage?.setItem(dashboardSessionCacheKey(dateKey), JSON.stringify(dashboardForSession({ ...payload, financial: false }, authStore.user)));
   } catch {
     // Storage may be unavailable in privacy mode; live requests still work.
   }
@@ -173,7 +173,7 @@ async function getDashboardWithRetry(url, options = {}, retries = 2) {
 }
 
 function mergeDashboardPayload(payload) {
-  dashboard.value = mergeDashboardSections(dashboard.value, payload || {});
+  dashboard.value = dashboardForSession(mergeDashboardSections(dashboard.value, payload || {}), authStore.user);
 }
 
 async function applyDashboardDate(value) {
@@ -253,9 +253,6 @@ function ratioText(value) {
   return hasValue(value) ? `${Number(value || 0).toFixed(2)}x` : "待接入";
 }
 
-function limitBarWidth(value) {
-  return `${Math.max(3, (Number(value || 0) / maxAvailableLimit.value) * 100)}%`;
-}
 
 function firstMetricNumber(...values) {
   const matched = values.find((value) => hasValue(value));
@@ -317,6 +314,10 @@ function signalWidth(value, max, min = 8) {
 }
 
 function open(path, query = {}) {
+  if (!isAdmin.value && (path.startsWith('/profit/') || path.startsWith('/finance'))) {
+    router.push({ path: '/orders', query: { dateFrom: selectedDate.value, dateTo: selectedDate.value } });
+    return;
+  }
   if (path === "/inventory/alerts") {
     router.push({ path: "/inventory/fbp", query: fbpAlertQuery(null, query.alertType || query.alert_type || "all") });
     return;
@@ -905,7 +906,7 @@ const healthCards = computed(() => [
 const dashboardInsightCards = computed(() => [
   ...["利润趋势", "广告健康", "售后损失", "FBP库存风险"]
     .map((title) => healthCards.value.find((card) => card.title === title))
-    .filter((card) => Boolean(card) && (isAdmin.value || card.title !== "利润趋势")),
+    .filter((card) => Boolean(card) && (isAdmin.value || !["利润趋势", "售后损失"].includes(card.title))),
   {
     title: "AI异常",
     route: anomalyCards.value.find((item) => Number(item.count || 0) > 0)?.path || "/advertising/daily",
@@ -959,7 +960,7 @@ async function loadDashboard(options = {}) {
         ? `/api/dashboard?${dateParam}&snapshotOnly=1&_=${Date.now()}`
         : `/api/dashboard?${dateParam}`;
     const res = await getDashboardWithRetry(url, {
-      ...(forceRefresh ? { noCache: true, cache: "no-store" } : {}),
+      noCache: true, cache: "no-store",
       routeScoped: false
     });
     if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
@@ -1025,6 +1026,18 @@ function clearInventoryRanking() {
   topInventoryError.value = "";
 }
 
+function resetDashboardScope() {
+  ++dashboardRequestSeq;
+  clearDashboardSnapshotReload();
+  clearInventoryRanking();
+  dashboard.value = { summary: {}, commerce: { today: {}, yesterday: {}, advertising: {} }, alerts: {} };
+  hasDashboardLoaded.value = false;
+  loading.value = false;
+  refreshing.value = false;
+  snapshotBuilding.value = false;
+  loadDashboard();
+}
+
 async function loadOverviewPanels(dateKey = selectedDate.value) {
   clearTimeout(shopLimitsRefreshTimer);
   const requestSeq = ++overviewRequestSeq;
@@ -1075,7 +1088,7 @@ function refreshDashboard() {
 }
 
 onMounted(() => {
-  window.addEventListener("erp:auth-scope-changed", clearInventoryRanking);
+  window.addEventListener("erp:auth-scope-changed", resetDashboardScope);
   loadDashboard();
 });
 
@@ -1084,7 +1097,7 @@ onBeforeUnmount(() => {
   ++overviewRequestSeq;
   clearTimeout(shopLimitsRefreshTimer);
   ++dashboardRequestSeq;
-  window.removeEventListener("erp:auth-scope-changed", clearInventoryRanking);
+  window.removeEventListener("erp:auth-scope-changed", resetDashboardScope);
   clearDashboardSnapshotReload();
 });
 </script>
@@ -1129,22 +1142,10 @@ onBeforeUnmount(() => {
           </el-button>
         </div>
 
-        <div class="hero-core-grid today-core-grid">
-          <article v-if="isAdmin" class="primary-metric profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
-            <div class="metric-label">
-              <CircleDollarSign :size="16" />
-              今日利润
-            </div>
-            <strong>{{ metricMoney(today.profit) }}</strong>
-            <div class="metric-footer">
-              <span :class="`delta is-${profitDelta.direction}`">
-                <ArrowUpRight v-if="profitDelta.direction === 'up'" :size="14" />
-                <ArrowDownRight v-else-if="profitDelta.direction === 'down'" :size="14" />
-                较昨日 {{ profitDelta.text }}
-              </span>
-              <em>{{ profitState }}</em>
-            </div>
-          </article>
+        <div class="dashboard-metric-zones">
+        <section class="metric-group today-group" aria-label="今日经营"><header class="metric-group-heading"><h2>今日经营</h2><span>所选日 · 与前一日比较</span></header>
+        <div class="hero-core-grid today-core-grid" :class="{'is-staff':!isAdmin}">
+
 
           <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
             <template #content>
@@ -1199,6 +1200,22 @@ onBeforeUnmount(() => {
               </div>
             </article>
           </el-tooltip>
+
+          <article v-if="isAdmin" class="primary-metric profit-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
+            <div class="metric-label">
+              <CircleDollarSign :size="16" />
+              今日利润
+            </div>
+            <strong>{{ metricMoney(today.profit) }}</strong>
+            <div class="metric-footer">
+              <span :class="`delta is-${profitDelta.direction}`">
+                <ArrowUpRight v-if="profitDelta.direction === 'up'" :size="14" />
+                <ArrowDownRight v-else-if="profitDelta.direction === 'down'" :size="14" />
+                较昨日 {{ profitDelta.text }}
+              </span>
+              <em>{{ profitState }}</em>
+            </div>
+          </article>
 
           <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
             <template #content>
@@ -1297,37 +1314,11 @@ onBeforeUnmount(() => {
             </article>
           </el-tooltip>
 
-          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
-            <template #content>
-              <div class="shop-breakdown ai-usage-breakdown">
-                <h4>今日人员 AI 生图消耗</h4>
-                <div v-for="row in aiUsage.people || []" :key="`ai-person-${row.person_id || row.person_name}`">
-                  <span>{{ row.person_name }} · {{ row.request_count }} 次调用 / {{ row.generated_count }} 张成功 / {{ row.task_count }} 个任务</span>
-                  <strong>{{ aiMoney(row.allocated_cost) }}</strong>
-                </div>
-                <div v-if="!(aiUsage.people || []).length"><span>今日暂无成功生图记录</span><strong>—</strong></div>
-                <small>{{ aiUsage.cost_source || "ERP 本地调用次数 × 0.038 RMB" }}；成功和失败均计费</small>
-                <small>数量口径：{{ aiUsage.count_basis || '调用流水' }}；日期按北京时间 00:00–24:00</small>
-                <small v-if="!aiUsage.available && (aiUsage.errors || []).length" class="ai-usage-error">费用查询失败：{{ aiUsage.errors[0] }}</small>
-              </div>
-            </template>
-            <article class="primary-metric ai-usage-card" @click="open('/settings/ai')">
-              <div class="metric-label"><Sparkles :size="16" />AI 消耗</div>
-              <strong>{{ aiMoney(aiUsage.cost) }}</strong>
-              <div class="metric-subline">
-                <span>当前余额</span>
-                <div class="metric-subline-value"><b>{{ aiMoney(aiUsage.available ? aiUsage.balance : null) }}</b></div>
-              </div>
-              <div class="metric-footer">
-                <span class="delta is-flat">{{ metricNumber(aiUsage.request_count, " 次调用") }}</span>
-                <em>{{ metricNumber((aiUsage.people || []).length, " 人") }}</em>
-              </div>
-            </article>
-          </el-tooltip>
-          <DailyExchangeRateCard />
-        </div>
 
-        <div class="hero-core-grid month-core-grid compact-month-grid">
+        </div>
+        </section>
+        <section class="metric-group month-group" aria-label="本月经营"><header class="metric-group-heading"><h2>本月经营</h2><span>月累计 · 金额人民币</span></header>
+        <div class="hero-core-grid month-core-grid compact-month-grid" :class="{'is-staff':!isAdmin}">
           <article class="primary-metric today-sales-card" @click="open('/profit/monthly-billing', billingPeriodQuery())">
             <div class="metric-label">
               <CircleDollarSign :size="16" />
@@ -1399,7 +1390,7 @@ onBeforeUnmount(() => {
             </article>
           </el-tooltip>
 
-          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
+          <el-tooltip v-if="isAdmin" placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
             <template #content>
               <div class="shop-breakdown purchase-breakdown">
                 <h4>当月采购成本占比</h4>
@@ -1434,7 +1425,7 @@ onBeforeUnmount(() => {
             </article>
           </el-tooltip>
 
-          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
+          <el-tooltip v-if="isAdmin" placement="bottom" effect="light" popper-class="shop-breakdown-tooltip purchase-breakdown-tooltip" :popper-options="adTooltipPopperOptions">
             <template #content>
               <div class="shop-breakdown purchase-breakdown">
                 <h4>当月运费占比</h4>
@@ -1469,7 +1460,7 @@ onBeforeUnmount(() => {
             </article>
           </el-tooltip>
 
-          <article class="primary-metric inventory-value-card" @click="open('/inventory/fbp')">
+          <article v-if="isAdmin" class="primary-metric inventory-value-card" @click="open('/inventory/fbp')">
             <div class="metric-label">
               <Boxes :size="16" />
               库存占用金额
@@ -1515,7 +1506,7 @@ onBeforeUnmount(() => {
                 <h4>各店铺本月退货表现</h4>
                 <div v-for="row in monthReturnShops" :key="`month-return-${row.shop_id}`">
                   <span>{{ row.shop_name }}</span>
-                  <strong>{{ (Number(row.return_rate || 0) * 100).toFixed(1) }}% · {{ metricNumber(row.return_quantity, " 件") }} · {{ metricMoney(row.return_loss_cny) }}</strong>
+                  <strong>{{ (Number(row.return_rate || 0) * 100).toFixed(1) }}% · {{ metricNumber(row.return_quantity, " 件") }}<template v-if="isAdmin"> · {{ metricMoney(row.return_loss_cny) }}</template></strong>
                 </div>
               </div>
             </template>
@@ -1527,17 +1518,19 @@ onBeforeUnmount(() => {
               <strong>{{ (monthReturnRate * 100).toFixed(1) }}%</strong>
               <div class="metric-footer">
                 <span class="delta is-flat">{{ metricNumber(monthReturnQuantity, " 件") }}</span>
-                <em>损失 {{ metricMoney(monthReturnLoss) }}</em>
+                <em v-if="isAdmin">损失 {{ metricMoney(monthReturnLoss) }}</em>
               </div>
             </article>
           </el-tooltip>
         </div>
-
+        </section>
+        </div>
         <div class="business-reminder">
           <Zap :size="15" />
           <span>今日提醒：{{ operationReminder }}</span>
         </div>
 
+        <DashboardPerformance :rows="profitTrend.daily || []" :date="selectedDate" :financial="isAdmin" />
         <div class="dashboard-overview-grid">
           <DashboardInventoryRanking
             :rows="topInventoryRows" :date="selectedDate" :date-text="selectedDateText"
@@ -1545,44 +1538,39 @@ onBeforeUnmount(() => {
             @retry="loadTopInventory()"
           />
 
-          <section class="overview-panel shop-limit-panel">
-            <div class="overview-panel-heading">
-              <div>
-                <span>Listing Capacity</span>
-                <h2>店铺上架额度</h2>
-              </div>
-              <small>今日额度优先</small>
-            </div>
-            <div v-if="availableLimitRows.length" class="limit-chart">
-              <article v-for="row in availableLimitRows" :key="row.shop_id" class="limit-chart-row">
-                <div class="limit-chart-label">
-                  <div class="limit-shop-identity">
-                    <PlatformBadge :platform="row.platform" />
-                    <strong :title="row.shop_name">{{ row.shop_name }}</strong>
-                  </div>
-                  <span v-if="row.platform === 'wb' && row.ok">商品卡总额度</span>
-                  <span v-else-if="row.ok">今日已用 {{ numberText(row.today_usage) }}</span>
-                  <span v-else :title="row.error">额度暂不可用</span>
-                </div>
-                <div class="limit-chart-value">
-                  <div v-if="row.platform !== 'wb'" class="limit-chart-track">
-                    <i v-if="row.ok" :style="{ width: limitBarWidth(row.today_available) }"></i>
-                  </div>
-                  <strong>{{ row.ok ? numberText(row.platform === 'wb' ? row.total_limit : row.today_available) : "--" }}</strong>
-                </div>
-                <div v-if="row.ok" class="limit-chart-meta">
-                  <span v-if="row.platform === 'wb'">每日上新：接口未提供</span>
-                  <span v-else>今日可用 / {{ numberText(row.today_limit) }}</span>
-                  <span>总可用 {{ row.total_available === null ? (row.refreshing ? '核对中' : '--') : numberText(row.total_available) }} / {{ numberText(row.total_limit) }}</span>
-                  <small v-if="row.error">{{ row.error }}</small>
-                </div>
-              </article>
-            </div>
-            <el-skeleton v-else-if="shopLimitsLoading" :rows="5" animated />
-            <el-empty v-else description="暂无店铺额度数据" :image-size="72" />
-          </section>
+          <DashboardShopCapacity :rows="availableLimitRows" :loading="shopLimitsLoading" />
         </div>
 
+        <div class="dashboard-auxiliary" aria-label="辅助工具">
+          <el-tooltip placement="bottom" effect="light" popper-class="shop-breakdown-tooltip">
+            <template #content>
+              <div class="shop-breakdown ai-usage-breakdown">
+                <h4>今日人员 AI 生图消耗</h4>
+                <div v-for="row in aiUsage.people || []" :key="`ai-person-${row.person_id || row.person_name}`">
+                  <span>{{ row.person_name }} · {{ row.request_count }} 次调用 / {{ row.generated_count }} 张成功 / {{ row.task_count }} 个任务</span>
+                  <strong>{{ aiMoney(row.allocated_cost) }}</strong>
+                </div>
+                <div v-if="!(aiUsage.people || []).length"><span>今日暂无成功生图记录</span><strong>—</strong></div>
+                <small>{{ aiUsage.cost_source || "ERP 本地调用次数 × 0.038 RMB" }}；成功和失败均计费</small>
+                <small>数量口径：{{ aiUsage.count_basis || '调用流水' }}；日期按北京时间 00:00–24:00</small>
+                <small v-if="!aiUsage.available && (aiUsage.errors || []).length" class="ai-usage-error">费用查询失败：{{ aiUsage.errors[0] }}</small>
+              </div>
+            </template>
+            <article class="primary-metric ai-usage-card" @click="open('/settings/ai')">
+              <div class="metric-label"><Sparkles :size="16" />AI 消耗</div>
+              <strong>{{ aiMoney(aiUsage.cost) }}</strong>
+              <div class="metric-subline">
+                <span>当前余额</span>
+                <div class="metric-subline-value"><b>{{ aiMoney(aiUsage.available ? aiUsage.balance : null) }}</b></div>
+              </div>
+              <div class="metric-footer">
+                <span class="delta is-flat">{{ metricNumber(aiUsage.request_count, " 次调用") }}</span>
+                <em>{{ metricNumber((aiUsage.people || []).length, " 人") }}</em>
+              </div>
+            </article>
+          </el-tooltip>
+          <DailyExchangeRateCard />
+        </div>
         <div class="hero-insight-grid is-summary-only">
           <section class="health-panel hero-health-panel hero-health-panel--compact">
             <div class="section-heading">
@@ -3708,4 +3696,46 @@ button {
     grid-template-columns: 1fr;
   }
 }
+/* Group business periods; secondary tools and lists cannot displace the trend. */
+.commerce-dashboard{height:auto;min-height:100%;padding:20px;background:var(--dashboard-bg)!important}
+.commerce-dashboard::before{display:none}
+.commerce-dashboard .operating-card{padding:0;border:0!important;background:transparent!important;box-shadow:none!important;gap:14px}
+.commerce-dashboard .operating-card__top{margin:0;align-items:center}
+.commerce-dashboard .operating-card__top>div:first-child{flex:1 1 180px}
+.dashboard-metric-zones{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:14px;align-items:stretch}
+.metric-group{min-width:0;background:var(--dashboard-surface);border:1px solid var(--dashboard-border);border-radius:10px;padding:16px}
+.metric-group-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+.metric-group-heading h2{margin:0;font-size:16px;font-weight:600}
+.metric-group-heading>span{font-size:11px;color:var(--dashboard-muted)}
+.commerce-dashboard .today-core-grid,.commerce-dashboard .month-core-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin:0;grid-auto-rows:auto}
+.commerce-dashboard .metric-group .primary-metric{padding:12px 10px;min-height:92px;height:auto;border:0!important;border-radius:6px;background:transparent!important;box-shadow:none!important;transform:none!important}
+.commerce-dashboard .metric-group .primary-metric:hover{background:var(--dashboard-surface-soft)!important}
+.commerce-dashboard .metric-group .primary-metric .metric-label{font-size:12px;font-weight:400;gap:6px;color:var(--dashboard-muted)}
+.commerce-dashboard .metric-group .primary-metric .metric-label svg{display:none}
+.commerce-dashboard .metric-group .primary-metric>strong{margin:7px 0 4px;font-size:clamp(20px,1.6vw,28px);font-weight:600;color:var(--dashboard-text)!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.commerce-dashboard .metric-group .profit-card>strong,.commerce-dashboard .metric-group .month-profit-card>strong{color:var(--metric-profit)!important}
+.commerce-dashboard .month-group .primary-metric{min-height:67px;padding:8px 10px}
+.commerce-dashboard .month-group .primary-metric>strong{font-size:clamp(17px,1.15vw,22px);margin:5px 0 3px}
+.commerce-dashboard .metric-group .metric-footer{margin-top:4px;gap:5px;font-size:11px;flex-wrap:wrap}
+.commerce-dashboard .metric-group .metric-footer em{display:none}
+.commerce-dashboard .metric-group .metric-subline{margin-top:2px;font-size:11px}
+.commerce-dashboard .metric-group .metric-subline small{display:none}
+.commerce-dashboard .metric-group .roi-card .metric-footer{margin-top:2px}
+.commerce-dashboard .today-core-grid.is-staff .primary-metric:last-child,.commerce-dashboard .month-core-grid.is-staff .primary-metric:last-child{grid-column:span 2}
+.commerce-dashboard .business-reminder{margin:0;padding:8px 12px;font-size:12px;border-radius:7px}
+.commerce-dashboard .overview-panel{padding:16px;border-radius:10px;box-shadow:none}
+.commerce-dashboard .dashboard-overview-grid{grid-template-columns:minmax(0,1.25fr) minmax(340px,1fr);gap:14px;margin:0;align-items:start}
+.dashboard-auxiliary{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;padding:4px 0}
+.commerce-dashboard .dashboard-auxiliary .primary-metric{display:flex;flex-direction:row;align-items:center;gap:8px;padding:5px 10px;min-height:32px;height:auto;width:auto;border:0!important;border-radius:6px;box-shadow:none!important;background:transparent!important;transform:none}
+.commerce-dashboard .dashboard-auxiliary :deep(.primary-metric .metric-label){font-size:12px;white-space:nowrap}
+.commerce-dashboard .dashboard-auxiliary :deep(.primary-metric strong){font-size:13px!important;margin:0;line-height:1.5;white-space:nowrap}
+.commerce-dashboard .dashboard-auxiliary :deep(.metric-footer),.commerce-dashboard .dashboard-auxiliary :deep(.metric-subline){display:none}
+.commerce-dashboard .hero-insight-grid{margin:0}
+.commerce-dashboard .hero-health-panel{padding:16px;border-radius:10px;box-shadow:none}
+.commerce-dashboard .hero-health-panel .section-heading{margin-bottom:12px}
+.commerce-dashboard .hero-health-panel .health-grid{gap:10px;grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
+@media(max-width:1200px){.dashboard-metric-zones{grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)}.commerce-dashboard .metric-group .primary-metric>strong{font-size:21px}.commerce-dashboard .month-group .primary-metric>strong{font-size:17px}.commerce-dashboard .dashboard-overview-grid{grid-template-columns:minmax(0,1fr) minmax(300px,1fr)}}
+@media(max-width:960px){.dashboard-metric-zones{grid-template-columns:minmax(0,1fr)}.commerce-dashboard .month-core-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.commerce-dashboard .dashboard-overview-grid{grid-template-columns:minmax(0,1fr)}.metric-group-heading>span{font-size:11px}}
+@media(max-width:640px){.commerce-dashboard{padding:12px}.commerce-dashboard .operating-card{padding:0;gap:12px}.commerce-dashboard .operating-card__top{gap:8px}.commerce-dashboard .operating-card__top>div:first-child{flex-basis:calc(100% - 90px)}.commerce-dashboard .dashboard-date-control{order:3;flex-basis:100%}.dashboard-metric-zones{gap:12px}.metric-group{padding:12px}.metric-group-heading{margin-bottom:4px}.metric-group-heading h2{font-size:15px}.commerce-dashboard .today-core-grid,.commerce-dashboard .month-core-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 8px}.commerce-dashboard .metric-group .primary-metric{padding:10px 6px;min-height:80px}.commerce-dashboard .month-group .primary-metric{min-height:65px}.commerce-dashboard .metric-group .primary-metric>strong{font-size:21px}.commerce-dashboard .month-group .primary-metric>strong{font-size:19px}.commerce-dashboard .overview-panel{padding:12px}.commerce-dashboard .dashboard-overview-grid{gap:12px}.dashboard-auxiliary{justify-content:flex-start;gap:4px}.commerce-dashboard .hero-health-panel .health-grid{grid-template-columns:minmax(0,1fr)}.commerce-dashboard .metric-group .primary-metric .metric-label{font-size:12px}.commerce-dashboard .dashboard-date-picker{width:100%!important;min-width:0}.commerce-dashboard .today-core-grid.is-staff .primary-metric:last-child,.commerce-dashboard .month-core-grid.is-staff .primary-metric:last-child{grid-column:span 2}}
+
 </style>

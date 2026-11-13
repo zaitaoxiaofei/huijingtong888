@@ -101,7 +101,7 @@ test("menus and direct route access follow the same combined permissions", () =>
   assert.equal(canAccessPage(businessUser(["technical", "admin"]), "/finance/payroll"), false);
   assert.equal(canAccessPage({ ...businessUser(["technical", "admin"]), platform_role: "super_admin" }, "/finance/payroll"), true);
   const source = readFileSync(new URL("../frontend/admin/constants/navigation.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export ", "");
-  const icons = Object.fromEntries("ChatDotRound Coin DataAnalysis Document Finished Goods House MagicStick Setting ShoppingCart Tools WarningFilled".split(" ").map(name => [name, null]));
+  const icons = Object.fromEntries("House ListChecks ChartNoAxesCombined ChartColumn Store Sparkles Package Warehouse ShoppingCart TriangleAlert Wrench Settings MessageCircle".split(" ").map(name => [name, null]));
   const context = vm.createContext({ ...icons, ...permissions, ...aiSkillsAccess }); vm.runInContext(source, context);
   const menus = context.navigationMenusForRole(businessUser(["technical"]));
   const paths = menus.flatMap(menu => menu.children ? menu.children.map(child => child.route) : [menu.route]);

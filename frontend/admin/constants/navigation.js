@@ -1,15 +1,15 @@
 import { planFeatureMessage } from "../../../src/shared/subscription-plan-features.js";
 import { aiSkillsAvailable } from "../../../src/shared/ai-skills-access.js";
 import { canAccessPage, pagePermission, hasPermission, isPlatformAdmin, needsMembershipActivation } from "../../../src/shared/permissions.js";
-import { ChatDotRound, Coin, DataAnalysis, Document, Finished, Goods, House, MagicStick, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
+import { House, ListChecks, ChartNoAxesCombined, ChartColumn, Store, Sparkles, Package, Warehouse, ShoppingCart, TriangleAlert, Wrench, Settings, MessageCircle } from "lucide-vue-next";
 
 export const navigationMenus = [
   { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
-  { key: "team-plan", label: "任务系统", route: "/team-plan", icon: Finished },
+  { key: "team-plan", label: "任务系统", route: "/team-plan", icon: ListChecks },
   {
     key: "finance",
     label: "财务中心",
-    icon: Coin,
+    icon: ChartNoAxesCombined,
     children: [
       { key: "finance-center", label: "经营总览", route: "/finance-center" },
       { key: "profit-monthly-billing", label: "月度账单", route: "/profit/monthly-billing" },
@@ -20,7 +20,7 @@ export const navigationMenus = [
   {
     key: "analytics",
     label: "数据分析",
-    icon: DataAnalysis,
+    icon: ChartColumn,
     children: [
       { key: "sku-traffic-monitor", label: "SKU流量监控", route: "/sku-traffic-monitor" },
       { key: "seller-analytics", label: "数据分析", route: "/seller-analytics" },
@@ -31,7 +31,7 @@ export const navigationMenus = [
   {
     key: "products",
     label: "运营",
-    icon: Goods,
+    icon: Store,
     children: [
       { key: "collector-box", label: "采集箱", route: "/collector-box" },
       { key: "selection", label: "选品池", route: "/selection" },
@@ -49,7 +49,7 @@ export const navigationMenus = [
   {
     key: "ai-skills",
     label: "AI技能库",
-    icon: MagicStick,
+    icon: Sparkles,
     children: [
       { key: "product-workflows", label: "AI模板工作流", route: "/product-workflows" },
       { key: "ai-variant-lab", label: "AI裂变", route: "/ai-variant-lab" },
@@ -62,18 +62,18 @@ export const navigationMenus = [
   {
     key: "orders",
     label: "订单",
-    icon: Document,
+    icon: Package,
     children: [
       { key: "orders", label: "订单处理", route: "/orders" },
       { key: "order-tracking", label: "单量追踪", route: "/order-tracking" },
       { key: "outbound", label: "出库记录", route: "/outbound" },
-      { key: "customer-messages", label: "客户消息", route: "/customer-messages", icon: ChatDotRound }
+      { key: "customer-messages", label: "客户消息", route: "/customer-messages", icon: MessageCircle }
     ]
   },
   {
     key: "inventory",
     label: "库存",
-    icon: Goods,
+    icon: Warehouse,
     children: [
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
       { key: "purchase-list", label: "收货入库", route: "/purchase-list" },
@@ -95,7 +95,7 @@ export const navigationMenus = [
   {
     key: "exceptions",
     label: "异常",
-    icon: WarningFilled,
+    icon: TriangleAlert,
     children: [
       { key: "exceptions-stock", label: "库存不足", route: "/exceptions/stock" },
       { key: "exceptions-binding", label: "未绑定库存", route: "/exceptions/binding" },
@@ -107,7 +107,7 @@ export const navigationMenus = [
   {
     key: "tools",
     label: "工具",
-    icon: Tools,
+    icon: Wrench,
     children: [
       { key: "tools-profit-calculator", label: "利润计算器", route: "/tools/profit-calculator" },
       { key: "tools-pricing", label: "定价工具", route: "/tools/pricing" },
@@ -120,10 +120,10 @@ export const navigationMenus = [
   {
     key: "tenant-shops",
     label: "企业店铺",
-    icon: Setting,
+    icon: Settings,
     children: [
       { key: "tenant-shops", label: "店铺管理", route: "/tenant-shops" },
-      { key: "ai-credits", label: "AI积分", route: "/ai-credits", icon: Coin },
+      { key: "ai-credits", label: "AI积分", route: "/ai-credits", icon: ChartNoAxesCombined },
       { key: "tenant-people", label: "企业人员", route: "/tenant-people" },
       { key: "logistics-settings", label: "物流设置", route: "/logistics-settings" }
     ]
@@ -131,7 +131,7 @@ export const navigationMenus = [
   {
     key: "settings",
     label: "平台管理",
-    icon: Setting,
+    icon: Settings,
     adminOnly: true,
     children: [
       { key: "platform-accounts", label: "平台人员", route: "/platform-accounts" },

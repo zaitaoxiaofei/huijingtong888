@@ -29337,11 +29337,18 @@ async function dashboardProfitTrendSummaryMysql(today, tenantId = "admin") {
     previousMonthFrom, previousMonthTo,
     rangeFrom, selectedDate
   ]);
+  const daily = await mysqlQuery(`
+    SELECT DATE_FORMAT(date_key, '%Y-%m-%d') AS date_key, SUM(revenue) AS revenue, SUM(current_profit) AS profit
+    FROM analytics_shop_daily
+    WHERE date_key >= ? AND date_key <= ? AND ${dashboardShopPredicateMysql("analytics_shop_daily", scope)}
+    GROUP BY date_key ORDER BY date_key
+  `, [dateKeyMysql(addDaysMysql(current, -29)), selectedDate]);
   const sevenDayCount = inclusiveDateSpanDaysMysql(sevenDayFrom, selectedDate);
   const monthDayCount = inclusiveDateSpanDaysMysql(monthFrom, selectedDate);
   const previousMonthDayCount = inclusiveDateSpanDaysMysql(previousMonthFrom, previousMonthTo);
   const quarterDayCount = inclusiveDateSpanDaysMysql(quarterFrom, selectedDate);
   return {
+    daily: daily.map(item => ({ date_key: item.date_key, revenue: item.revenue == null ? null : roundMoneyMysql(item.revenue), profit: item.profit == null ? null : roundMoneyMysql(item.profit) })),
     seven_day_average_profit: roundMoneyMysql(Number(row?.seven_day_profit || 0) / Math.max(sevenDayCount, 1)),
     month_average_profit: roundMoneyMysql(Number(row?.month_profit || 0) / Math.max(monthDayCount, 1)),
     previous_month_average_profit: roundMoneyMysql(Number(row?.previous_month_profit || 0) / Math.max(previousMonthDayCount, 1)),

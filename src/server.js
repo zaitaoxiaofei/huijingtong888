@@ -1,3 +1,4 @@
+import { createDashboardHandler } from './server/routes/dashboard.js';
 import { dispatchPrepare, dispatchLabels } from "./services/wb-order-dispatch.js";
 import { createWbRoutes } from "./server/routes/wb.js";
 import { publicSelfServiceEnabled, publicWebsitePath, isPublicEntry, renderPublicWebsite, loadPublicPlans } from "./server/public-website.js";
@@ -292,29 +293,6 @@ const routeModules = {
 // server.js 只负责分发、鉴权和极少量路径参数解析。
 // Keep straightforward routes in a single lookup table so server.js stays
 // focused on request dispatch, authentication, and transport concerns.
-function dashboardForSession(payload = {}, session = {}) {
-  if (!isPlatformAdmin(session)) {
-    const safeAiUsage = source => {
-      if (!source) return source;
-      const keys = new Set(['cost', 'request_count', 'generated_count', 'cost_pending', 'unit_cost', 'cost_source', 'count_basis', 'task_count', 'allocation_method', 'people', 'unit']);
-      return { ...Object.fromEntries(Object.entries(source).filter(([key]) => keys.has(key))), available: false, balance: null };
-    };
-    payload = { ...payload, summary: { ...(payload.summary || {}), ai_usage: safeAiUsage(payload.summary?.ai_usage) } };
-  }
-  if (hasPermission(session, "finance")) return payload;
-  const withoutProfitFields = (source = {}) => Object.fromEntries(
-    Object.entries(source || {}).filter(([key]) => !String(key).toLowerCase().includes("profit"))
-  );
-  return {
-    ...payload,
-    commerce: {
-      ...(payload?.commerce || {}),
-      today: withoutProfitFields(payload?.commerce?.today),
-      yesterday: withoutProfitFields(payload?.commerce?.yesterday),
-      profit_trend: withoutProfitFields(payload?.commerce?.profit_trend)
-    }
-  };
-}
 
 const routes = {
   ...routeModules,
@@ -427,8 +405,7 @@ const routes = {
   },
   "GET /api/dashboard": async (req) => {
     if (['mobile','mobile-finance'].includes(req.query?.view)) return createMobileDashboardHandler({dashboard:services.dashboard,finance:services.mobileDashboardFinance})(req);
-    const payload = await services.dashboard(req.query || {}, tenantIdFromRequest(req));
-    return dashboardForSession(payload, req._session);
+    return createDashboardHandler({ dashboard: services.dashboard })(req);
   },
   "GET /api/scheduled-jobs": (req) => listScheduledJobs(req.query || {}),
   "GET /api/scheduled-job-runs": (req) => scheduledJobRuns(req.query || {}),
