@@ -1,4 +1,5 @@
 <script setup>
+import WbProductImages from "../../components/WbProductImages.vue";
 import WbCardLimits from "../../components/listing/WbCardLimits.vue";
 import { WB_REMOTE_WRITES_ENABLED } from "../../../../src/shared/wb-capabilities.js";
 import { computed, onMounted, onBeforeUnmount, reactive, ref } from 'vue';
@@ -66,7 +67,7 @@ onBeforeUnmount(()=>window.removeEventListener('erp:auth-scope-changed',resetSco
     <el-alert v-if="priceNotice" :title="priceNotice" type="warning" :closable="false"/><el-alert v-if="notice" :title="notice" type="info" :closable="false"/>
     <div class="wb-filters"><el-select v-model="shopId" :disabled="busy" placeholder="选择 WB 店铺" @change="changeShop"><el-option v-for="shop in shops" :key="shop.id" :value="Number(shop.id)" :label="shop.name+(shop.environment==='sandbox'?'（沙箱）':'')"/></el-select><el-input v-model="search" placeholder="搜索商品名称、商家货号、WB 商品编号" clearable @input="page=1"/><el-button :disabled="!shopId||busy" @click="showErrors">查看发布错误</el-button></div>
     <el-table v-loading="loading" :data="paged" stripe border class="erp-data-table" row-key="id" empty-text="暂无已同步的 WB 商品">
-      <el-table-column label="商品信息" min-width="300"><template #default="{row}"><div class="wb-product-cell"><el-image v-if="row.card.photos?.[0]?.big" :src="row.card.photos[0].big" :preview-src-list="row.card.photos.map(item=>item.big).filter(Boolean)" preview-teleported fit="cover" class="wb-thumb"/><div v-else class="wb-thumb wb-empty">无图</div><div><strong>{{row.title||row.vendor_code}}</strong><p>商家货号：{{row.vendor_code}}</p><small>WB 商品编号：{{row.nm_id}}</small></div></div></template></el-table-column>
+      <el-table-column label="商品信息" min-width="300"><template #default="{row}"><div class="wb-product-cell"><WbProductImages :card="row.card"/><div><strong>{{row.title||row.vendor_code}}</strong><p>商家货号：{{row.vendor_code}}</p><small>WB 商品编号：{{row.nm_id}}</small></div></div></template></el-table-column>
       <el-table-column label="规格 / 库存绑定" min-width="230"><template #default="{row}"><p v-for="size in row.card.sizes||[]" :key="size.chrtID">{{size.techSize||'通用'}} · {{row.mappings.find(item=>item.ozon_sku===`WB-${size.chrtID}`)?.product_name||'未绑定基础商品'}}</p></template></el-table-column>
       <el-table-column label="品牌 / 类目" min-width="180"><template #default="{row}"><div>{{row.card.brand||'未填写品牌'}}</div><small>{{row.card.subjectName||row.card.subjectID||'未返回类目'}}</small></template></el-table-column>
       <el-table-column label="售价 / 划线价" width="180"><template #default="{row}"><div v-if="priceFor(row)">{{priceFor(row).sizes?.[0]?.discountedPrice??'未返回售价'}} {{priceFor(row).currencyIsoCode4217||'币种未返回'}}</div><div v-else>未读取价格</div><small v-if="priceFor(row)">原价 {{priceFor(row).sizes?.[0]?.price??'—'}} · 折扣 {{priceFor(row).discount??'—'}}%</small></template></el-table-column>

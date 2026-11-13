@@ -18,6 +18,11 @@ test('WB dynamic category templates cache schemas, switch categories and isolate
   const payload={template_id:schema.template_id,subject_id:100,currency:'CNY',card:{characteristics:[{id:1000,value:['not-a-WB-color']}]},images:[]};
   const invalid=await service.previewListingPayload(2,{shop_id:a.id,payload});assert.ok(invalid.errors.some(e=>e.includes('官方选项')));payload.card.characteristics[0].value=['красный'];const valid=await service.previewListingPayload(2,{shop_id:a.id,payload});assert.ok(!valid.errors.some(e=>e.includes('官方选项')));
  });
+ await t.test('text suggestions stay within the chosen shop, tenant and subject',async()=>{
+  await service.categorySchema(2,{subject_id:300,shop_id:a.id});
+  for(const [tenant,shop,nm,subject,value] of [[2,a.id,1,300,'real value'],[2,a.id,2,100,'wrong category'],[3,b.id,3,300,'foreign value']])await query('INSERT INTO wb_product_cards(tenant_id,shop_id,nm_id,vendor_code,title,raw_json,synced_at) VALUES(?,?,?,?,?,?,UTC_TIMESTAMP())',[tenant,shop,nm,'P'+nm,'Product',JSON.stringify({subjectID:subject,characteristics:[{id:3000,value:[value]}]})]);
+  const result=await service.categoryOptions(2,{shop_id:a.id,subject_id:300,attribute_id:3000});assert.deepEqual(result.data,['real value']);assert.equal(result.source,'shop_history');assert.equal(result.allow_custom,true);
+ });
  await t.test('catalog and workbench preview never call remote publishing APIs',async()=>{const category=await service.categorySchema(2,{subject_id:200});const r=await service.previewListingPayload(2,{payload:{template_id:category.template_id,subject_id:200,currency:'CNY',card:{},images:[]}});assert.equal(r.review_only,true);assert.ok(r.errors.some(e=>e.includes('店铺')));assert.ok(remote.every(r=>r.method==='GET'));});
  }finally{await f.cleanup();}
 });
