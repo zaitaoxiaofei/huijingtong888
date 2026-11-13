@@ -51,7 +51,7 @@ async function generateVideo(){
  }finally{emit('upload-state',0);}});
 }
 onMounted(()=>applyTemplate(false));
-defineExpose({getPayload:payload});
+defineExpose({getPayload:payload,generateVideo});
 </script>
 <template>
  <div class="wb-workbench-fields">
