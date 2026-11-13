@@ -9,9 +9,9 @@ export function createWorkflowAiTaskAccess({query=mysqlQuery,execute=mysqlExecut
   async function find(workflowId,taskId,session){
     const {tenant}=await scope(session);
     const rows=await query(`SELECT t.* FROM ai_generation_tasks t
-      JOIN product_workflow_documents d ON d.tenant_id=t.tenant_id AND d.id=t.workflow_id AND d.kind='run'
       WHERE t.tenant_id=? AND t.source_module='product_workflow' AND t.workflow_id=? AND t.task_no=?
-      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.payload_json,'$.archived')),'false')='false' LIMIT 1`,[tenant,workflowId,taskId]);
+      AND EXISTS (SELECT 1 FROM product_workflow_documents d WHERE d.tenant_id=? AND d.id=? AND d.kind='run'
+        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.payload_json,'$.archived')),'false')='false') LIMIT 1`,[tenant,workflowId,taskId,tenant,workflowId]);
     return map(rows[0]);
   }
   async function submit(workflowId,body,session){
@@ -26,10 +26,11 @@ export function createWorkflowAiTaskAccess({query=mysqlQuery,execute=mysqlExecut
   async function retry(workflowId,taskId,session){
     const {tenant}=await scope(session),task=await find(workflowId,taskId,session);
     if(!task)throw Object.assign(new Error('当前企业中未找到这个工作流的原任务'),{status:404});
-    await execute(`UPDATE ai_generation_tasks t JOIN product_workflow_documents d ON d.tenant_id=t.tenant_id AND d.id=t.workflow_id AND d.kind='run'
+    await execute(`UPDATE ai_generation_tasks t
       SET t.status='queued',t.error_json=NULL,t.output_json=CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(t.output_json,'$.stage'))='generated_image_v1' THEN t.output_json ELSE NULL END,t.started_at=NULL,t.finished_at=NULL
       WHERE t.tenant_id=? AND t.source_module='product_workflow' AND t.workflow_id=? AND t.task_no=? AND t.status IN ('failed','cancelled','provider_pending')
-      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.payload_json,'$.archived')),'false')='false'`,[tenant,workflowId,taskId]);
+      AND EXISTS (SELECT 1 FROM product_workflow_documents d WHERE d.tenant_id=? AND d.id=? AND d.kind='run'
+        AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.payload_json,'$.archived')),'false')='false')`,[tenant,workflowId,taskId,tenant,workflowId]);
     startWorker();return {ok:true,task:await find(workflowId,taskId,session)};
   }
   return {find,submit,retry};
