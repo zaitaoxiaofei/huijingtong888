@@ -62,7 +62,7 @@ const dateRange = computed({
 </template>
 <style scoped>
 .inventory-toolbar-secondary{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex:1 0 100%;min-width:0;flex-wrap:wrap}.inventory-search-fields :deep(.search-receipt-state){width:170px;flex:none}
-.is-compact-search.has-secondary .inventory-search-form{flex-wrap:wrap}.is-compact-search.has-secondary .inventory-search-fields{flex:1 1 auto;flex-wrap:wrap}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-receipt-state){width:170px}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-scope){width:110px}
+.is-compact-search.has-secondary .inventory-search-form{flex-wrap:wrap}.is-compact-search.has-secondary .inventory-search-fields{flex:1 1 auto;flex-wrap:wrap}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-dates){width:260px;flex:0 0 260px}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-receipt-state){width:170px}.is-compact-search.has-secondary .inventory-search-fields :deep(.search-scope){width:110px}
 .is-compact-search .inventory-search-fields{flex:0 1 auto;flex-wrap:nowrap}.is-compact-search .inventory-search-fields :deep(.search-keyword){width:190px;flex:none}.is-compact-search .inventory-search-form{align-items:flex-end;flex-wrap:nowrap}.inventory-toolbar-right{display:flex;align-items:center;gap:8px;margin-left:auto;white-space:nowrap}.inventory-precise-fields :deep(.inventory-structured-search){display:flex;flex-wrap:wrap;gap:10px}.inventory-precise-fields :deep(.search-group){display:contents}.inventory-precise-fields :deep(.el-form-item){width:190px}.inventory-precise-fields :deep(.el-select){width:100%}@media(max-width:1250px){.is-compact-search .inventory-search-form{flex-wrap:wrap}.inventory-toolbar-right{flex-wrap:wrap;white-space:normal}}
 .inventory-search-toolbar { position: static; min-width: 0; padding: 12px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-search-form { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
@@ -84,5 +84,11 @@ const dateRange = computed({
   .inventory-search-fields :deep(.el-form-item) { width: 100%; }
   .inventory-search-fields :deep(.search-keyword), .inventory-search-fields :deep(.search-dates) { grid-column: 1 / -1; width: 100%; max-width: none; }
   .inventory-search-actions { width: 100%; }
+}
+@media (min-width: 1200px) {
+  .is-compact-search.has-secondary .inventory-search-fields{flex-wrap:nowrap}
+  .is-compact-search.has-secondary .inventory-search-fields :deep(.search-keyword){width:160px;flex:1 1 140px}
+  .is-compact-search.has-secondary .inventory-search-fields :deep(.search-receipt-state){width:150px}
+  .is-compact-search.has-secondary .inventory-search-fields :deep(.search-dates){width:240px;flex-basis:240px}
 }
 </style>
