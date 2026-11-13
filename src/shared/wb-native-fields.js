@@ -1,0 +1,4 @@
+// Category characteristics and the card's own sizes are the sources of size UI.
+export function wbHasSizeFields(attributes=[],rows=[]){return attributes.some(a=>a.existNamedField&&(Number(a.charcID)===54337||/^(размер|尺码|尺寸码|size)$/i.test(String(a.name||'').trim())))||rows.some(row=>(row.card?.sizes||[]).some(size=>String(size.techSize||'').trim()&&!['0','ONE SIZE'].includes(String(size.techSize).trim())||String(size.wbSize||'').trim()));}
+export function wbNativeSize(size={}){const {techSize,wbSize,...rest}=size;return {...rest,...(String(techSize||'').trim()&&String(techSize).trim()!=='0'?{techSize:String(techSize).trim()}:{}),...(String(wbSize||'').trim()?{wbSize:String(wbSize).trim()}:{})};}
+export function wbNativePrice(base,multiplier=1){const b=Number(base),m=Number(multiplier),price=Math.round(b*m);if(!Number.isFinite(b)||b<=0||!Number.isFinite(m)||m<=0||!Number.isSafeInteger(price)||price<=0)throw Error('请填写大于零的已有价格和倍率。');return price;}
