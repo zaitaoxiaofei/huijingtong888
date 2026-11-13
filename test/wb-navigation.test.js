@@ -15,7 +15,8 @@ test('WB routes resolve under the existing desktop layout, while Ozon routes ret
   }
   assert.ok(!context.router.getRoutes().some(route=>route.path.includes('marketplace-demo')||route.path.startsWith('/mobile/wb/')));
 });
-test('first acceptance stage prevents external WB business writes and inventory binding',()=>{
+test('remote WB writes remain gated while local inventory binding has its own permission',()=>{
   assert.equal(WB_REMOTE_WRITES_ENABLED,false);
-  for(const action of ['publish','setPrice','setStocks','prepare','stickers','supplyAction','enrollPromotion','bindProduct'])assert.ok(WB_REMOTE_WRITE_ACTIONS.has(action));
+  assert.equal(WB_REMOTE_WRITE_ACTIONS.has('bindProduct'),false);
+  for(const action of ['publish','setPrice','setStocks','prepare','stickers','supplyAction','enrollPromotion'])assert.ok(WB_REMOTE_WRITE_ACTIONS.has(action));
 });
