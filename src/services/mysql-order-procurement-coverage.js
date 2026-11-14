@@ -1,3 +1,6 @@
+import { loadInventoryComposition } from './inventory-composition.js';
+import { expandCurrentProcurementDemands, procurementDemandAncestorIds } from './procurement-demand-composition.js';
+import { activeDemandCancellations, cancelledOrderPurchase } from '../shared/procurement-demand-cancellation.js';
 import { procurementQueueOrderIds } from './order-procurement-queues.js';
 import { invalidateInventoryWorkflow } from './inventory-workflow-cache.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
@@ -51,6 +54,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const scopedIdSet = new Set(scopedIds);
   fresh = true; // A tenant snapshot must never reuse or populate the all-product cache.
   const scopedIdSql = scopedIds.join(',');
+  const composition = await loadInventoryComposition(query, ownerScope);
+  const demandIdSql = procurementDemandAncestorIds(scopedIds, composition.edges).join(',');
   if (tenantPk !== null && !scopedIds.length) throw new Error('企业库存覆盖查询需要指定库存商品 ID');
   const scope = (column = 'product_id') => scopedIds.length ? ` AND ${column} IN (${scopedIdSql})` : '';
   const tenantScope = (column = 'tenant_id') => tenantPk === null ? ''
@@ -138,7 +143,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         JOIN products cp ON cp.id = COALESCE(ri.product_id, pc.component_product_id, p.id)${tenantScope('cp.tenant_id')}
         LEFT JOIN ozon_orders_raw raw FORCE INDEX (idx_order_procurement_location)
           ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-        ${requestedIds.length ? `WHERE (COALESCE(ri.product_id, pc.component_product_id, p.id, 0) IN (${scopedIdSql})
+        ${requestedIds.length ? `WHERE (COALESCE(ri.product_id, pc.component_product_id, p.id, 0) IN (${demandIdSql})
           OR oi.id IN (SELECT related_order_item_id FROM inventory_movements WHERE product_id IN (${scopedIdSql})${tenantScope()}
             AND status = 'posted' AND source_type = 'order_outbound'))` : ''}
 `, fresh),
@@ -225,7 +230,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       }
     }
     for (const row of demands) if (Number(row.entered_transport)) row.needs_fulfillment = 0;
-    const liveItems = new Set(demands.filter(d => Number(d.needs_fulfillment) && d.stock_location === 'LOCAL').map(d => Number(d.order_item_id)));
+    const currentDemands = expandCurrentProcurementDemands(demands, composition);
+    const liveItems = new Set(currentDemands.filter(d => Number(d.needs_fulfillment) && d.stock_location === 'LOCAL').map(d => Number(d.order_item_id)));
     const byProduct = new Map(stocks.map(row => [Number(row.product_id), { ...row, open_deducted: 0 }]));
     for (const row of fbpReservations) {
       const id = Number(row.product_id);
@@ -256,7 +262,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         AND im.product_id NOT IN (${scopedIdSql})${tenantScope('im.tenant_id')}
     `) : [];
     const frozenItems = new Set([...deductions,...outsideEvidence].filter(d => historicItems.has(Number(d.order_item_id))).map(d => Number(d.order_item_id)));
-    const resolvedDemands = demands.filter(d => !frozenItems.has(Number(d.order_item_id)));
+    const resolvedDemands = currentDemands.filter(d => !frozenItems.has(Number(d.order_item_id)));
     for (const movement of deductions) {
       const original = historicItems.get(Number(movement.order_item_id));
       if (original && Number(movement.quantity) > 0) resolvedDemands.push({ ...original, ...movement });
@@ -264,7 +270,22 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     const priorityByItem = new Map(priorities.map(row => [`${row.product_id}:${row.order_item_id}`, Number(row.priority)]));
     const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
     const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace, queuesOnly });
-    if (!queuesOnly) value.inventory_stocks = [...byProduct.values()];
+    if (!queuesOnly) {
+      const events = await query(`SELECT id,product_id,detail_json,created_at FROM inventory_flow_events
+        WHERE tenant_id=? AND action='procurement_demand_cancellation' AND product_id IN (${scopedIdSql}) ORDER BY id`, [tenantPk]);
+      const cancellations = activeDemandCancellations(events);
+      for (const order of value.values()) {
+        order.cancelled_purchase_quantity = 0;
+        order.actionable_shortage_quantity = 0;
+        for (const item of order.items || []) {
+          const decision = cancelledOrderPurchase({...item, needs_fulfillment: order.needs_fulfillment}, item.product_id, cancellations);
+          Object.assign(item, decision);
+          order.cancelled_purchase_quantity += decision.cancelled_purchase_quantity;
+          order.actionable_shortage_quantity += decision.actionable_shortage_quantity;
+        }
+      }
+      value.inventory_stocks = [...byProduct.values()];
+    }
     if (!fresh && generation === version) cached = { value, expires: Date.now() + COVERAGE_CACHE_TTL_MS };
     return value;
   })();

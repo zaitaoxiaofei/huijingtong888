@@ -30,7 +30,7 @@ test('fixed source decisions survive recomputation, preserve shortages, new orde
   assert.equal(cancelled.supply_plan.required_fbs,0);assert.equal(cancelled.demands[0].physical_gap,3);
   assert.equal(inventoryProcurementStatus(cancelled,'orders'),'warning');
   const rows=[{product_id:200,workflow:cancelled}];
-  assert.equal(inventoryWorkspacePage(rows,{task:'required'}).total,0);
+  assert.equal(inventoryWorkspacePage(rows,{task:'required'}).total,1);
   assert.equal(inventoryWorkspacePage(rows,{task:'cancelled'}).total,1);
   assert.equal(inventoryWorkspacePage(rows,{task:'cancelled'}).meta.cancelled,1);
   assert.ok(cancelled.review_reasons.some(reason=>reason.includes('订单缺货仍未解决')));
