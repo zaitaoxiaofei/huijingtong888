@@ -32548,18 +32548,25 @@ function customerMessageRuDeliveryWindow(row = {}) {
   return end || begin || "";
 }
 
+// Product titles may contain commas. Only structured order-item data defines boundaries.
+function customerMessageProductNames(row = {}) {
+  let names = row.product_names_json;
+  if (typeof names === "string") {
+    try { names = JSON.parse(names); } catch { names = null; }
+  }
+  if (!Array.isArray(names)) names = [row.product_names];
+  return [...new Set(names.map((name) => String(name || "").trim()).filter(Boolean))];
+}
+
 function customerMessageProductSummary(row = {}) {
-  const names = String(row.product_names || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const names = customerMessageProductNames(row);
   if (!names.length) return "您购买的商品";
   if (names.length === 1) return names[0];
   return `${names[0]}等 ${names.length} 件商品`;
 }
 
 function customerMessageRuProduct(row = {}) {
-  const names = String(row.product_names || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
+  const names = customerMessageProductNames(row)
     .map((item) => item
       .replace(/等\s*\d+\s*件商品/g, "")
       .replace(/[\u3400-\u9fff]/g, "")
@@ -32652,6 +32659,11 @@ function mergeCustomerMessageTemplatesMysql(templateRows = []) {
       ? fallback.template_translation
       : row.template_translation;
     const splitTemplate = splitCustomerMessageTemplateText(row.template_text || fallback.template_text || "", translationFallback || fallback.template_translation || "");
+    // Upgrade the former promotion window for saved templates as well as defaults.
+    if (scenario === "order_promo") {
+      splitTemplate.template_text = splitTemplate.template_text.replace(/2\s*[–—-]\s*4(?=\s+недел)/g, "1–2");
+      splitTemplate.template_translation = splitTemplate.template_translation.replace(/2\s*[–—-]\s*4(?=\s*周)/g, "1–2");
+    }
     const useFallback = isLegacyCustomerMessageTemplateText(splitTemplate.template_text);
     templatesByScenario.set(scenario, {
       ...fallback,
@@ -32976,6 +32988,7 @@ export async function customerMessagesMysql(query = {}) {
       MAX(latest.tpl_provider) AS tpl_provider,
       MAX(raw.raw_json) AS raw_json,
       GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
+      JSON_ARRAYAGG(COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku)) AS product_names_json,
       GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus,
       SUM(COALESCE(oi.quantity, 1)) AS item_quantity,
       MAX(COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''))) AS image_url
@@ -33661,8 +33674,8 @@ function defaultCustomerMessageTemplatesMysql() {
       enabled: false,
       trigger_condition: "order_created",
       delay_hours: 0,
-      template_text: "Здравствуйте!\n\nСпасибо за заказ №{{posting_number}}!\nТовары: {{product_summary}}.\n\nЗаранее предупреждаем: в период распродажи доставка может занять на 2–4 недели больше срока, указанного в Ozon. Это возможная дополнительная задержка, а не точная дата получения.\n\nЕсли вы готовы подождать, никаких действий не требуется. Спасибо за ваше терпение! Если товар нужен к определённой дате и такой срок вам не подходит, пожалуйста, по возможности отмените заказ до отправки через приложение Ozon и рассмотрите предложение другого продавца с подходящими сроками. Доступность отмены зависит от статуса заказа и правил Ozon.\n\nЕсли у вас есть вопросы, напишите нам — постараемся помочь. Спасибо за понимание!\n{{shop_name}}",
-      template_translation: "您好！\n\n感谢您在 {{shop_name}} 下单！\n订单号：{{posting_number}}\n订单商品：{{product_summary}}。\n\n提前向您说明：大促期间，配送可能比 Ozon 页面显示的预计时间额外延迟 2–4 周。这是可能增加的等待时间，并非确定的收货日期。\n\n如果您愿意等待，无需额外操作，感谢您的耐心！如果您急需商品、无法接受这一等待时间，建议尽量在发货前通过 Ozon 应用取消订单，并考虑选择配送时间更合适的其他商家。能否取消以订单状态及 Ozon 规则为准。\n\n如有疑问，欢迎联系我们，我们会尽力协助。感谢您的理解！"
+      template_text: "Здравствуйте!\n\nСпасибо за заказ №{{posting_number}}!\nТовары: {{product_summary}}.\n\nЗаранее предупреждаем: в период распродажи доставка может занять на 1–2 недели больше срока, указанного в Ozon. Это возможная дополнительная задержка, а не точная дата получения.\n\nЕсли вы готовы подождать, никаких действий не требуется. Спасибо за ваше терпение! Если товар нужен к определённой дате и такой срок вам не подходит, пожалуйста, по возможности отмените заказ до отправки через приложение Ozon и рассмотрите предложение другого продавца с подходящими сроками. Доступность отмены зависит от статуса заказа и правил Ozon.\n\nЕсли у вас есть вопросы, напишите нам — постараемся помочь. Спасибо за понимание!\n{{shop_name}}",
+      template_translation: "您好！\n\n感谢您在 {{shop_name}} 下单！\n订单号：{{posting_number}}\n订单商品：{{product_summary}}。\n\n提前向您说明：大促期间，配送可能比 Ozon 页面显示的预计时间额外延迟 1–2 周。这是可能增加的等待时间，并非确定的收货日期。\n\n如果您愿意等待，无需额外操作，感谢您的耐心！如果您急需商品、无法接受这一等待时间，建议尽量在发货前通过 Ozon 应用取消订单，并考虑选择配送时间更合适的其他商家。能否取消以订单状态及 Ozon 规则为准。\n\n如有疑问，欢迎联系我们，我们会尽力协助。感谢您的理解！"
     },
     {
       scenario: "order_created",
@@ -34126,7 +34139,7 @@ async function customerMessageSendRecordsMysql(query = {}) {
       o.ordered_at, o.delivered_at, s.name AS shop_name,
       COALESCE(cmss.chat_enabled,0) AS chat_enabled_setting, COALESCE(cmss.chat_capability,'unchecked') AS chat_capability,
       SUBSTRING_INDEX(o.posting_number,'-',1) AS customer_unique_id,
-      item_summary.product_names, item_summary.skus, item_summary.item_quantity, item_summary.image_url,
+      item_summary.product_names, item_summary.product_names_json, item_summary.skus, item_summary.item_quantity, item_summary.image_url,
       ct.chat_id AS matched_chat_id, ct.last_message_text AS real_chat_last_message, ct.last_message_at AS real_chat_last_message_at
     FROM (${eventSourceSql}) e
     JOIN orders o ON o.id=e.order_id
@@ -34135,6 +34148,7 @@ async function customerMessageSendRecordsMysql(query = {}) {
     LEFT JOIN (
       SELECT oi.order_id,
         GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name,''), NULLIF(op.name,''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
+        JSON_ARRAYAGG(COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku)) AS product_names_json,
         GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus,
         SUM(COALESCE(oi.quantity,1)) AS item_quantity,
         MAX(COALESCE(NULLIF(oi.ozon_image_url,''), NULLIF(op.primary_image,''), NULLIF(op.image_url,''))) AS image_url
@@ -34224,6 +34238,7 @@ async function customerMessageUpcomingCandidatesMysql(query = {}) {
       s.name AS shop_name,
       SUBSTRING_INDEX(o.posting_number,'-',1) AS customer_unique_id,
       GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name,''), NULLIF(op.name,''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
+      JSON_ARRAYAGG(COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku)) AS product_names_json,
       GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus,
       SUM(COALESCE(oi.quantity,1)) AS item_quantity,
       MAX(COALESCE(NULLIF(oi.ozon_image_url,''), NULLIF(op.primary_image,''), NULLIF(op.image_url,''))) AS image_url
@@ -34364,6 +34379,7 @@ export async function customerMessageCustomerOrdersMysql(query = {}) {
   const rows = await mysqlQuery(`
     SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.ordered_at, o.delivered_at,
       GROUP_CONCAT(DISTINCT COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku) ORDER BY oi.id SEPARATOR ', ') AS product_names,
+      JSON_ARRAYAGG(COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), oi.ozon_sku)) AS product_names_json,
       GROUP_CONCAT(DISTINCT oi.ozon_sku ORDER BY oi.ozon_sku SEPARATOR ', ') AS skus,
       SUM(COALESCE(oi.quantity, 1)) AS item_quantity,
       MAX(op.image_url) AS image_url

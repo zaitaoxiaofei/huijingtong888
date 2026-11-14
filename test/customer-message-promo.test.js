@@ -26,14 +26,14 @@ test('promotion reminder only sends for fresh unshipped paid orders after thirty
   }
 });
 
-test('new template preserves order identity and states an additional two to four weeks without guaranteed delivery', () => {
+test('new template preserves order identity and states an additional one to two weeks without guaranteed delivery', () => {
   const templates = loadFunction('defaultCustomerMessageTemplatesMysql', 'function splitCustomerMessageTemplateText')();
   const promo = templates.find(row => row.scenario === 'order_promo');
   assert.equal(promo.enabled, false);
   assert.match(promo.template_text, /{{posting_number}}/);
   assert.match(promo.template_text, /{{product_summary}}/);
-  assert.match(promo.template_text, /2–4 недели больше/);
-  assert.match(promo.template_translation, /额外延迟 2–4 周/);
+  assert.match(promo.template_text, /1–2 недели больше/);
+  assert.match(promo.template_translation, /额外延迟 1–2 周/);
   assert.match(promo.template_translation, /愿意等待，无需额外操作/);
   assert.match(promo.template_translation, /发货前/);
   assert.ok(templates.some(row => row.scenario === 'order_created'));
