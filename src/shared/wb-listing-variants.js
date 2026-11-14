@@ -1,6 +1,6 @@
 const clone=value=>JSON.parse(JSON.stringify(value));
 export function wbListingVariants(payload={}){
- return Array.isArray(payload.variants)?payload.variants:[{card:payload.card||{},images:payload.images||[],video_url:payload.video_url||'',...(payload.source_draft_id?{source_draft_id:payload.source_draft_id}:{})}];
+ return Array.isArray(payload.variants)?payload.variants:[{card:payload.card||{},images:payload.images||[],video_url:payload.video_url||'',...(payload.rich_content?{rich_content:clone(payload.rich_content)}:{}),...(payload.tags?{tags:clone(payload.tags)}:{}),...(payload.confirmed_fitments?{confirmed_fitments:clone(payload.confirmed_fitments)}:{}),...(payload.workflow_facts?{workflow_facts:clone(payload.workflow_facts)}:{}),...(payload.source_draft_id?{source_draft_id:payload.source_draft_id}:{})}];
 }
 export function wbVariantPayload(payload,row){return {...payload,...row,variants:undefined};}
 export function wbNewVariant(first={},vendorCode=''){

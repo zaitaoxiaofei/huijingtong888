@@ -17,6 +17,10 @@ export function validateWorkflow(value) {
   if(value.currencyCode&&!['CNY','RUB','USD','EUR','KZT','BYN'].includes(value.currencyCode))throw workflowError('请选择有效的计价币种');
   if(value.reviewMode&&!['manual','automatic'].includes(value.reviewMode))throw workflowError('请选择人工检查或自动检查模式');
   for(const refs of [value.sharedMaterialRefs,...value.nodes.map(n=>n.materialRefs)])validateMaterialRefs(refs);
+  if(value.wbOutput){
+    if(typeof value.wbOutput!=='object'||Array.isArray(value.wbOutput))throw workflowError('请选择有效的 WB 输出配置');
+    for(const key of ['subjectId','shopId'])if(value.wbOutput[key]&&(!Number.isSafeInteger(Number(value.wbOutput[key]))||Number(value.wbOutput[key])<=0))throw workflowError('请选择有效的 WB 类目和店铺');
+  }
   const seen = new Map();
   for (const node of value.nodes) {
     if (!/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(node.id) || ["constructor","prototype","__proto__"].includes(node.id) || seen.has(node.id)) throw workflowError("节点标识无效或重复，请重新添加该节点");

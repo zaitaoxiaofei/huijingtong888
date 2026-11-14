@@ -6,7 +6,7 @@ import { withImageToken } from '../../api/tools/imageCropper.js';
 import { applyWorkflowBindings } from '../../../../src/shared/product-workflow-bindings.js';
 import { readableWorkflowValue } from '../../../../src/shared/product-workflow-inputs.js';
 const props=defineProps({record:{type:Object,required:true},job:{type:Object,default:()=>({})},busy:Boolean});
-const emit=defineEmits(['action','finish','open-draft','editing']);
+const emit=defineEmits(['action','finish','open-draft','open-wb','editing']);
 const active=ref(0);
 watch(()=>props.record.id,()=>{active.value=0;});
 const payload=computed(()=>props.record.payload);
@@ -29,7 +29,7 @@ const needsRecovery=state=>state?.status==='unknown'||state?.taskId&&!state.url&
 const copyChanged=node=>{emit('editing',false);act('save-copy',node,{text:JSON.parse(JSON.stringify(results.value[node.id].text))});};
 </script>
 <template>
-  <div class="review-head"><div><h3>{{ payload.definition.name }}</h3><p>{{ payload.variants.length }} 个变体 · {{ payload.definition.category?.categoryName }} · 任务 {{ record.id.slice(0,8) }}</p></div><el-button v-if="payload.draftId" type="primary" @click="emit('open-draft',payload.draftId)">预览商品并选择店铺上架</el-button><el-button v-else-if="allGenerated&&['awaiting_review','ready'].includes(job.status)" type="primary" :disabled="busy" @click="emit('finish')">整套检查通过，完成生产</el-button></div>
+  <div class="review-head"><div><h3>{{ payload.definition.name }}</h3><p>{{ payload.variants.length }} 个变体 · {{ payload.definition.category?.categoryName }} · 任务 {{ record.id.slice(0,8) }}</p></div><el-button v-if="payload.draftId" type="primary" @click="emit('open-draft',payload.draftId)">Ozon 草稿</el-button><el-button v-if="payload.draftId" @click="emit('open-wb',record.id)">用于 WB</el-button><el-button v-else-if="allGenerated&&['awaiting_review','ready'].includes(job.status)" type="primary" :disabled="busy" @click="emit('finish')">整套检查通过，完成生产</el-button></div>
   <section v-if="!payload.draftId&&(['failed','awaiting_review','ready'].includes(job.status)||!job.status)" class="task-recovery">
     <div class="review-head"><h4>{{ job.status==='failed'?'任务需要处理':'下一步操作' }}</h4><el-button v-if="!blockedNodes.length&&job.status!=='ready'" type="primary" :loading="busy" @click="emit('action',{id:record.id,action:'start'})">{{ job.status?'继续执行':'提交后台执行' }}</el-button></div>
     <p>{{ blockedNodes.length?'已生成的内容会保留，请处理以下节点后继续。':job.status==='failed'?'请先核对下方失败原因。权限或通道问题解决后，可点击继续执行；模板和材料需调整时，请返回流程重新生产。':'请检查下面已生成的图片和文案；确认主图后，后台继续生成后续内容。' }}</p>

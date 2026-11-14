@@ -98,3 +98,16 @@ test('new vendor codes can be reviewed while the original frozen publication con
  await f.service.saveListingDraft(2,{shop_id:20,draft_id:10,revision:5,payload:partial});
  assert.equal((await f.publishing.reviewListingDraft(2,{shop_id:20,draft_id:10})).ok,false);
 });
+
+
+test('WB local rich materials and keyword notes persist per variant without external writes',async()=>{
+ const f=fixture(),payload=structuredClone(f.payload);
+ payload.variants.forEach((row,index)=>{row.rich_content={version:1,blocks:[{type:'text',text:'Details '+index},{type:'image',url:row.images[0]}]};row.tags=['#local_note_'+index];});
+ await f.service.saveListingDraft(2,{shop_id:20,draft_id:10,revision:4,payload});
+ const saved=JSON.parse(f.state().drafts[0].payload_json);
+ assert.deepEqual(saved.variants.map(row=>row.rich_content),payload.variants.map(row=>row.rich_content));
+ assert.deepEqual(saved.variants.map(row=>row.tags),payload.variants.map(row=>row.tags));
+ const invalid=structuredClone(payload);invalid.variants[1].rich_content.blocks[1].url='javascript:alert(1)';
+ await assert.rejects(f.service.saveListingDraft(2,{shop_id:20,draft_id:10,revision:5,payload:invalid}),/HTTPS/);
+ assert.equal(f.state().drafts[0].revision,5);
+});
