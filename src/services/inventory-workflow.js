@@ -153,7 +153,13 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     }
     // Include never-stocked physical products, not a second copy of their virtual parent.
     return query(`SELECT p.id AS product_id,p.name AS product_name,p.inventory_number,p.code AS inventory_id,p.is_accessory,p.updated_at,0 AS component_count FROM products p
-      WHERE p.active=1 AND COALESCE(p.product_type,'main')!='selection' AND ${inventoryTenantSql(scope,'p')}
+      WHERE p.active=1 AND ${inventoryTenantSql(scope,'p')} AND (
+        COALESCE(p.product_type,'main')!='selection' OR NULLIF(TRIM(p.inventory_number),'') IS NOT NULL
+        OR EXISTS(SELECT 1 FROM product_components used_component WHERE used_component.component_product_id=p.id AND ${inventoryTenantSql(scope,'used_component')})
+        OR EXISTS(SELECT 1 FROM sku_inventory_recipe_items used_item
+          JOIN sku_inventory_recipes used_recipe ON used_recipe.id=used_item.recipe_id AND used_recipe.active=1
+          JOIN shops used_shop ON used_shop.id=used_recipe.shop_id AND ${inventoryTenantSql(scope,'used_shop')} WHERE used_item.product_id=p.id)
+        OR EXISTS(SELECT 1 FROM sku_mappings used_mapping WHERE used_mapping.product_id=p.id AND used_mapping.active=1 AND ${inventoryTenantSql(scope,'used_mapping')}))
         AND NOT EXISTS(SELECT 1 FROM product_components c WHERE c.product_id=p.id AND ${inventoryTenantSql(scope,'c')})
         ${where.length?'AND '+where.map(w=>'('+w+')').join(' AND '):''} ORDER BY p.id`,args);
   }
@@ -293,15 +299,15 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const key=`${scope.id}:${id}`,epoch=workflowRevision(),cached=workflowCache.get(key);
     if(!fresh&&cached&&cached.expires>Date.now())return cached.promise;
     const promise=(async()=>{
-      const [local,fbp,requests]=await Promise.all([
+      const [local,fbp,requests,cancellationEvents]=await Promise.all([
         ledger({product_id:id,include_flow:'local'},scope.id),ledger({product_id:id,view:'fbp'},scope.id),
-        readRequestRows(id,scope)
+        readRequestRows(id,scope), readDemandCancellationEvents(query,scope.id,[id])
       ]);
       let prediction,forecastError='';
       try{prediction=await forecast(id,scope.id,{official:fbp.fbp_inventory,balance:{physical_stock:local.physical_estimate,open_order_demand_qty:local.open_order_demand,fbp_reserved_qty:local.fbp_reserved}});}
       catch(e){if([403,404].includes(e.statusCode))throw e;forecastError='FBP备货预测暂不可用，可查看现有申请或手动选择SKU备货';}
       const projected={...local,fbp_inventory:fbp.fbp_inventory,flow_summary:{...local.flow_summary,applications:fbp.applications,applications_pending:false}};
-      const result=inventoryWorkflow(projected,{applications:fbp.applications,forecast:prediction,requests});
+      const result=applyDemandCancellations(inventoryWorkflow(projected,{applications:fbp.applications,forecast:prediction,requests}),local.orders||[],id,activeDemandCancellations(cancellationEvents));
       return {...result,product_id:id,forecast_error:forecastError,settings:prediction?.settings,
         fbp_forecast_suggestions:fbpForecastSuggestions(fbp.applications,result.fbp),
         forecast:prediction?{skus:prediction.skus,stock_incomplete:prediction.stock_incomplete}:null,

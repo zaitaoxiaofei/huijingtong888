@@ -317,6 +317,7 @@ function isFbpOrder(row) {
 function procurementActionLabel(row) {
   const coverage = row.procurement_coverage;
   if (coverage?.quantity_needs_review) return '已采购 · 数量待核';
+  if (coverage?.cancelled_purchase_quantity > 0) return `仍缺 ${coverage.shortage_quantity} · 已取消采购 ${coverage.cancelled_purchase_quantity}`;
   if (coverage?.shortage_quantity > 0) return `待采购（缺 ${coverage.shortage_quantity}）`;
   if (coverage?.incoming_quantity > 0) return '采购在途';
   if (coverage?.needs_fulfillment) return '账面可覆盖';
@@ -895,6 +896,7 @@ function canEditCollaborationNote(row) {
             <div v-if="row.procurement_coverage && !isFbpOrder(row)" class="orders-coverage-summary">
 
 
+              <small v-if="row.procurement_coverage.cancelled_purchase_quantity > 0">已取消采购 {{ row.procurement_coverage.cancelled_purchase_quantity }} 件，订单仍缺货；请在采购需求明细核对替代处理或恢复采购。</small>
               <small v-if="row.procurement_coverage.inventory_needs_review">账面差额待核，不计入本次采购缺口。</small>
               <small v-if="row.procurement_coverage.quantity_needs_review">已采购但数量待核，请先核对采购凭据，避免重复购买。</small>
               <small v-if="row.procurement_coverage.missing_amount">采购金额待补，成本记录尚不完整。</small>

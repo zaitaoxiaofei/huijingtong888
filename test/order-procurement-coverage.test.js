@@ -154,6 +154,7 @@ test('actual receipt transaction keeps a pending remainder and cannot receive th
   } };
   const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
     assertWholeBundleReview: async () => {},
+    assertWarehouseReceiptActor: async () => ({personId:1}),
     resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {},
     planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
     resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: value => value,
@@ -179,6 +180,7 @@ test('over receipt posts the entered quantity, requires a reason, and records ar
   const connection = { execute: async (sql, values) => { statements.push({ sql, values }); return [{ affectedRows: 1 }]; } };
   const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
     assertWholeBundleReview: async () => {},
+    assertWarehouseReceiptActor: async () => ({personId:1}),
     resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {},
     planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
     resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: () => '2026-10-10 17:00:00',
