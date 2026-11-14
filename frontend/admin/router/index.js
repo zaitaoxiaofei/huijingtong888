@@ -207,6 +207,7 @@ export const router = createRouter({
         { path: "profit/sku-ranking", redirect: "/profit/monthly-billing" },
         { path: "profit/shop-ranking", redirect: "/profit/monthly-billing" },
         { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告分析", breadcrumb: ["数据看板", "广告分析"] } },
+        { path: "finance/company-statements", name: "company-statements", component: () => import("../views/finance/CompanyStatementsView.vue"), meta: { title: "公司账单与凭证", breadcrumb: ["财务中心", "公司账单与凭证"] } },
         { path: "finance-center", name: "finance-center", component: FinanceCenterView, meta: { title: "经营总览", breadcrumb: ["财务中心", "经营总览"] } },
         { path: "finance/reimbursements", name: "finance-reimbursements", component: ReimbursementView, meta: { title: "报销中心", breadcrumb: ["财务中心", "报销中心"] } },
         { path: "finance/payroll", name: "finance-payroll", component: PayrollView, meta: { title: "工资管理", breadcrumb: ["财务中心", "工资管理"] } },
