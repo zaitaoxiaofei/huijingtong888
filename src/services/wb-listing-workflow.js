@@ -1,3 +1,4 @@
+import {wbRichContent} from '../shared/wb-rich-content.js';
 import {wbListingVariants} from '../shared/wb-listing-variants.js';
 import {wbAttributeDirectory} from '../shared/wb-attribute-options.js';
 import { wbListingValidation } from '../shared/wb-listing-validation.js';
@@ -30,6 +31,8 @@ export function createWbListingWorkflow({query,request,account,transaction,categ
     const variants=wbListingVariants(payload),vendors=variants.map(row=>String(row.card?.vendorCode||'').trim());
     if(!variants.length||variants.length>30||vendors.some(v=>!v||v.length>72)||new Set(vendors).size!==vendors.length)throw fail('变体货号：每行须填写唯一的 1–72 字符货号，请点击生成货号或修改重复项。',400);
     if(payload.variants&&JSON.stringify(payload.card)!==JSON.stringify(variants[0].card))throw fail('首行变体与商品资料不一致，请刷新草稿后重试。',400);
+    for(const row of variants)if(row.rich_content)wbRichContent(row.rich_content);
+    if(payload.rich_content)wbRichContent(payload.rich_content);
     const vendor=vendors[0];
     if(!vendor||vendor.length>72||JSON.stringify(payload).length>1000000)throw fail('草稿商家货号：请填写 1–72 个字符，图片请使用地址。',400);
     if(payload.currency!=='CNY')throw fail('WB 草稿售价币种须为人民币 CNY，不能沿用 Ozon 币种。',400);
