@@ -1,3 +1,4 @@
+import { settleLegacyDailyOrder, legacyDailyBatchDecision } from "./legacy-daily-accrual-settlement.js";
 import { assertInventoryPackage, defaultInventoryPackagingFee } from "../shared/inventory-package-defaults.js";
 import { productProfitParameterChanges } from "../shared/product-profit-parameters.js";
 import { scopedProductProfitRecalculation, preserveOrderEstimateParameters } from "./product-profit-recalculation.js";
@@ -10064,6 +10065,33 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
   return { status, fetched, upserted, requests, from, to, source_endpoint: "/v1/finance/accrual/by-day", shops, errors, warnings, db: "mysql" };
 }
 
+const legacySettlementPolicyCacheMysql = new Map();
+async function legacySettlementPolicyMysql(tenantId) {
+  const cached = legacySettlementPolicyCacheMysql.get(String(tenantId));
+  if (cached && cached.expires > Date.now()) return cached.value;
+  const row = await mysqlQueryOne("SELECT value_json FROM system_settings WHERE `key` = ?", [`profit.legacy_daily_settlement_batch:${tenantId}`]);
+  const value = row?.value_json ? (typeof row.value_json === "string" ? JSON.parse(row.value_json) : row.value_json) : null;
+  legacyDailyBatchDecision(value, 0, false);
+  legacySettlementPolicyCacheMysql.set(String(tenantId), { value, expires: Date.now() + 1000 });
+  return value;
+}
+
+export async function settleLegacyDailyAccrualOrderMysql(orderId, options = {}, tenantId = "admin") {
+  const scope = await orderOwnershipTenantScopeMysql(tenantId);
+  await assertOrderTaskAccessMysql(scope, options, ["finance"]);
+  const decision = legacyDailyBatchDecision(await legacySettlementPolicyMysql(scope.id), orderId);
+  if (decision) return { ok: false, code: decision, items: [], order_id: Number(orderId) };
+  return settleLegacyDailyOrder({
+    query: mysqlQuery,
+    transaction: callback => retryProfitCalculationTransaction(withMysqlTransaction, callback),
+    shopPredicate: orderTenantPredicateMysql("s", scope),
+    assertAuthorized: () => assertOrderTaskAccessMysql(scope, options, ["finance"]),
+    classifyCategory: ozonFinanceCategoryMysql,
+    packagingFeeForSaleAmount: packagingFeeForSaleAmountMysql,
+    writeVersioned: withVersionedOrderProfitWrite
+  }, orderId, options);
+}
+
 async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null, tenantId = "admin", taskOptions = {}, requiredPermissions = ["finance"] } = {}) {
   const tenantScope = await orderOwnershipTenantScopeMysql(tenantId);
   await assertOrderTaskAccessMysql(tenantScope, taskOptions, requiredPermissions);
@@ -10120,7 +10148,10 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
   let updated = 0;
   const appliedOrderIds = new Set();
   const fxPending = [];
+  const settlementBatchPolicy = await legacySettlementPolicyMysql(tenantScope.id);
   for (const row of rows) {
+    const held = legacyDailyBatchDecision(settlementBatchPolicy, row.order_id, false);
+    if (held) { fxPending.push({ order_id: Number(row.order_id), code: held }); continue; }
     await assertOrderTaskAccessMysql(tenantScope, taskOptions, requiredPermissions);
     const items = await mysqlQuery(`
       SELECT oi.*, opi.sale_amount_cny, opi.purchase_cost_cny, opi.domestic_shipping_cny, opi.international_shipping_cny,
@@ -10224,7 +10255,16 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
     }
     const newSource = await mysqlQueryOne(`SELECT id FROM ozon_finance_items WHERE shop_id = ?
       AND posting_number IN (?, ?) AND LEFT(operation_id, 15) = 'accrual_by_day:' LIMIT 1`, [row.shop_id, row.posting_number, parentOrderNumberMysql(row)]);
-    if (newSource) continue; // Non-daily profit versions cannot consume the different accrual monetary model.
+    if (newSource) {
+      const compatible = await settleLegacyDailyAccrualOrderMysql(row.order_id, { ...taskOptions, preview: false }, tenantScope.id);
+      if (compatible.ok) { updated += Number(compatible.updated || 0); appliedOrderIds.add(Number(row.order_id)); }
+      else fxPending.push({ order_id: Number(row.order_id), code: compatible.code });
+      continue;
+    }
+    if (itemVersions.includes("V5")) {
+      fxPending.push({ order_id: Number(row.order_id), code: "LEGACY_DAILY_SOURCE_REQUIRED" });
+      continue;
+    }
     if (itemVersions.length !== 1) throw Object.assign(new Error("订单利润公式版本不一致，停止财务入账"), { code: "ORDER_PROFIT_FORMULA_MIXED" });
     const formula = getProfitFormula(itemVersions[0]);
     const { resolveReturnLossCostPolicy, estimateOutcomeReturnLoss } = formula.outcome;
