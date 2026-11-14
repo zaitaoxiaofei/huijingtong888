@@ -1,8 +1,8 @@
 <script setup>
 import { computed } from 'vue';
 import { marketplaceIdentity } from '../../../src/shared/marketplace-identity.js';
-import ozonLogo from '../assets/marketplaces/ozon.png';
-import wbLogo from '../assets/marketplaces/wb.png';
+import ozonLogo from '../assets/marketplaces/ozon.png?inline';
+import wbLogo from '../assets/marketplaces/wb.png?inline';
 const props = defineProps({ platform: { type: String, default: '' }, size: { type: Number, default: 28 } });
 const identity = computed(() => marketplaceIdentity(props.platform));
 const logo = computed(() => ({ ozon: ozonLogo, wb: wbLogo }[identity.value.key]));
