@@ -80,7 +80,7 @@ import { classifyOrderLogistics, normalizeLogisticsServiceClass, orderLogisticsE
 import { orderLogisticsCarrierCandidateSql, orderLogisticsCarrierSummaryRows } from "./order-logistics-carrier-summary.js";
 import { resolveOrderFreightDescriptor } from "./order-freight-rule-resolver.js";
 import { cbrCnyRateForDate } from "./pricing-reference-rate.js";
-import { oglParcelValueRub, selectOglOrderRule } from "../ogl-rates.js";
+import { OGL_EFFECTIVE_FROM, oglParcelValueRub, selectOglOrderRule } from "../ogl-rates.js";
 import {
   applyStockAlertQuery,
   completedBeijingSalesWindow,
@@ -19574,6 +19574,33 @@ async function oglOrderParcelValueRubMysql(posting, exchangeRate) {
   return 0;
 }
 
+async function oglEstimateLogisticsRuleMysql(posting, orderedAt, product) {
+  const effectiveAt = normalizeMysqlDateTime(orderedAt);
+  const defaultScope = await readableLogisticsTenantScopeMysql(product?.tenant_id || "admin", "candidate");
+  const rate = posting?.profitFxState?.orderFx || await cbrCnyRateForDate(orderedAt);
+  const parcelValueRub = await oglOrderParcelValueRubMysql(posting, rate.rate);
+  if (!(parcelValueRub > 0)) return null;
+  const candidates = await mysqlQuery(`
+    SELECT candidate.*
+    FROM logistics_fee_rules candidate
+    WHERE ${defaultScope.sql}
+      AND UPPER(candidate.carrier) = 'OGL'
+      AND candidate.channel = 'economy'
+      AND candidate.enabled != 0
+      AND candidate.effective_from <= ?
+      AND (candidate.effective_to IS NULL OR candidate.effective_to > ?)
+    ORDER BY candidate.effective_from DESC, candidate.id DESC
+  `, [...defaultScope.params, effectiveAt, effectiveAt]);
+  return selectOglOrderRule(candidates, {
+    weightG: product?.package_weight_g,
+    length: product?.length_cm,
+    width: product?.width_cm,
+    height: product?.height_cm,
+    parcelValueRub,
+    exchangeRate: rate.rate
+  });
+}
+
 async function actualOrderLogisticsRuleMysql(posting, orderedAt, product) {
   const descriptor = resolveOrderFreightDescriptor(posting);
   const effectiveAt = normalizeMysqlDateTime(orderedAt);
@@ -19583,28 +19610,7 @@ async function actualOrderLogisticsRuleMysql(posting, orderedAt, product) {
     ? await readableLogisticsTenantScopeMysql(product?.tenant_id || "admin", "candidate")
     : (() => { throw Object.assign(new Error("物流规则租户字段尚未迁移"), { statusCode: 503 }); })();
   if (descriptor.carrier === "OGL" && !descriptor.serviceClass) {
-    const rate = posting?.profitFxState?.orderFx || await cbrCnyRateForDate(orderedAt);
-    const parcelValueRub = await oglOrderParcelValueRubMysql(posting, rate.rate);
-    if (!(parcelValueRub > 0)) return null;
-    const candidates = await mysqlQuery(`
-      SELECT candidate.*
-      FROM logistics_fee_rules candidate
-      WHERE ${defaultScope.sql}
-        AND UPPER(candidate.carrier) = 'OGL'
-        AND candidate.channel = 'economy'
-        AND candidate.enabled != 0
-        AND candidate.effective_from <= ?
-        AND (candidate.effective_to IS NULL OR candidate.effective_to > ?)
-      ORDER BY candidate.effective_from DESC, candidate.id DESC
-    `, [...defaultScope.params, effectiveAt, effectiveAt]);
-    return selectOglOrderRule(candidates, {
-      weightG: product?.package_weight_g,
-      length: product?.length_cm,
-      width: product?.width_cm,
-      height: product?.height_cm,
-      parcelValueRub,
-      exchangeRate: rate.rate
-    });
+    return oglEstimateLogisticsRuleMysql(posting, orderedAt, product);
   }
   return mysqlQueryOne(`
     SELECT candidate.*
@@ -19653,6 +19659,14 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
     if (fxState) posting = { ...posting, profitFxState: fxState };
   }
   if (posting?.profitFxState && !posting.profitFxState.orderFx) return product;
+  // An explicitly selected OGL inventory model controls estimates. Physical
+  // delivery method remains authoritative only for fulfillment and real bills.
+  if (product && orderedAt && posting && String(product.logistics_rule_carrier || "").toUpperCase() === "OGL"
+    && normalizeMysqlDateTime(orderedAt) >= OGL_EFFECTIVE_FROM) {
+    const estimateRule = await oglEstimateLogisticsRuleMysql(posting, orderedAt, product);
+    if (!estimateRule) throw Object.assign(new Error("OGL 预估模型未匹配到适用运价，请核对商品克重、尺寸及订单货值"), { statusCode: 409 });
+    return productWithOglOrderRateMysql(productWithLogisticsRuleMysql(product, estimateRule, "product_ogl_estimate"), orderedAt, posting);
+  }
   if (product && orderedAt && posting) {
     const actualRule = await actualOrderLogisticsRuleMysql(posting, orderedAt, product);
     if (actualRule) return productWithOglOrderRateMysql(productWithLogisticsRuleMysql(product, actualRule, "ozon_delivery_method"), orderedAt, posting);
