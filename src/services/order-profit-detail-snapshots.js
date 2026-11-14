@@ -199,7 +199,17 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
   };
   const terminalNoOriginalRevenue = isTerminalNoOriginalRevenue(normalizedOrder);
   const hasFinalFinanceBasis = financeRows.length > 0 && hasRequiredFinanceBasis(financeRows, normalizedOrder);
-  const actualProfitReady = hasFinalFinanceBasis && rows.length > 0 && rows.every((item) => hasFinanceActualProfit(item));
+  // V5 has already validated and allocated signed daily bills transactionally.
+  // Render that committed projection, rather than reclassifying raw V1 bills.
+  const committedLegacyDaily = !terminalNoOriginalRevenue && rows.length > 0 && rows.every(item => {
+    const costs = ["purchase_cost_cny", "domestic_shipping_cny", "international_shipping_cny", "packaging_cost_cny", "commission_fee_cny", "ozon_service_fee_cny", "return_loss_cny", "advertising_cost_cny", "other_fee_cny"];
+    const required = ["sale_amount_cny", "actual_profit", "net_profit_cny", ...costs];
+    return item.lock_reason === "finance_accrued_legacy_daily" && item.settlement_state === "accrued" && item.profit_status === "accrued"
+      && required.every(key => item[key] != null && item[key] !== "" && Number.isFinite(Number(item[key])))
+      && Math.abs(Number(item.actual_profit) - Number(item.net_profit_cny)) < 0.005
+      && Math.abs(Number(item.sale_amount_cny) - costs.reduce((total, key) => total + Number(item[key]), 0) - Number(item.net_profit_cny)) < 0.011;
+  });
+  const actualProfitReady = committedLegacyDaily || (hasFinalFinanceBasis && rows.length > 0 && rows.every((item) => hasFinanceActualProfit(item)));
   const sale = orderSaleAmount(rows, normalizedOrder, financeRows);
   const terminalTotals = terminalNoOriginalRevenue ? terminalComponentTotals(rows, normalizedOrder) : null;
   const estimated = {
@@ -232,6 +242,9 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
         ? sumRows(rows, (item) => positiveAmount(item.advertising_cost_cny) + (financeCollecting === null ? positiveAmount(item.other_fee_cny) : 0))
         : null
   };
+  if (committedLegacyDaily) {
+    for (const [key, column] of Object.entries({international: "international_shipping_cny", commission: "commission_fee_cny", collecting: "other_fee_cny", service: "ozon_service_fee_cny", aftersale: "return_loss_cny", other: "advertising_cost_cny"})) actual[key] = sumRows(rows, item => Number(item[column]));
+  }
   if (actualProfitReady) {
     actual.international = actual.international ?? 0;
     actual.commission = actual.commission ?? 0;
@@ -290,6 +303,7 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
     acc[key] = roundMoney(Number(acc[key] || 0) + amount);
     return acc;
   }, {});
+  if (committedLegacyDaily) Object.assign(financeTotals, {commission: actual.commission, collecting_fee: actual.collecting, platform_delivery: actual.international, international_transport: 0, other: actual.service, aftersale_loss: actual.aftersale});
   const financeMatchStatus = actualProfitReady || terminalTotals ? "settled" : financeRows.length ? "matched" : "unmatched";
   return {
     order_id: Number(order.id),
