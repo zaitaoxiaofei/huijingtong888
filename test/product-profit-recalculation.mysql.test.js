@@ -28,10 +28,14 @@ test('real MySQL product recalculation uses 300g, keeps history, refreshes live 
     await q("INSERT INTO order_profit_fx_state(tenant_key,order_id,ordered_business_date,order_fx_id,prices_json,state) VALUES('2',35440,'2026-11-13',1,?, 'ready')", [JSON.stringify([{ ozon_sku: '6191758261', amount: 100, currency: 'CNY' }])]);
     await q("INSERT INTO system_settings(`key`,value_json) VALUES('profit.daily_fx_policy.v2',?)", [JSON.stringify({ version: 'V2', enabled_at: '2026-10-20T00:00:00Z', legacy_max_order_id: 0 })]);
     await q("INSERT INTO order_profit_calc_state(tenant_key,order_item_id,order_id,formula_version) VALUES('2',35793,35440,'V4')");
+    await q("INSERT INTO logistics_fee_rules(id,name,carrier,channel,mode,min_weight_g,max_weight_g,min_price_rub,max_price_rub,base_fee_cny,per_gram_cny,per_ticket_cny,version_group_id,effective_from) VALUES(39,'CEL Standard Extra Small','CEL','standard','per_gram',1,35000,1,250000,0,0.01,1,39,'2026-10-19 16:00:00')");
+    const actualPosting = JSON.stringify({ raw: { delivery_method: { name: 'CEL FBP Standard Extra Small', tpl_provider: 'CEL', warehouse: 'Hunchun 2' }, products: [{ sku: '6191758261', price: '100', quantity: 1, currency_code: 'CNY' }] } });
+    await q("INSERT INTO ozon_orders_raw(store_id,posting_number,raw_json) VALUES(5,'0112339342-0272-1',?)", [actualPosting]);
     const initial = await run(); assert.equal(initial.preview.rows.length, 1); assert.equal(initial.preview.rows[0].new_freight, 5.04);
     await q('UPDATE products SET package_weight_g=300 WHERE id=1041');
     const manual = await api.recalculateOrderProfitMysql(35440, { tenantId: 2, session: { ...session, roles: ['technical'] }, sync_outbound: false, refresh_snapshots: false });
     assert.equal(manual.updated, 1);
+    assert.equal((await q("SELECT raw_json FROM ozon_orders_raw WHERE store_id=5 AND posting_number='0112339342-0272-1'"))[0].raw_json, actualPosting);
     const manualDetail = await api.orderDetailMysql(35440, 2);
     assert.equal(manualDetail.profit_detail_snapshot.summary.estimatedProfit, 43.77);
     const corrected = await run(); assert.equal(corrected.preview.rows[0].new_freight, 12.06); assert.equal(corrected.preview.rows[0].new_profit, 43.77);
