@@ -28,8 +28,8 @@ export async function readLegacyDailyFinance({query,order,items,classifyCategory
  if(result.allocation)result.allocation={...result.allocation,allocation_rate_rub_per_cny:null,allocation_basis:'frozen_legacy_cny_sale'};
  return result;
 }
-export function legacyDailySettlementFingerprint({order,items,finance}){
- return profitCalculationFingerprint({order,items,finance});
+export function legacyDailySettlementFingerprint({order,items,finance,review}){
+ return profitCalculationFingerprint({order,items,finance,...(review?{review}:{})});
 }
 // Pure projection; application and preview use this exact planner.
 export async function planLegacyDailySettlement({order,items,finance,accounting,packagingFeeForSaleAmount}){
@@ -71,7 +71,7 @@ export async function settleLegacyDailyOrder(deps,orderId,options={}){
  const load=async(query,lock=false)=>{
   const order=(await query(`SELECT o.*,s.tenant_id FROM orders o JOIN shops s ON s.id=o.shop_id WHERE o.id=? AND ${deps.shopPredicate}${lock?' FOR UPDATE':''}`,[Number(orderId)]))[0];
   if(!order)throw Object.assign(new Error('订单不存在或不属于当前企业'),{statusCode:404});
-  const items=await query(`SELECT oi.*,opi.purchase_cost_cny,opi.domestic_shipping_cny,opi.packaging_cost_cny,opi.advertising_cost_cny,opi.profit_status,opi.is_locked,opi.lock_reason,st.formula_version,proof.inputs_json AS actual_inputs_json
+  const items=await query(`SELECT oi.*,opi.purchase_cost_cny,opi.domestic_shipping_cny,opi.packaging_cost_cny,opi.advertising_cost_cny,opi.profit_status,opi.is_locked,opi.lock_reason,opi.locked_at,st.formula_version,proof.inputs_json AS actual_inputs_json
     FROM order_items oi LEFT JOIN order_profit_items opi ON opi.order_item_id=oi.id
     LEFT JOIN order_profit_calc_state st ON st.order_item_id=oi.id AND st.tenant_key=CASE WHEN ?>0 THEN CAST(? AS CHAR) ELSE 'admin' END COLLATE utf8mb4_0900_ai_ci
     LEFT JOIN order_profit_calc_revisions proof ON proof.id=st.current_actual_revision_id AND proof.tenant_key=st.tenant_key AND proof.order_item_id=oi.id AND proof.layer='actual'
@@ -82,9 +82,16 @@ export async function settleLegacyDailyOrder(deps,orderId,options={}){
   });
   const finance=await readLegacyDailyFinance({query,order,items,classifyCategory:deps.classifyCategory,lockForSettlement:lock,legacyCurrencyEvidence:[...(options.legacy_currency_evidence||[]),...retained]});
   const accounting=getProfitFormula('V5').outcome.classifyOrderAccounting(order);
-  const plan=await planLegacyDailySettlement({order,items,finance,accounting,packagingFeeForSaleAmount:deps.packagingFeeForSaleAmount});
-  const token=legacyDailySettlementFingerprint({order,items,finance});
-  return {order,items,finance,plan,preview_token:token};
+  let review=options.reviewed_settlement_policy||null;
+  if(!review&&items.some(i=>i.formula_version==='V6')){
+   try{const inputs=typeof items[0].actual_inputs_json==='string'?JSON.parse(items[0].actual_inputs_json):items[0].actual_inputs_json;review=inputs?.reviewed_settlement_policy||null;}catch{}
+  }
+  if(review?.order_ids?.includes(Number(order.id)))review={...review,order_ids:[Number(order.id)],returns:(review.returns||[]).filter(r=>Number(r.shop_id)===Number(order.shop_id)&&r.posting_number===order.posting_number)};
+  const plan=review||items.some(i=>i.formula_version==='V6')
+   ?await getProfitFormula('V6').planReviewedDailySettlement({order,items,finance,accounting,review})
+   :await planLegacyDailySettlement({order,items,finance,accounting,packagingFeeForSaleAmount:deps.packagingFeeForSaleAmount});
+  const token=legacyDailySettlementFingerprint({order,items,finance,...(review?{review}: {})});
+  return {order,items,finance,plan,review,preview_token:token};
  };
  await deps.assertAuthorized();
  if(options.preview!==false){const value=await load(deps.query);return {...value.plan,order_id:value.order.id,preview:true,preview_token:value.preview_token};}
@@ -95,21 +102,29 @@ export async function settleLegacyDailyOrder(deps,orderId,options={}){
   if(options.preview_token&&options.preview_token!==current.preview_token)throw Object.assign(new Error('订单或账单已变化，请重新预览'),{statusCode:409,code:'LEGACY_DAILY_PREVIEW_STALE'});
   if(!current.plan.ok)return {...current.plan,order_id:current.order.id};
   // Already confirmed historical V1 actuals are not silently migrated.
-  if(current.items.some(i=>i.lock_reason!=='finance_accrued_legacy_daily'&&Number(i.is_locked)===1&&i.profit_status==='accrued'&&i.settlement_state==='accrued'))return pending('LEGACY_DAILY_EXISTING_ACTUAL_PROTECTED');
+  if(current.items.some(i=>!['finance_accrued_legacy_daily','finance_reviewed_daily','finance_reviewed_daily_provisional'].includes(i.lock_reason)&&Number(i.is_locked)===1&&i.profit_status==='accrued'&&i.settlement_state==='accrued'))return pending('LEGACY_DAILY_EXISTING_ACTUAL_PROTECTED');
+  const reviewed=current.plan.formulaVersion==='V6';
+  const lockReason=reviewed?(current.plan.quality==='official'?'finance_reviewed_daily':'finance_reviewed_daily_provisional'):'finance_accrued_legacy_daily';
   for(const projection of current.plan.items){
    const {item}=projection;
-   await deps.writeVersioned(item.id,{connection,layer:'actual',expectedFormulaVersion:item.formula_version||'V1',legacyDailyUpgrade:true,
-    source:'ozon_finance_legacy_daily',reason:'旧订单新账单兼容补算；保留原预估及历史实际记录',
-    inputs:{finance_model:'V5',upgraded_from:'V1',finance_fx_policy:current.plan.financeFxPolicy,finance_rows:current.finance.source_rows,
+   await deps.writeVersioned(item.id,{connection,layer:'actual',expectedFormulaVersion:item.formula_version||'V1',legacyDailyUpgrade:!reviewed,reviewedDailyUpgrade:reviewed,
+    source:reviewed?'ozon_finance_reviewed_daily':'ozon_finance_legacy_daily',reason:'已核对账单补算；保留原预估及历史实际记录',
+    inputs:{finance_model:current.plan.formulaVersion,upgraded_from:reviewed?'reviewed_legacy':'V1',finance_fx_policy:current.plan.financeFxPolicy,finance_rows:current.finance.source_rows,
      parent_allocation:current.finance.allocation,category_totals:current.plan.categoryTotals,
-     costs:{purchase:projection.purchaseCost,domestic:projection.domesticShipping,packaging:projection.packagingCost,advertising:projection.advertisingCost}},
+     costs:{purchase:projection.purchaseCost,domestic:projection.domesticShipping,packaging:projection.packagingCost,advertising:projection.advertisingCost},
+     ...(reviewed?{reviewed_settlement_policy:current.review,settlement_quality:current.plan.quality,estimated_collecting:current.plan.estimatedCollecting,return_evidence:current.plan.returnEvidence}: {})},
     rateVersion:{finance_fx_policy:current.plan.financeFxPolicy,finance_rows:current.finance.source_rows},commandId:options.command_id||null},async()=>{
      await connection.execute("UPDATE order_items SET actual_profit=?,platform_fee_actual=?,settlement_state='accrued' WHERE id=?",[projection.actualProfit,projection.totalFinanceFeeCny,item.id]);
      await connection.execute(`INSERT INTO order_profit_items(order_item_id,sale_amount_cny,purchase_cost_cny,domestic_shipping_cny,international_shipping_cny,packaging_cost_cny,commission_rate,commission_fee_cny,ozon_service_fee_cny,return_loss_cny,advertising_cost_cny,other_fee_cny,gross_profit_cny,net_profit_cny,profit_status,is_locked,locked_at,lock_reason)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'accrued',1,CURRENT_TIMESTAMP,'finance_accrued_legacy_daily')
       ON DUPLICATE KEY UPDATE sale_amount_cny=VALUES(sale_amount_cny),purchase_cost_cny=VALUES(purchase_cost_cny),domestic_shipping_cny=VALUES(domestic_shipping_cny),international_shipping_cny=VALUES(international_shipping_cny),packaging_cost_cny=VALUES(packaging_cost_cny),commission_rate=VALUES(commission_rate),commission_fee_cny=VALUES(commission_fee_cny),ozon_service_fee_cny=VALUES(ozon_service_fee_cny),return_loss_cny=VALUES(return_loss_cny),advertising_cost_cny=VALUES(advertising_cost_cny),other_fee_cny=VALUES(other_fee_cny),gross_profit_cny=VALUES(gross_profit_cny),net_profit_cny=VALUES(net_profit_cny),profit_status='accrued',is_locked=1,locked_at=CURRENT_TIMESTAMP,lock_reason='finance_accrued_legacy_daily'`,
       [item.id,projection.itemSale,projection.purchaseCost,projection.domesticShipping,projection.actualInternationalShipping,projection.packagingCost,projection.commissionRate,projection.commissionFeeCny,projection.actualServiceFeeCny,projection.returnLoss,projection.advertisingCost,projection.otherFee,projection.grossProfit,projection.actualProfit]);
-   });
+     if(reviewed){
+      const status=current.plan.quality==='official'?'accrued':'reviewed_provisional';
+      await connection.execute('UPDATE order_items SET settlement_state=? WHERE id=?',[status,item.id]);
+      await connection.execute('UPDATE order_profit_items SET profit_status=?,lock_reason=?,locked_at=COALESCE(?,locked_at) WHERE order_item_id=?',[status,lockReason,item.locked_at||null,item.id]);
+     }
+    });
   }
   return {...current.plan,order_id:current.order.id,updated:current.plan.items.length};
  });

@@ -3435,6 +3435,7 @@ function isDeliveredOrClosedProfitStageMysql(row = {}) {
 }
 
 function resolveProfitStageMysql(row = {}) {
+  if(row.lock_reason==='finance_reviewed_daily_provisional'||row.profit_status==='reviewed_provisional'||row.settlement_state==='reviewed_provisional')return {key:'reviewed_provisional',text:'测算含待确认项',actualReady:false,source:'reviewed_finance',completeness:normalizeFinanceCompletenessMysql(row)};
   const statusText = [row.settlement_state, row.profit_status].map((value) => String(value || "").toLowerCase()).join(" ");
   const completeness = normalizeFinanceCompletenessMysql(row);
   const locked = Number(row.is_locked || 0) === 1 || String(row.lock_reason || "").toLowerCase().includes("finance");
@@ -10261,7 +10262,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       else fxPending.push({ order_id: Number(row.order_id), code: compatible.code });
       continue;
     }
-    if (itemVersions.includes("V5")) {
+    if (itemVersions.includes("V5") || itemVersions.includes("V6")) {
       fxPending.push({ order_id: Number(row.order_id), code: "LEGACY_DAILY_SOURCE_REQUIRED" });
       continue;
     }
@@ -30594,7 +30595,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
         ELSE 0
       END) SEPARATOR '||') AS sku_actual_profits,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', CASE
-        WHEN opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued' THEN 1
+        WHEN (opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued') AND COALESCE(opi.lock_reason,'') <> 'finance_reviewed_daily_provisional' THEN 1
         ELSE 0
       END) SEPARATOR '||') AS sku_actual_profit_ready,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), '')) SEPARATOR '||') AS sku_names,
@@ -32455,6 +32456,12 @@ export async function orderDetailMysql(id, tenantId = "admin") {
     tenantId: ownership?.tenant_id || "admin", orderId: Number(id)
   });
   const formulaVersions = [...new Set(calculationVersions.items.map((entry) => entry.formula_version))];
+  if(formulaVersions.includes('V6')){
+    const records=calculationVersions.items.filter(r=>r.formula_version==='V6');
+    const reviews=records.map(r=>r.revisions.find(x=>Number(x.id)===Number(r.current_actual_revision_id))?.inputs);
+    const quality=reviews.length&&reviews.every(x=>x?.settlement_quality)?[...new Set(reviews.flatMap(x=>x.settlement_quality.split('+')))].filter(x=>x!=='official').join('+')||'official':'review_metadata_pending';
+    order.reviewed_settlement_metadata={quality,estimated_collecting:reviews.find(x=>x?.estimated_collecting)?.estimated_collecting||null};
+  }
   let profitFx = formulaVersions.some(usesDailyProfitFx)
     ? await readOrderProfitFxState({ query: mysqlQuery }, ownership?.tenant_id || "admin", Number(id)) : null;
   let finance;

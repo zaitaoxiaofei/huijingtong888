@@ -7,6 +7,7 @@ import { normalizeOzonFinanceAccrual } from "../src/services/ozon-finance-accrua
 import { writeOrderFinanceAccrual } from "../src/services/order-finance-accrual-write.js";
 import { createOrderProfitDailyFxSchema } from "../src/services/order-profit-daily-fx-schema.js";
 import { ensureOrderProfitDailyFx } from "../src/services/order-profit-daily-fx.js";
+import {createReviewedBoundaryProof} from '../src/services/reviewed-finance-boundary.js';
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const realMysql = { skip: !socketPath };
@@ -153,6 +154,21 @@ test("real MySQL same-day legacy source blocks a second API representation witho
   await write(operation(), { shop: { id: 2, tenant_id: 20 } });
   assert.equal((await rows()).filter(row => row.shop_id === "2").length, 3);
   assert.deepEqual((await rows()).filter(row => row.shop_id === "1"), before);
+}));
+
+test('reviewed boundary imports only the exact missing operation and retains legacy rows and review proof',realMysql,()=>fixture(async({db,write,rows})=>{
+ await db.query("INSERT INTO ozon_finance_items(shop_id,operation_id,posting_number,service_type,service_name,amount,accruals_for_sale,operation_date,raw_json) VALUES(1,'legacy-acquiring','123-456','MarketplaceRedistributionOfAcquiringOperation','MarketplaceRedistributionOfAcquiringOperation',-8,0,'2026-10-26','{}')");
+ const legacy=(await db.query("SELECT * FROM ozon_finance_items WHERE operation_id='legacy-acquiring'"))[0];
+ const op=operation({fees:[],total:950});
+ const proof=createReviewedBoundaryProof({shopId:1,tenantKey:'10',operation:op,businessDate:day,legacyRows:legacy,reference:'user-reviewed operation 17'});
+ const before=await rows();await assert.rejects(write(op),{code:'ORDER_FINANCE_ACCRUAL_LEGACY_DAY_CONFLICT'});
+ await write(op,{legacyBoundaryReview:proof});const after=await rows();assert.equal(after.length,3);assert.deepEqual(after.find(r=>r.operation_id==='legacy-acquiring'),before[0]);
+ assert.equal(JSON.parse(after.find(r=>r.operation_id===op.operation_id).raw_json)._erp_reviewed_legacy_boundary.reference,proof.reference);
+ const beforeRepeat=await rows();await write(op,{legacyBoundaryReview:proof});assert.deepEqual(await rows(),beforeRepeat);
+ await assert.rejects(write({...op,operation_id:'accrual_by_day:99'},{legacyBoundaryReview:proof}),{code:'ORDER_FINANCE_BOUNDARY_REVIEW_INVALID'});
+ await db.query("UPDATE ozon_finance_items SET amount=-9 WHERE operation_id='legacy-acquiring'");
+ await assert.rejects(write(op,{legacyBoundaryReview:proof}),{code:'ORDER_FINANCE_BOUNDARY_REVIEW_INVALID'});
+ assert.throws(()=>createReviewedBoundaryProof({shopId:1,tenantKey:'10',operation:operation(),businessDate:day,legacyRows:legacy,reference:'same-category duplicate'}),{code:'ORDER_FINANCE_BOUNDARY_REVIEW_INVALID'});
 }));
 
 test("real MySQL referenced obsolete or corrected finance rows refuse changes and keep vouchers valid", realMysql, () => fixture(async ({ db, write, rows, vouchers }) => {

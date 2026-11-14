@@ -1,6 +1,7 @@
 import { getOrderProfitDailyFxById } from "./order-profit-daily-fx.js";
 import { moneyToCny, validateDailyFxSnapshot } from "./profit-formulas/v2/fx.js";
 import { OZON_DAILY_ACCRUAL_ENDPOINT } from "./ozon-finance-accruals.js";
+import {reviewedBoundaryUnits,verifyReviewedBoundaryProof} from './reviewed-finance-boundary.js';
 
 const fail = (code, message) => Object.assign(new Error(message), { code, statusCode: 409 });
 const rowsOf = value => Array.isArray(value?.[0]) ? value[0] : value;
@@ -51,7 +52,7 @@ function comparable(row, excluded = new Set()) {
  * Network fetch/archive preparation happens before this transaction. Stable
  * service identities retain their primary keys, including monetary corrections.
  */
-export async function writeOrderFinanceAccrual({ transaction, shop, operation, fx, assertAuthorized }) {
+export async function writeOrderFinanceAccrual({ transaction, shop, operation, fx, assertAuthorized, legacyBoundaryReview = null }) {
   if (typeof transaction !== "function" || typeof assertAuthorized !== "function") throw new Error("Finance accrual writes require a transaction and authorization callback");
   if (!shop || !Object.hasOwn(shop, "tenant_id") || !Number.isSafeInteger(Number(shop.id)) || Number(shop.id) <= 0) {
     throw fail("ORDER_FINANCE_SHOP_SCOPE_INVALID", "财务写入需要明确店铺及企业归属");
@@ -91,11 +92,20 @@ export async function writeOrderFinanceAccrual({ transaction, shop, operation, f
     const [legacyDay] = rowsOf(await connection.query(`SELECT id FROM ozon_finance_items FORCE INDEX (idx_finance_shop_legacy_day)
       WHERE shop_id=? AND legacy_operation_date=? LIMIT 1 FOR UPDATE`,
     [shopId, pinned.business_date]));
-    if (legacyDay) throw fail("ORDER_FINANCE_ACCRUAL_LEGACY_DAY_CONFLICT", "该店铺同一财务日期已有旧接口记录，请先核对跨接口重复，未导入新计提或删除旧记录");
+    let boundaryEvidence=null;
+    if (legacyDay) {
+      if(!legacyBoundaryReview)throw fail("ORDER_FINANCE_ACCRUAL_LEGACY_DAY_CONFLICT", "该店铺同一财务日期已有旧接口记录，请先核对跨接口重复，未导入新计提或删除旧记录");
+      const {parent}=reviewedBoundaryUnits(operation);
+      const relatedLegacy=rowsOf(await connection.query(`SELECT id,shop_id,operation_id,posting_number,service_type,service_name,operation_type,amount,accruals_for_sale
+        FROM ozon_finance_items WHERE shop_id=? AND (posting_number=? OR posting_number LIKE ?)
+        AND LEFT(operation_id,15)<>'accrual_by_day:' ORDER BY id FOR UPDATE`,[shopId,parent,parent+'-%']));
+      boundaryEvidence=verifyReviewedBoundaryProof(legacyBoundaryReview,{shopId,tenantKey,operation,businessDate:pinned.business_date,legacyRows:relatedLegacy});
+    } else if(legacyBoundaryReview)throw fail('ORDER_FINANCE_BOUNDARY_REVIEW_STALE','旧账单日期范围已变化，请重新核对后补录');
     const storedFx = await getOrderProfitDailyFxById(connection, pinned.id);
     if (!storedFx || ["id", "business_date", "source_date", "currency_from", "currency_to", "source"].some(key => String(storedFx[key]) !== String(pinned[key]))
       || Number(storedFx.rate) !== pinned.rate) throw fail("ORDER_FINANCE_FX_ARCHIVE_MISMATCH", "财务操作日汇率与已存档记录不一致，停止入账");
-    const rawJson = canonical({ ...envelope, _erp_fx_archive: storedFx, _erp_source_endpoint: OZON_DAILY_ACCRUAL_ENDPOINT });
+    const rawJson = canonical({ ...envelope, _erp_fx_archive: storedFx, _erp_source_endpoint: OZON_DAILY_ACCRUAL_ENDPOINT,
+      ...(boundaryEvidence?{_erp_reviewed_legacy_boundary:boundaryEvidence}:{}) });
     const desired = sourceRows.map(row => ({
       shop_id: shopId, operation_id: operation.operation_id, posting_number: text(operation.posting_number, 128, "货件号"),
       order_number: text(operation.order_number, 128, "订单号"), operation_type: text(operation.operation_type, 128, "操作类型"),

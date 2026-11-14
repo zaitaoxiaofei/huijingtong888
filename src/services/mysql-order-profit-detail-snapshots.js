@@ -55,7 +55,8 @@ export async function refreshOrderProfitDetailSnapshotsMysqlService(deps, body =
     const detail = await deps.orderDetail(Number(orderRow.id));
     if (!detail?.order) continue;
     const dailyFx = String(detail.order.profit_formula_versions || "").split(",").map(value => value.trim()).some(usesDailyProfitFx);
-    const payload = dailyFx ? detail.profit_detail_snapshot : deps.buildPayload(detail.order, detail.items, detail.finance);
+    const reviewed = String(detail.order.profit_formula_versions || '').split(',').includes('V6');
+    const payload = dailyFx||reviewed ? detail.profit_detail_snapshot : deps.buildPayload(detail.order, detail.items, detail.finance);
     if (!payload) throw new Error("Daily FX profit snapshot requires the verified order detail projection");
     if (dailyFx && ["sale_amount_cny", "estimated_profit_cny", "estimated_cost_total_cny"].some(key => payload[key] === null
       || payload[key] === undefined || payload[key] === "" || !Number.isFinite(Number(payload[key])))) {
