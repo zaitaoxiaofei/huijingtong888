@@ -1,3 +1,4 @@
+import {createWbStockManagement} from './wb-stock-management.js';
 import {createWbProductWorkspace,saveWbProductCard,wbProductView} from './wb-product-workspace.js';
 import {createWbPublishRecords} from './wb-publish-records.js';
 import {createWbProductOperations} from './wb-product-operations.js';
@@ -228,14 +229,14 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   }
   async function stocks(tenantId,body) {
     const {a,size,available,availability_message}=await stockContext(tenantId,body,true);
-    return {...await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'POST',body:{skus:[size.skus[0]]}}),available,availability_message,warehouse_id:a.wb_warehouse_id};
+    return {...await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'POST',body:{chrtIds:[Number(size.chrtID)]}}),available,availability_message,warehouse_id:a.wb_warehouse_id};
   }
   async function setStocks(tenantId,body) {
     const {a,size,available}=await stockContext(tenantId,body),amount=Number(body.quantity);
     if(!Number.isSafeInteger(amount)||amount<0||amount>available)throw fail(`WB 发布数量须为 0–${available} 的整数；可用量已扣除共用仓的订单及备货占用。`);
-    await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'PUT',body:{stocks:[{sku:size.skus[0],amount}]}});
-    const value=await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'POST',body:{skus:[size.skus[0]]}});
-    const confirmed=value.stocks?.some(row=>row.sku===size.skus[0]&&Number(row.amount)===amount);
+    await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'PUT',body:{stocks:[{chrtId:Number(size.chrtID),amount}]}});
+    const value=await request(a,'marketplace',`/api/v3/stocks/${a.wb_warehouse_id}`,{method:'POST',body:{chrtIds:[Number(size.chrtID)]}});
+    const confirmed=value.stocks?.some(row=>Number(row.chrtId)===Number(size.chrtID)&&Number(row.amount)===amount);
     return {ok:true,pending:!confirmed,message:confirmed?'WB 库存已回读核对；本地实物库存未改变。':'WB 库存已提交，回读尚未一致，请刷新核对。'};
   }
   async function categories(tenantId, body) {
@@ -458,7 +459,8 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   const records=createWbPublishRecords({query,request,account,refreshProductSnapshots:workspace.refreshProductSnapshots});
   async function createProductInventory(tenantId,body){const result=await workspace.createProductInventory(tenantId,body);await bindProduct(tenantId,{...body,product_id:result.product_id});return result;}
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
-  return { cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
+  const stockManagement=createWbStockManagement({account,query,request});
+  return { ...stockManagement, cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
     syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
@@ -482,8 +484,9 @@ export async function wbPlatform(session, permission = 'operations', signal) {
       if(!current[0])throw fail('WB 店铺已停用或授权已撤销，操作已停止。',403);
       if(current[0].environment==='production'&&path!=='/ping'&&path!=='/api/v1/seller-info'
         &&(!current[0].checked_at||current[0].seller_id!==a.seller_id))throw fail('WB 授权已变更，操作已停止；请先检查店铺授权再继续。',409);
+      const stockWrite=options?.method==='PUT'&&/^\/api\/v3\/stocks\/\d+$/.test(path);
       const publishingWrite=options?.method==='POST'&&['/content/v2/cards/upload','/content/v3/media/save','/content/v2/barcodes','/api/v2/upload/task','/api/v2/upload/task/size'].includes(path);
-      const beforeRequest=publishingWrite?async()=>{await authorize();const [latest]=await mysqlQuery("SELECT c.token,c.environment,c.seller_id,c.checked_at FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.shop_id=? AND s.status='active'",[session.tenant.id,a.shop_id]);if(!latest||latest.token!==current[0].token||latest.environment!==current[0].environment||latest.seller_id!==current[0].seller_id||(latest.environment==='production'&&!latest.checked_at))throw fail('WB 授权在等待期间已变化，未发送写入请求，请核对后继续。',409);}:undefined;
+      const beforeRequest=(publishingWrite||stockWrite)?async()=>{await authorize();const [latest]=await mysqlQuery("SELECT c.token,c.environment,c.seller_id,c.checked_at FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.shop_id=? AND s.status='active'",[session.tenant.id,a.shop_id]);if(!latest||latest.token!==current[0].token||latest.environment!==current[0].environment||latest.seller_id!==current[0].seller_id||(latest.environment==='production'&&!latest.checked_at))throw fail('WB 授权在等待期间已变化，未发送写入请求，请核对后继续。',409);}:undefined;
       return wbRequest(current[0],service,path,{...options,beforeRequest,signal:options?.signal||signal});
     },invalidate:invalidateWbOrderCachesMysql,
     prepareInventoryProduct:async()=>{await authorize();await prepareInventoryProductCreationMysql();},
