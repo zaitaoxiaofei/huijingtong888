@@ -68,8 +68,8 @@ export function renderInventoryLabel(item) {
   ctx.textBaseline = 'alphabetic';
   let numberSize = 128;
   do { ctx.font = `800 ${numberSize}px ${family}`; numberSize -= 1; }
-  while (ctx.measureText(item.number).width > 380 && numberSize >= 40);
-  if (ctx.measureText(item.number).width > 380) throw new Error(`${item.number}：编号过长，无法完整排入标签`);
+  while (ctx.measureText(item.number).width > 340 && numberSize >= 40);
+  if (ctx.measureText(item.number).width > 340) throw new Error(`${item.number}：编号过长，无法完整排入标签`);
   ctx.fillText(item.number, 30, 157);
 
   ctx.font = `700 28px ${family}`;
@@ -87,10 +87,10 @@ export function renderInventoryLabel(item) {
   // Keep module edges crisp and quiet zones intact at the label's 300 dpi resolution.
   if (barcode.width > 360) throw new Error(`${item.number}：条形码过长，无法清晰排入标签`);
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(barcode, 437 + Math.floor((360 - barcode.width) / 2), 78, barcode.width, 84);
+  ctx.drawImage(barcode, 389 + Math.floor((360 - barcode.width) / 2), 78, barcode.width, 84);
   ctx.font = `400 19px ${family}`;
   ctx.textAlign = 'center';
-  ctx.fillText(item.number, 617, 184);
+  ctx.fillText(item.number, 569, 184);
   ctx.textAlign = 'start';
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(30, 203); ctx.lineTo(797, 203); ctx.stroke();

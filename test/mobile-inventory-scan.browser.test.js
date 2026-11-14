@@ -11,16 +11,16 @@ test('mobile camera decodes real inventory labels, searches automatically and re
 },async()=>{
  const {server,calls}=await startMobileDialogPreview({host:'::1',stableDeps:true}),output=path.resolve('.verification');await fs.mkdir(output,{recursive:true});
  const script=`
- const task=await taskSpace('mobile-inventory-scan-20261113'),pages=await task.pages(),page=pages[0]||await task.newPage();console.log('SPACE',task.spaceId);
+ const task=await taskSpace('label-layout-camera-20261114'),pages=await task.pages(),page=pages[0]||await task.newPage();console.log('SPACE',task.spaceId);
  await page.cdp('Emulation.setDeviceMetricsOverride',{width:375,height:812,deviceScaleFactor:1,mobile:true});
  await page.goto('about:blank');await page.goto('http://[::1]:8788/admin.html?scan='+Date.now()+'#/mobile/inventory');
  await page.waitForSelector('.mobile-inventory-filter-actions');
  await page.evaluate(async()=>{
   const {renderInventoryLabel}=await import('/frontend/admin/utils/inventory-labels.js');
   const image=new Image();image.src=renderInventoryLabel({id:7,number:'1-7',name:'手机扫码库存测试',type:'单品'});await image.decode();
-  const canvas=document.createElement('canvas');canvas.width=1000;canvas.height=700;const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,1000,700);ctx.drawImage(image,87,173);
-  window.cameraMode='success';window.cameraStreams=[];window.cameraOptions=[];
-  const createStream=()=>{const source=window.cameraMode==='blank'?document.createElement('canvas'):canvas;if(source!==canvas){source.width=1000;source.height=700;}const draw=()=>{if(source===canvas)ctx.drawImage(image,87,173);else{source.getContext('2d').fillStyle='#fff';source.getContext('2d').fillRect(0,0,1000,700);}};const stream=source.captureStream(5);const pump=setInterval(()=>{if(stream.getTracks().every(t=>t.readyState==='ended'))clearInterval(pump);else draw();},100);window.cameraStreams.push(stream);return stream;};
+  const canvas=document.createElement('canvas');canvas.width=720;canvas.height=1280;const ctx=canvas.getContext('2d');ctx.fillStyle='#e6edf4';ctx.fillRect(0,0,720,1280);ctx.drawImage(image,60,20,600,257);
+  window.cameraMode='success';window.cameraStreams=[];window.cameraOptions=[];window.cameraLabelY=20;window.cameraFrames=0;
+  const createStream=()=>{const source=window.cameraMode==='blank'?document.createElement('canvas'):canvas;if(source!==canvas){source.width=1000;source.height=700;}const draw=()=>{if(source===canvas){ctx.fillStyle='#e6edf4';ctx.fillRect(0,0,720,1280);ctx.drawImage(image,60,window.cameraLabelY,600,257);window.cameraFrames++;}else{source.getContext('2d').fillStyle='#fff';source.getContext('2d').fillRect(0,0,1000,700);}};const stream=source.captureStream(5);const pump=setInterval(()=>{if(stream.getTracks().every(t=>t.readyState==='ended'))clearInterval(pump);else draw();},100);window.cameraStreams.push(stream);return stream;};
   Object.defineProperty(navigator.mediaDevices,'getUserMedia',{configurable:true,value:async options=>{
    window.cameraOptions.push(options);
    if(window.cameraMode==='denied')throw new DOMException('denied','NotAllowedError');
@@ -31,7 +31,7 @@ test('mobile camera decodes real inventory labels, searches automatically and re
   }});
  });
  console.log('MOCKED');const open=()=>page.click('.mobile-inventory-filter-actions button:has-text("扫一扫")');
- await open();console.log('OPEN');
+ await open();console.log('OPEN');await page.waitForFunction(()=>document.querySelector('video')?.readyState===4&&window.cameraFrames>=5);await page.evaluate(()=>{const v=document.querySelector('video'),f=document.querySelector('.inventory-scan-frame');if(v.videoHeight<=v.videoWidth)throw Error('Fixture camera must be portrait');if(f.clientWidth/f.clientHeight<1.7||getComputedStyle(v).objectFit!=='cover')throw Error('Landscape viewfinder must fill with portrait camera');if(document.querySelector('input[aria-label="搜索内容"]').value)throw Error('Barcode outside visible frame must not match');});await page.screenshot({path:${JSON.stringify(path.join(output,'mobile-landscape-viewfinder-375.png'))}});await page.evaluate(()=>window.cameraLabelY=520);
  await page.waitForFunction(()=>!document.querySelector('.mobile-inventory-scanner')&&document.querySelector('input[aria-label="搜索内容"]').value==='1-7'&&document.querySelectorAll('.mobile-inventory-page .mobile-list-scroll>article').length===1);
  console.log('MATCH');await page.waitForFunction(()=>[...document.querySelectorAll('.mobile-inventory-page .mobile-record-head img')].some(image=>image.complete&&image.naturalWidth>0));console.log('IMAGE');
  await page.evaluate(()=>{if(!window.cameraStreams.every(s=>s.getTracks().every(t=>t.readyState==='ended')))throw Error('Camera leaked after match');if(window.cameraOptions[0].audio!==false||window.cameraOptions[0].video.facingMode.ideal!=='environment')throw Error('Expected rear camera without microphone');});

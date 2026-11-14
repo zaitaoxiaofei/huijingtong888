@@ -14,7 +14,7 @@ test('single and batch inventory labels print immediately and download exact pag
   const output = path.resolve('.verification');
   await fs.mkdir(output, { recursive:true });
   const script = `
-const task=await taskSpace('inventory-metrics-20261113'),page=task.page('p1');
+const task=await taskSpace('label-layout-camera-20261114'),page=task.page('p1');
 await page.goto('http://[::1]:8788/admin.html?labels='+Date.now()+'#/inventory/products');
 await page.waitForSelector('.product-inventory-number');console.log('LIST_READY');
 await page.waitForFunction(()=>document.querySelector('.inventory-value-cell').textContent.includes('820.00'));
@@ -39,7 +39,7 @@ await page.evaluate(()=>{
 await page.click('.inventory-actions .inventory-action-row:first-child button:first-child >> nth=0');
 await page.waitForSelector('.inventory-label-preview');console.log('SINGLE_READY');
 if(await page.evaluate(()=>document.querySelector('input[aria-label="2-6-7 标签数量"]').value)!=='20')throw Error('Single label count must default to local physical stock');
-await page.evaluate(async()=>{const img=document.querySelector('.inventory-label-preview');await img.decode();const canvas=document.createElement('canvas');canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);const pixels=ctx.getImageData(437,100,360,1).data;let transitions=0;for(let i=4;i<pixels.length;i+=4)if((pixels[i]<128)!==(pixels[i-4]<128))transitions++;if(transitions<30)throw Error('Barcode bars missing from label preview');});
+await page.evaluate(async()=>{const img=document.querySelector('.inventory-label-preview');await img.decode();const canvas=document.createElement('canvas');canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0);const pixels=ctx.getImageData(437,100,360,1).data;let transitions=0;for(let i=4;i<pixels.length;i+=4)if((pixels[i]<128)!==(pixels[i-4]<128))transitions++;if(transitions<30)throw Error('Barcode bars missing from label preview');const scan=ctx.getImageData(0,100,canvas.width,1).data;let right=0;for(let x=380;x<canvas.width;x++)if(scan[x*4]<128)right=x;if(canvas.width-right<115)throw Error('Barcode needs more than 9mm of right-edge clearance');});
 await page.fill('input[aria-label="2-6-7 标签数量"]','2');await page.press('input[aria-label="2-6-7 标签数量"]','Tab');
 await page.click('.inventory-label-dialog .el-dialog__footer button:last-child');
 await page.waitForFunction(()=>window.labelPrintedPages===2);console.log('SINGLE_PRINTED');

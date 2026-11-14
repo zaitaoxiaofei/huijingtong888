@@ -1,10 +1,11 @@
 <script setup>
 import {computed,nextTick,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import MobileDialog from './MobileDialog.vue';
+import {inventoryScanCrop} from '../../utils/inventory-scan-frame.js';
 const props=defineProps({modelValue:Boolean});
 const emit=defineEmits(['update:modelValue','scanned']);
 const visible=computed({get:()=>props.modelValue,set:value=>emit('update:modelValue',value)});
-const video=ref(null),error=ref(''),starting=ref(false);
+const video=ref(null),frame=ref(null),error=ref(''),starting=ref(false);
 let stream,reader,timer,version=0;
 function stop(){++version;clearTimeout(timer);stream?.getTracks().forEach(track=>track.stop());stream=null;reader?.reset();reader=null;if(video.value)video.value.srcObject=null;starting.value=false;}
 function cameraError(e){
@@ -30,7 +31,10 @@ async function start(){
    if(token!==version||!props.modelValue)return;
    if(video.value?.readyState>=2){
     try{
-     canvas.width=video.value.videoWidth;canvas.height=video.value.videoHeight;ctx.drawImage(video.value,0,0);
+     const crop=inventoryScanCrop(video.value.videoWidth,video.value.videoHeight,frame.value?.clientWidth,frame.value?.clientHeight);
+     if(!crop){timer=setTimeout(scan,180);return;}
+     canvas.width=Math.round(crop.width);canvas.height=Math.round(crop.height);
+     ctx.drawImage(video.value,crop.x,crop.y,crop.width,crop.height,0,0,canvas.width,canvas.height);
      const pixels=ctx.getImageData(0,0,canvas.width,canvas.height).data,gray=new Uint8ClampedArray(canvas.width*canvas.height);
      for(let i=0;i<gray.length;i++)gray[i]=(pixels[i*4]*306+pixels[i*4+1]*601+pixels[i*4+2]*117+512)>>10;
      const number=reader.decodeWithState(new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(gray,canvas.width,canvas.height)))).getText().trim();
@@ -50,8 +54,8 @@ onBeforeUnmount(()=>{stop();document.removeEventListener('visibilitychange',hidd
 </script>
 <template>
  <MobileDialog v-model="visible" title="扫一扫库存标签" class="mobile-inventory-scanner">
-  <p>将标签右上角的完整条形码放入画面，识别后自动显示对应库存和商品图片。</p>
-  <video ref="video" autoplay muted playsinline aria-label="库存条形码摄像头画面"/>
+  <p>手机保持竖屏，将完整条形码横向放入绿色取景框，识别后自动显示对应库存和商品图片。</p>
+  <div ref="frame" class="inventory-scan-frame"><video ref="video" autoplay muted playsinline aria-label="库存条形码摄像头画面"/><div class="inventory-scan-guide" aria-hidden="true"><span/></div></div>
   <p v-if="starting" role="status">正在打开摄像头，请允许摄像头权限…</p>
   <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
   <p v-else-if="!starting" role="status">对准条形码，保持清晰并稍作停留。</p>
@@ -59,5 +63,5 @@ onBeforeUnmount(()=>{stop();document.removeEventListener('visibilitychange',hidd
  </MobileDialog>
 </template>
 <style scoped>
-.mobile-inventory-scanner video{display:block;width:100%;max-height:50dvh;aspect-ratio:4/3;object-fit:contain;background:#111;border-radius:8px}.mobile-inventory-scanner p{font-size:14px;line-height:1.6}
+.inventory-scan-frame{position:relative;width:100%;aspect-ratio:16/9;max-height:50dvh;overflow:hidden;background:#111;border-radius:8px}.inventory-scan-frame video{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover}.inventory-scan-guide{position:absolute;inset:0;border:2px solid #22c55e;border-radius:8px;pointer-events:none}.inventory-scan-guide span{position:absolute;left:7%;right:7%;top:50%;height:2px;background:#22c55e;box-shadow:0 0 8px #22c55e}.mobile-inventory-scanner p{font-size:14px;line-height:1.6}
 </style>
