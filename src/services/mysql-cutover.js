@@ -16,6 +16,7 @@ import {ensureProductNameAliasSchema,readProductIdentity,recordProductEdit} from
 import { readNewArrivalReceipt } from './procurement-receipt-idempotency.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
+import {createInventoryBundleStocktake} from './inventory-bundle-stocktake.js';
 const ORDER_SPLIT_IMPORT = Symbol("orderSplitImport");
 import { createOrderSplitService } from "./order-split.js";
 import { mergeDashboardSections } from "../shared/dashboard-sections.js";
@@ -35391,6 +35392,9 @@ async function readLedgerWithFlow(query, tenantId) {
   return ledger;
 }
 const purchaseBundleReviewService=createPurchaseBundleReview({ledger:procurementLedgerService});
+const inventoryBundleStocktakeService=createInventoryBundleStocktake({ledger:procurementLedgerService});
+export const inventoryBundleContextMysql=(params,session)=>inventoryBundleStocktakeService.context(params,session);
+export const applyInventoryBundleStocktakeMysql=(body,session)=>inventoryBundleStocktakeService.apply(body,session);
 export const purchaseBundleContextMysql=(params,session)=>purchaseBundleReviewService.context(params,session);
 export const reviewPurchaseBundleMysql=(body,session)=>purchaseBundleReviewService.review(body,session);
 export const procurementLedgerMysql = (query, tenantId = "admin") => readLedgerWithFlow(query, tenantId);

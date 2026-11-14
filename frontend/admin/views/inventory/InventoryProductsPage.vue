@@ -36,6 +36,7 @@ import {
 
 const profitRecalculationDialog = ref();
 const InventoryLabelPrintDialog = defineAsyncComponent(() => import("../../components/inventory/InventoryLabelPrintDialog.vue"));
+const InventoryBundleDialog = defineAsyncComponent(()=>import('../../components/inventory/InventoryBundleDialog.vue'));
 
 const INVENTORY_LIST_CACHE_TTL_MS = 30 * 1000;
 const INVENTORY_LIST_CACHE_MAX_ENTRIES = 30;
@@ -136,7 +137,8 @@ function openLabelPrint(rows) {
 }
 const ledgerVisible = ref(false);
 const ledgerInitialAction = ref("");
-function openInventoryLedger(row, action = "") { ledgerProductId.value = Number(row.id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
+const bundleDialog=reactive({visible:false,id:0,editable:false});
+function openInventoryLedger(row, action = "") { if(Number(row.component_count)>0){Object.assign(bundleDialog,{visible:true,id:Number(row.id),editable:action==='stocktake'&&canWriteInventory.value});return;}ledgerProductId.value = Number(row.id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
 const ledgerProductId = ref(0);
 const manualOutboundVisible = ref(false);
 const manualOutboundSubmitting = ref(false);
@@ -1901,7 +1903,7 @@ onActivated(() => {
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>
                 </div>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
-                <div class="product-info-bottom"><span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span><el-button plain size="small" @click.stop="openInventoryLedger(row)">库存明细</el-button></div>
+                <div class="product-info-bottom"><span class="muted-text">绑定 SKU：{{ integer(row.bound_sku_count) }} 个</span><el-button plain size="small" @click.stop="openInventoryLedger(row)">{{Number(row.component_count)>0?'套装明细':'库存明细'}}</el-button></div>
               </div>
             </div>
           </template>
@@ -2333,6 +2335,7 @@ onActivated(() => {
     </el-dialog>
 
 
+    <InventoryBundleDialog v-if="bundleDialog.visible" v-model="bundleDialog.visible" :product-id="bundleDialog.id" :editable="bundleDialog.editable&&canWriteInventory" @saved="loadPageData();localQuantities.refresh(true)"/>
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canWriteInventory" @saved="loadPageData();localQuantities.refresh(true)" />
     <ProductCreateEditDialog
       ref="productCreateDialogRef"

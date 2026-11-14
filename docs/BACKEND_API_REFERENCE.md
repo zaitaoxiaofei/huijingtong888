@@ -3136,6 +3136,27 @@ Fetch a remote image through the backend with response validation.
 
 ### Inventory
 
+#### `GET /api/inventory/bundle-stocktake`
+
+Read current-enterprise bundle identities, complete nested composition, and each physical child's local stock and revision. Inactive children remain visible and block writes.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Owned bundle inventory ID
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory/bundle-stocktake`
+
+Atomically stocktake every physical child of an owned bundle with inventory.write. Validates fresh membership, complete child IDs, composition and per-child revisions under locks. Same-key retries return the saved result; failures roll back every child; no parent stock is posted.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `GET /api/inventory/ledger`
 
 Read current enterprise inventory detail, optionally with the shared read-only flow graph. fulfillment_summary separates FBS/FBP pending order_count and physical-product quantity; local stock/available/stocktake exclude FBP/FBO/OGR orders. fbp_reserved is unshipped local allocation to FBP, not FBP customer orders. Official FBP stock is loaded independently via view=fbp, with incomplete data explicit. Existing write/revision behavior is unchanged.
