@@ -150,6 +150,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/inventory-workflow/requests": async req => workflow.submit(await readJson(req),req._session),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/inventory/bundle-stocktake": (req,url)=>services.inventoryBundleContext(Object.fromEntries(url.searchParams),req._session),
+    "POST /api/inventory/bundle-stocktake": async req=>services.applyInventoryBundleStocktake(await readJson(req),req._session),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/inventory/ledger/preview": async (req) => services.previewInventoryStocktake(await readJson(req), tenantIdFromRequest(req)),

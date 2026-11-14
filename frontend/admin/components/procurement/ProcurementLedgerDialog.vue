@@ -2,11 +2,14 @@
 import PlatformInventoryUsage from "../inventory/PlatformInventoryUsage.vue";
 import OrderHandlingSummary from './OrderHandlingSummary.vue';
 import {orderHandlingRow} from '../../utils/order-handling-context.js';
-import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { getActivePinia } from 'pinia';
 import { useAuthStore } from '../../stores/auth.js';
 import { hasPermission } from '../../../../src/shared/permissions.js';
 import InventoryCompositionBadge from '../inventory/InventoryCompositionBadge.vue';
+const BundleDetails=defineAsyncComponent(()=>import('../inventory/InventoryBundleDetails.vue'));
+const BundleDialog=defineAsyncComponent(()=>import('../inventory/InventoryBundleDialog.vue'));
+const bundleUpdateVisible=ref(false);
 import InventoryProductEditAction from '../inventory/InventoryProductEditAction.vue';
 import InventoryProductHistoryAction from '../inventory/InventoryProductHistoryAction.vue';
 import InventoryWorkflowPanel from './InventoryWorkflowPanel.vue';
@@ -348,6 +351,7 @@ function editCost(type, row) {
 }
 function edit(type, row = null) {
   if (type === 'stocktake' && !props.stocktakeEnabled) return;
+  if(type==='stocktake'&&Number(data.value?.product?.component_count)>0){bundleUpdateVisible.value=true;return;}
   if (inventoryOnly.value && (type !== 'stocktake' || !props.stocktakeEnabled)) return;
   Object.keys(form).forEach(key => delete form[key]);
   Object.assign(form, { action_type: type, quantity: (type === 'receive' ? row?.missing_receipt_quantity : row?.missing_purchase_quantity) || row?.missing_record_quantity || row?.shortage_quantity || 1,
@@ -453,7 +457,8 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
       <template v-if="data">
         <div v-if="!orderOverview||!showOrderBreakdown" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span><InventoryCompositionBadge :key="identityVersion" :product="data.product" resolve-on-mount/><InventoryProductEditAction v-if="stocktakeEnabled" :product-id="Number(productId)" @saved="identityVersion++;load(productId,{syncFbpOnLoad:false});notifySaved()"/></div>
         <InventoryWorkflowPanel compact v-if="!directStocktake" ref="workflowPanel" :ledger="data" :order-id="orderId" :initial-action="initialAction" :initial-inbound-id="initialInboundId" @loaded="value=>workflow=value" @saved="load();notifySaved()" />
-        <InventoryFlowDiagram @saved="load(productId,{syncFbpOnLoad:false});notifySaved()" :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false"><template #records><el-popover trigger="click" width="420"><template #reference><el-button size="small">核对记录</el-button></template><div class="ledger-record-buttons"><el-button v-for="[tab,label] in recordTabs" :key="tab" size="small" @click="openRecords(tab)">{{label}}</el-button></div></el-popover>    <el-popover v-if="!orderOverview && !inventoryOnly" trigger="click" width="500"><template #reference><el-button size="small">切换商品</el-button></template>
+        <BundleDetails v-if="Number(data.product.component_count)>0" :key="`${productId}-${identityVersion}`" :product-id="productId"/>
+        <InventoryFlowDiagram v-if="!Number(data.product.component_count)" @saved="load(productId,{syncFbpOnLoad:false});notifySaved()" :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false"><template #records><el-popover trigger="click" width="420"><template #reference><el-button size="small">核对记录</el-button></template><div class="ledger-record-buttons"><el-button v-for="[tab,label] in recordTabs" :key="tab" size="small" @click="openRecords(tab)">{{label}}</el-button></div></el-popover>    <el-popover v-if="!orderOverview && !inventoryOnly" trigger="click" width="500"><template #reference><el-button size="small">切换商品</el-button></template>
       <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
         <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
         <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />
@@ -626,7 +631,8 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
       <template #footer><el-button :disabled="saving" @click="historyLinkVisible = false">取消</el-button><el-button type="primary" :loading="saving" :disabled="!historySelection.length || !selectedHistoryBatch || selectedHistoryQuantity > selectedHistoryBatch.available_history_quantity" @click="saveHistoryLink">确认关联所选订单</el-button></template>
     </el-dialog>
   </el-dialog>
-  <el-dialog v-if="formVisible || (directStocktake && visible)" v-model="stockFormVisible" :title="directStocktake ? labels.stocktake : labels[form.action_type]" width="min(720px, 94vw)" append-to-body :close-on-click-modal="false" :before-close="closeForm" class="stocktake-form-dialog">
+  <BundleDialog v-if="bundleUpdateVisible" v-model="bundleUpdateVisible" :product-id="productId" editable @saved="load(productId,{syncFbpOnLoad:false});notifySaved()"/>
+  <el-dialog v-if="(formVisible || (directStocktake && visible)) && !(Number(data?.product?.component_count)>0)" v-model="stockFormVisible" :title="directStocktake ? labels.stocktake : labels[form.action_type]" width="min(720px, 94vw)" append-to-body :close-on-click-modal="false" :before-close="closeForm" class="stocktake-form-dialog">
       <div v-if="loading" v-loading="loading" class="stocktake-loading">正在读取库存与待发订单数量…</div>
       <el-alert v-else-if="loadError" type="error" :closable="false" title="库存信息读取失败" :description="loadError" />
       <template v-else-if="data">

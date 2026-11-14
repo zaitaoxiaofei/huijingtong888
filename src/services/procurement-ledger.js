@@ -392,6 +392,7 @@ export function createProcurementLedgerService(hooks) {
     const movementTenantSql = ` AND ${inventoryTenantSql(scope)}`;
     const movementArgs = [productId];
     const products = await run(`SELECT id, name, code, inventory_number, stock_unit, is_consumable, purchase_cost,
+      (SELECT COUNT(*) FROM product_components c WHERE c.product_id=products.id AND ${inventoryTenantSql(scope,'c')}) AS component_count,
       CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
       FROM products WHERE id = ? AND active = 1${movementTenantSql}`, movementArgs);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
@@ -528,6 +529,7 @@ export function createProcurementLedgerService(hooks) {
       await run('SELECT id FROM procurement_requests WHERE product_id = ? FOR UPDATE', [productId]);
       await run('SELECT id FROM procurement_order_allocations WHERE product_id = ? FOR UPDATE', [productId]);
       const before = await snapshot(productId, run, tenantId);
+      if(body.action_type==='stocktake'&&Number(before.product.component_count)>0)throw Object.assign(new Error('套装不能单独更新父库存，请打开套装明细并一次填写所有子库存的实物总数'),{statusCode:409});
       const plan = planLedgerAction(before, body);
       for (const row of plan.receipts || []) await assertEvidenceOwnership(row.receipt_images_json, scope.id, run);
       if (plan.allocations?.length) {
