@@ -1,3 +1,4 @@
+import { assertInventoryPackage } from "../src/shared/inventory-package-defaults.js";
 import { normalizeVehicleBrand, vehicleBrandAliases, VEHICLE_BRAND_CHINESE } from "../src/shared/vehicle-brand.js";
 import { hasPermission } from "../src/shared/permissions.js";
 import test from "node:test";
@@ -13,7 +14,7 @@ const vehicleCatalogTenantPredicate = new Function(`${predicateSource}; return v
 const namingSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8").match(/export function normalizeStructuredNamingMysql\(body = \{\}\) \{[\s\S]*?\n\}/)[0].replace("export ", "");
 const operator = { personId: 7, name: "录入员", role: "operator", tenant: { id: 1, slug: "default" } };
 const manager = { personId: 8, name: "库存经理", role: "manager", tenant: { id: 1, slug: "default" } };
-const body = () => ({ request_key: "request-a", name: "旧名称", owner_person_id: 7, image_url: "https://example.com/product.png", purchase_url: "https://example.com/buy", composition_items: [{ component_product_id: 22, quantity: 2 }], structured_naming: { category: "门槛贴纸", accessory: "普通款", colors: ["黑色"], materials: ["PVC"], quantity: 2 } });
+const body = () => ({ package_weight_g: 100, length_cm: 30, width_cm: 20, height_cm: 10, request_key: "request-a", name: "旧名称", owner_person_id: 7, image_url: "https://example.com/product.png", purchase_url: "https://example.com/buy", composition_items: [{ component_product_id: 22, quantity: 2 }], structured_naming: { category: "门槛贴纸", accessory: "普通款", colors: ["黑色"], materials: ["PVC"], quantity: 2 } });
 
 function fixture() {
   let state = { requests: [], products: [], notices:[],options: [{ type: "accessory", value: "普通款", status: "active" }, { type: "color", value: "黑色", status: "active" }, { type: "material", value: "PVC", status: "active" }] };
@@ -73,7 +74,7 @@ function fixture() {
     state.products.push(product);
     return { id: product.id };
   }
-  const context = vm.createContext({ normalizeVehicleBrand, vehicleBrandAliases, VEHICLE_BRAND_CHINESE,
+  const context = vm.createContext({ assertInventoryPackage, normalizeVehicleBrand, vehicleBrandAliases, VEHICLE_BRAND_CHINESE,
     hasPermission, authorizeBusinessTaskSession:async session=>revoked?{...session,role:'operations',roles:['operations'],tenant:{...session.tenant,role:'member'}}:session,writeInventoryProductRequestNotices:async(c,t,row)=>{if(failNotice)throw Error('模拟通知保存失败');state.notices.push({id:row.id,status:row.status,revision:row.revision});return[{personId:row.applicant_id}];},publishInventoryProductRequestNotices:(tenant,targets)=>emitted.push({tenant,targets}),randomUUID: () => "generated-key", mysqlQuery: query, mysqlExecute: execute,
     inventoryTenantSql, vehicleCatalogTenantPredicate, resolveInventoryTenantScope: async () => ({ id: 1, isDefault: true }),
     assertInventoryMember: async () => {}, assertInventoryReferences: async () => {}, assertInventoryRecord: async () => {},
@@ -240,4 +241,12 @@ test('notification failure rolls back creation, and repeated submission or appro
 });
 test('a revoked reviewer cannot approve their own pending request with an old manager session',async()=>{
  const f=fixture();await f.api.submitInventoryProductRequest(body(),manager);f.revoke();await assert.rejects(f.api.reviewInventoryProductRequest(1,{action:'approve',revision:1},manager),/仅库存审批人员/);assert.equal(f.state().requests[0].status,'pending');assert.equal(f.state().products.length,0);
+});
+
+
+test("zero weight inventory applications are rejected before saving a pending request", async () => {
+  const f = fixture();
+  await assert.rejects(f.api.submitInventoryProductRequest({ ...body(), package_weight_g: 0 }, operator), /包装克重/);
+  assert.equal(f.state().requests.length, 0);
+  assert.equal(f.state().products.length, 0);
 });

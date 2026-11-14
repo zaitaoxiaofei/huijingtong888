@@ -1,4 +1,5 @@
 <script setup>
+import { assertInventoryPackage, defaultInventoryPackagingFee } from "../../../../src/shared/inventory-package-defaults.js";
 import ProductProfitRecalculationDialog from './ProductProfitRecalculationDialog.vue';
 import { productProfitParameterChanges } from '../../../../src/shared/product-profit-parameters.js';
 import { normalizeVehicleBrand, vehicleBrandAliases } from "../../../../src/shared/vehicle-brand.js";
@@ -1320,21 +1321,8 @@ function resolvedReturnRate(row) {
   return value > 1 ? value / 100 : value;
 }
 
-function resolvePackagingAmount(row) {
-  const sale = Number(row?.sale_price_rmb || row?.air_sale_price_rmb || 0);
-  if (sale > 0) return sale;
-  const listed = Number(row?.listing_price_rub || 0);
-  const exchangeRate = Number(row?.exchange_rate || 0);
-  if (listed > 0 && exchangeRate > 0) return listed / exchangeRate;
-  return Number(row?.purchase_cost || 0);
-}
-
 function getDefaultPackagingFee(row) {
-  const weight = Number(row?.package_weight_g || 0);
-  const amount = resolvePackagingAmount(row);
-  if (weight < 100 && amount < 50) return 0.3;
-  if (weight < 500 && amount < 100) return 0.5;
-  return 1.0;
+  return defaultInventoryPackagingFee(row);
 }
 
 function syncPackagingFee(row = form) {
@@ -1534,6 +1522,15 @@ function closeDialog() {
 async function submitDialog(options = {}) {
   if (!formRef.value) return;
   form.name = generatedProductName.value || form.name;
+  try {
+    assertInventoryPackage({ ...form, product_type: isInventoryTarget.value ? "main" : form.product_type });
+  } catch (error) {
+    await selectMobileSection('measure');
+    ElMessage.warning(error.message);
+    await nextTick();
+    formRef.value.$el.querySelector(`[data-package-field="${error.field}"] input`)?.focus();
+    return;
+  }
   try {
     await formRef.value.validate();
   } catch (invalidFields) {
@@ -1962,22 +1959,22 @@ function submitAndCreateDraft() {
                 </el-form-item>
               </el-col>
               <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
-                <el-form-item label="长(cm)">
+                <el-form-item label="长(cm)" data-package-field="length_cm">
                   <el-input-number v-model="form.length_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
               <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
-                <el-form-item label="宽(cm)">
+                <el-form-item label="宽(cm)" data-package-field="width_cm">
                   <el-input-number v-model="form.width_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
               <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
-                <el-form-item label="高(cm)">
+                <el-form-item label="高(cm)" data-package-field="height_cm">
                   <el-input-number v-model="form.height_cm" :min="0" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
               <el-col class="mobile-packaging-field" v-show="showMobileSection('measure')" :span="6">
-                <el-form-item label="重量(g)">
+                <el-form-item label="重量(g)" data-package-field="package_weight_g">
                   <el-input-number v-model="form.package_weight_g" :min="0" :precision="0" :step="10" controls-position="right" />
                 </el-form-item>
               </el-col>

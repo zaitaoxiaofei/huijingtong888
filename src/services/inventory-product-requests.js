@@ -1,4 +1,5 @@
 import {authorizeBusinessTaskSession} from './business-task-tenant.js';
+import {assertInventoryPackage} from '../shared/inventory-package-defaults.js';
 import {writeInventoryProductRequestNotices,publishInventoryProductRequestNotices} from './inventory-product-request-notices.js';
 import { hasPermission } from "../shared/permissions.js";
 import { randomUUID } from "node:crypto";
@@ -71,6 +72,7 @@ export function normalizeInventoryRequestPayload(body, session) {
   payload.name = naming.name;
   payload.product_type = "main";
   payload.selection_status = "listed";
+  assertInventoryPackage(payload);
   payload.created_by_person_id = applicantId(session);
   return { payload, naming };
 }
