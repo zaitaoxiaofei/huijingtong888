@@ -4,6 +4,7 @@ import MarketplaceBadge from "../../admin/components/MarketplaceBadge.vue";
 import { computed, defineAsyncComponent, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
+import {PROCUREMENT_CANCELLATION_CAUSES} from '../../../src/shared/procurement-demand-cancellation.js';
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
@@ -317,7 +318,7 @@ function isFbpOrder(row) {
 function procurementActionLabel(row) {
   const coverage = row.procurement_coverage;
   if (coverage?.quantity_needs_review) return '已采购 · 数量待核';
-  if (coverage?.cancelled_purchase_quantity > 0) return `仍缺 ${coverage.shortage_quantity} · 已取消采购 ${coverage.cancelled_purchase_quantity}`;
+  if (coverage?.cancelled_purchase_quantity > 0) return coverage.actionable_shortage_quantity > 0 ? `待采购（缺 ${coverage.actionable_shortage_quantity}；人工处理 ${coverage.cancelled_purchase_quantity}）` : '已人工处理 · 取消采购';
   if (coverage?.shortage_quantity > 0) return `待采购（缺 ${coverage.shortage_quantity}）`;
   if (coverage?.incoming_quantity > 0) return '采购在途';
   if (coverage?.needs_fulfillment) return '账面可覆盖';
@@ -347,7 +348,13 @@ function procurementTimeText(row) {
 function procurementDateText(row) {
   return shanghaiDateText(row.procurementState.latestPurchaseAt, { assumeUtcWhenNaive: true }).replaceAll('-', '/');
 }
-function collaborationNote(row) { return String(row.mark_note || '').trim(); }
+function collaborationNote(row) {
+  const saved = String(row.mark_note || '').trim();
+  if (saved) return saved;
+  const notes = (row.procurement_coverage?.items || []).filter(item => item.cancelled_purchase_quantity > 0 && item.cancellation)
+    .map(item => `取消采购：${PROCUREMENT_CANCELLATION_CAUSES[item.cancellation.cause] || '人工处理'}${item.cancellation.note ? '；' + item.cancellation.note : ''}`);
+  return [...new Set(notes)].join('\n');
+}
 function canEditCollaborationNote(row) {
   return props.canManageOrderNotes || props.canEditProcurementNotes && !row.inventory_refresh_pending && !isFbpOrder(row)
     && !row.procurement_coverage?.entered_transport && row.procurement_coverage?.needs_fulfillment
@@ -896,7 +903,7 @@ function canEditCollaborationNote(row) {
             <div v-if="row.procurement_coverage && !isFbpOrder(row)" class="orders-coverage-summary">
 
 
-              <small v-if="row.procurement_coverage.cancelled_purchase_quantity > 0">已取消采购 {{ row.procurement_coverage.cancelled_purchase_quantity }} 件，订单仍缺货；请在采购需求明细核对替代处理或恢复采购。</small>
+              <small v-if="row.procurement_coverage.cancelled_purchase_quantity > 0">已取消采购 {{ row.procurement_coverage.cancelled_purchase_quantity }} 件，已转订单人工处理，不再进入待采购；处理原因见采购明细。</small>
               <small v-if="row.procurement_coverage.inventory_needs_review">账面差额待核，不计入本次采购缺口。</small>
               <small v-if="row.procurement_coverage.quantity_needs_review">已采购但数量待核，请先核对采购凭据，避免重复购买。</small>
               <small v-if="row.procurement_coverage.missing_amount">采购金额待补，成本记录尚不完整。</small>

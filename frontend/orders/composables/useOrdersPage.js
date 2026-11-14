@@ -467,11 +467,22 @@ export function useOrdersPage() {
       void loadPageInventory(vm.rows, ordersLoadToken.value, '');
     }
   };
+  let lastProcurementHandling='';
+  const handleProcurementHandled=event=>{
+    const scope=currentApiCacheScope();
+    if(event.detail?.scope!==scope)return;
+    const key=`${scope}:${event.detail?.event_id}`;
+    if(key===lastProcurementHandling)return;
+    lastProcurementHandling=key;
+    void loadOrders({forceRefresh:true,includeCounts:true,silent:true});
+  };
+  window.addEventListener('erp:procurement-handled',handleProcurementHandled);
   window.addEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
   window.addEventListener("storage", handleAuthStorageChange);
   window.addEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   onScopeDispose(() => {
     abortOrderReads();
+    window.removeEventListener('erp:procurement-handled',handleProcurementHandled);
     window.removeEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
     window.removeEventListener("storage", handleAuthStorageChange);
     window.removeEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);

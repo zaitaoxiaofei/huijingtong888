@@ -4,7 +4,7 @@ import { canAccessPage, pagePermission, hasPermission, isPlatformAdmin, needsMem
 import { House, ListChecks, ChartNoAxesCombined, ChartColumn, Store, Sparkles, Package, Warehouse, ShoppingCart, TriangleAlert, Wrench, Settings, MessageCircle } from "lucide-vue-next";
 
 export const navigationMenus = [
-  { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
+  { key: "dashboard", label: "经营首页", route: "/dashboard", icon: House },
   { key: "team-plan", label: "任务系统", route: "/team-plan", icon: ListChecks },
   {
     key: "finance",
@@ -30,7 +30,7 @@ export const navigationMenus = [
   },
   {
     key: "products",
-    label: "商品管理",
+    label: "运营管理",
     icon: Store,
     children: [
       { key: "collector-box", label: "采集箱", route: "/collector-box" },
@@ -59,7 +59,7 @@ export const navigationMenus = [
   },
   {
     key: "orders",
-    label: "订单",
+    label: "订单中心",
     icon: Package,
     children: [
       { key: "orders", label: "订单处理", route: "/orders" },
@@ -70,7 +70,7 @@ export const navigationMenus = [
   },
   {
     key: "inventory",
-    label: "库存",
+    label: "库存中心",
     icon: Warehouse,
     children: [
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
@@ -81,7 +81,7 @@ export const navigationMenus = [
   },
   {
     key: "procurement",
-    label: "采购",
+    label: "采购中心",
     icon: ShoppingCart,
     children: [
       { key: "procurement-workspace", label: "采购工作台", route: "/procurement/workspace" },
@@ -104,7 +104,7 @@ export const navigationMenus = [
   },
   {
     key: "tools",
-    label: "工具",
+    label: "常用工具",
     icon: Wrench,
     children: [
       { key: "tools-profit-calculator", label: "利润计算器", route: "/tools/profit-calculator" },

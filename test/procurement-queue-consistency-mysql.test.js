@@ -30,6 +30,8 @@ test('required workspace and order queue share nested physical demand, selection
   assert.equal(full.get(11).items[0].product_id,202);assert.equal(full.get(11).items[0].quantity,6);
   assert.equal(full.get(11).shortage_quantity,2);assert.equal(full.get(11).incoming_quantity,2);
   assert.equal(full.get(12).shortage_quantity,1);assert.equal(full.get(12).cancelled_purchase_quantity,1);assert.equal(full.get(12).actionable_shortage_quantity,0);
+  const compact=await loadOrderProcurementCoverage(q,'',{tenantId:2,fresh:true,queuesOnly:true});
+  assert.deepEqual(compact.queue_ids.pending_purchase,[11],'handled cancellation is excluded before queue compaction');
   assert.equal(full.has(13),false);
   const small=await loadOrderProcurementCoverage(q,'',{tenantId:2,productId:202,fresh:true});
   assert.equal(small.get(11).shortage_quantity,full.get(11).shortage_quantity,'leaf scoped read includes every ancestor root');
@@ -40,7 +42,7 @@ test('required workspace and order queue share nested physical demand, selection
   assert.ok(!ids.includes(204)&&!ids.includes(205),'unused drafts and foreign stock stay excluded');
   const states=await service.workspaceStates(ids,2,{fresh:true});
   const page=inventoryWorkspacePage(products.map(p=>({...p,workflow:states.find(s=>s.product_id===p.product_id)})),{task:'required'});
-  assert.deepEqual(page.rows.map(p=>p.product_id).sort(),[202,203]);
+  assert.deepEqual(page.rows.map(p=>p.product_id).sort(),[202]);
   const leaf=states.find(s=>s.product_id===202),cancelled=states.find(s=>s.product_id===203);
   assert.equal(leaf.supply_plan.required_fbs,full.get(11).shortage_quantity);
   assert.equal(cancelled.supply_plan.cancelled_fbs,1);assert.equal(cancelled.supply_plan.required_purchase,0);

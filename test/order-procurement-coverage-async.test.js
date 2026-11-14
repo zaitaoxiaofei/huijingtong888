@@ -33,3 +33,14 @@ test('a production-sized reconciliation preserves map properties within the boun
   const {isDeepStrictEqual}=await import('node:util');
   assert.equal(isDeepStrictEqual(await calculateOrderProcurementCoverageAsync(data),calculateOrderProcurementCoverage(data)),true);
 });
+
+test('cancelled manual handling leaves both queues on small and worker paths, without changing factual shortage',async()=>{
+ for(const size of [5,1000]){
+  const data=input(size);data.cancellationEvents=[{id:1,product_id:2,detail_json:{operation:'cancel',cause:'no_shipment',note:'',sources:[{order_item_id:2,order_id:2,quantity:1}]}}];
+  data.stocks=[];
+  const full=await calculateOrderProcurementCoverageAsync(data);
+  assert.equal(full.get(2).shortage_quantity,1);assert.equal(full.get(2).actionable_shortage_quantity,0);
+  const compact=await calculateOrderProcurementCoverageAsync({...data,queuesOnly:true});
+  assert.ok(!compact.queue_ids.pending_purchase.includes(2));assert.ok(compact.queue_ids.pending_purchase.includes(3));
+ }
+});
