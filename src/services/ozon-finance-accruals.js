@@ -59,7 +59,7 @@ export function ozonAccrualCategory(typeName) {
   if (["RfbsGlobalDelivery", "RfbsGlobalIntermediaryService", "RfbsGlobalPlatformConnectionService", "RfbsGlobalAgentFee", "RfbsServiceFee",
     "InternationalLogisticDelta", "OzonGlobalLogisticsDelivery"].includes(typeName)) return "international_transport";
   if (["LastMile", "LastMileCourier", "LastMilePickUpPoint", "Logistic", "Shipment", "RfbsDomesticDelivery", "DeliveryToHandoverPlaceByOzon"].includes(typeName)) return "platform_delivery";
-  if (["BackwardShipment", "ReturnFlowLogistic", "ClientReturn", "SellerReturns", "RfbsEasyReturn"].includes(typeName)) return "aftersale_loss";
+  if (["BackwardShipment", "ReturnFlowLogistic", "ClientReturn", "SellerReturns", "RfbsEasyReturn", "ItemCompensation"].includes(typeName)) return "aftersale_loss";
   return "other";
 }
 
@@ -139,7 +139,7 @@ export function normalizeOzonFinanceAccrual(accrual, { types, sourceEndpoint = O
       if (!type) issues.push({ code: "FEE_TYPE_UNKNOWN", path, type_id: typeId || String(value.type_id) });
       const money = readMoney(value.accrued, `${path}.accrued`);
       const category = type ? ozonAccrualCategory(type.name) : "other";
-      if (money?.scaled > 0n && category === "other") issues.push({ code: "POSITIVE_ADJUSTMENT_UNCLASSIFIED", path: `${path}.accrued`, type_id: typeId || null });
+      if (money?.scaled > 0n && category === "other" && type?.name!=='PayPerClick') issues.push({ code: "POSITIVE_ADJUSTMENT_UNCLASSIFIED", path: `${path}.accrued`, type_id: typeId || null });
       addComponent(money, category, `${group}:${typeId || "unknown"}:${sku}`, {
         type_id: typeId || null, name: type?.name || "UnknownAccrualType", description: type?.description || "", source_group: group, sku, paths: [`${path}.accrued`] });
       return;

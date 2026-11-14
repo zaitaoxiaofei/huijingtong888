@@ -234,30 +234,30 @@ function buildDetailMetricCards(summary, formatters) {
       label: "利润",
       lines: [
         {
-          label: "实际利润",
-          value: summary.actualProfitReady ? formatMoney(summary.actualProfit) : "--"
+          label: summary.provisional?"测算利润（含待确认项）":"实际利润",
+          value: summary.actualProfitReady||summary.provisional ? formatMoney(summary.actualProfit) : "--"
         },
         {
           label: "预估利润",
           value: formatMoney(summary.estimatedProfit)
         }
       ],
-      sub: summary.actualProfitReady ? `差异 ${formatSignedMoney(summary.profitDiff)}` : "真实利润待 Ozon 财务结算后计算",
+      sub: summary.provisional?summary.qualityNote:summary.actualProfitReady ? `差异 ${formatSignedMoney(summary.profitDiff)}` : "真实利润待 Ozon 财务结算后计算",
       tone: summary.actualProfit < 0 ? "danger" : "default"
     },
     {
-      label: "实际利润率",
-      value: summary.actualProfitReady ? formatPercent(summary.actualMargin) : "--",
+      label: summary.provisional?"测算利润率":"实际利润率",
+      value: summary.actualProfitReady||summary.provisional ? formatPercent(summary.actualMargin) : "--",
       sub: "实际利润 / 销售额",
       tone: summary.actualMargin < 0 ? "danger" : "strong"
     },
     {
       label: "财务匹配状态",
-      value: summary.actualProfitReady ? "已结算" : summary.financeRows ? "已匹配" : "未匹配",
-      sub: summary.financeRows
+      value: summary.provisional?"仍有待确认项":summary.actualProfitReady ? "已结算" : summary.financeRows ? "已匹配" : "未匹配",
+      sub: summary.provisional?summary.qualityNote:summary.financeRows
         ? `已识别 ${summary.financeRows} 类 Ozon 真实费用${summary.actualProfitReady ? "" : "，利润待结算"}`
         : "未匹配到 Ozon 真实费用",
-      tone: summary.actualProfitReady || summary.financeRows ? "success" : "warning"
+      tone: summary.provisional?'warning':summary.actualProfitReady || summary.financeRows ? "success" : "warning"
     }
   ];
 }
@@ -297,6 +297,7 @@ export function buildOrderProfitDetail(order = {}, items = [], finance = [], sna
       actualMargin: snapshot.summary.actualProfitRate ?? snapshot.actual_profit_rate,
       hasActual: Number(snapshot.finance_rows || snapshot.summary.financeRows || 0) > 0,
       actualProfitReady: Boolean(snapshot.summary.actualProfitReady || snapshot.actual_profit_ready),
+      provisional:Boolean(snapshot.summary.provisional),qualityNote:snapshot.summary.qualityNote||'',settlementQuality:snapshot.summary.settlementQuality||snapshot.settlement_quality||'official',
       financeRows: Number(snapshot.finance_rows || snapshot.summary.financeRows || 0),
       estimatedCostTotal: Number(snapshot.summary.estimatedCostTotal || snapshot.estimated_cost_total_cny || 0),
       actualCostTotal: snapshot.summary.actualCostTotal ?? snapshot.actual_cost_total_cny

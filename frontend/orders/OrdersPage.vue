@@ -404,7 +404,7 @@ const detailLossCostTotal = computed(() => {
 });
 const detailFinalLoss = computed(() => {
   const summary = detailProfit.value?.summary || {};
-  const profit = summary.actualProfitReady && summary.actualProfit !== null && summary.actualProfit !== undefined
+  const profit = (summary.actualProfitReady || summary.provisional) && summary.actualProfit !== null && summary.actualProfit !== undefined
     ? Number(summary.actualProfit || 0)
     : Number(summary.estimatedProfit || 0);
   return Math.max(0, -profit);
@@ -421,7 +421,7 @@ const detailProfitItemCards = computed(() => detailItems.value.map((item, index)
   actualProfit: item.settlement_state === "accrued" && item.profit_status === "accrued"
     ? Number(item.net_profit_cny ?? item.actual_profit ?? 0)
     : null,
-  statusText: item.settlement_state === "accrued" && item.profit_status === "accrued" ? "已结算" : "预估中"
+  statusText: detailProfit.value.summary.provisional?"含待确认项":item.settlement_state === "accrued" && item.profit_status === "accrued" ? "已结算" : "预估中"
 })));
 const selectedInventoryProduct = computed(() => (
   inventoryOptions.products.find((row) => Number(row.id) === Number(bindForm.productId)) || null
@@ -3191,7 +3191,7 @@ onBeforeUnmount(() => {
                   <strong :class="moneyValueClass(card.estimatedProfit)">CNY {{ formatMoney(card.estimatedProfit) }}</strong>
                 </div>
                 <div>
-                  <span>实际利润</span>
+                  <span>{{ detailProfit.summary.provisional ? '测算利润' : '实际利润' }}</span>
                   <strong v-if="card.actualProfit !== null" :class="moneyValueClass(card.actualProfit)">CNY {{ formatMoney(card.actualProfit) }}</strong>
                   <strong v-else>--</strong>
                 </div>
@@ -3230,7 +3230,7 @@ onBeforeUnmount(() => {
             </div>
             <div>
               <strong>真实利润</strong>
-              <span>真实利润优先使用 Ozon 已结算费用；Ozon 未出账前显示 --，避免误导判断。</span>
+              <span>{{ detailProfit.summary.provisional ? '测算包含待确认项；估算收单费、退款货值等依据见各项明细，尚未作为完全结算利润。' : '真实利润优先使用 Ozon 已结算费用；Ozon 未出账前显示 --，避免误导判断。' }}</span>
             </div>
           </div>
 
@@ -3274,7 +3274,7 @@ onBeforeUnmount(() => {
                 <strong v-else>CNY {{ formatMoney(row.estimated) }}</strong>
               </template>
             </el-table-column>
-            <el-table-column label="真实金额" width="140" align="right">
+            <el-table-column :label="detailProfit.summary.provisional ? '测算金额' : '真实金额'" width="140" align="right">
               <template #default="{ row }">
                 <span v-if="row.actualText">{{ row.actualText }}</span>
                 <strong v-else-if="row.actual !== null && row.actual !== undefined">CNY {{ formatMoney(row.actual) }}</strong>

@@ -103,7 +103,7 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
       throw Object.assign(new Error('订单利润或数量已变化，请重新预览'), { code: 'ORDER_PROFIT_PREVIEW_STALE', statusCode: 409 });
     }
     const actualReady = (before.profit_status === "accrued" && before.settlement_state === "accrued")
-      || (options.legacyDailyUpgrade && (Number(before.actual_profit) !== 0 || Number(before.is_locked) === 1));
+      || ((options.legacyDailyUpgrade||options.reviewedDailyUpgrade) && (Number(before.actual_profit) !== 0 || Number(before.is_locked) === 1));
     const state = await ensureOrderProfitCalculationState(connection, {
       tenantId: before.tenant_key, orderId: before.order_id, orderItemId: Number(orderItemId),
       baselineEstimate: before,
@@ -120,6 +120,11 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
     if (expectedVersion && expectedVersion !== version) throw Object.assign(new Error('利润公式版本已变化，停止写入并重新计算'), {
       code: 'ORDER_PROFIT_FORMULA_MISMATCH', statusCode: 409
     });
+    if(options.reviewedDailyUpgrade){
+      if(options.layer!=='actual'||options.source!=='ozon_finance_reviewed_daily'||!['V1','V5','V6'].includes(version)||options.legacyDailyUpgrade)
+        throw Object.assign(new Error('已核对账单升级仅允许指定V1/V5实际利润迁移到V6'),{code:'REVIEWED_DAILY_UPGRADE_INVALID'});
+      if(version!=='V6'){await db.execute("UPDATE order_profit_calc_state SET formula_version='V6' WHERE tenant_key=? AND order_item_id=? AND formula_version=?",[before.tenant_key,Number(orderItemId),version]);version='V6';}
+    }
     if (options.legacyDailyUpgrade) {
       if (options.layer !== "actual" || options.source !== "ozon_finance_legacy_daily" || !["V1", "V5"].includes(version)) {
         throw Object.assign(new Error("旧账单兼容升级仅允许 V1 实际利润迁移到 V5"), { code: "LEGACY_DAILY_UPGRADE_INVALID" });

@@ -204,7 +204,7 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
   const committedLegacyDaily = !terminalNoOriginalRevenue && rows.length > 0 && rows.every(item => {
     const costs = ["purchase_cost_cny", "domestic_shipping_cny", "international_shipping_cny", "packaging_cost_cny", "commission_fee_cny", "ozon_service_fee_cny", "return_loss_cny", "advertising_cost_cny", "other_fee_cny"];
     const required = ["sale_amount_cny", "actual_profit", "net_profit_cny", ...costs];
-    return item.lock_reason === "finance_accrued_legacy_daily" && item.settlement_state === "accrued" && item.profit_status === "accrued"
+    return ["finance_accrued_legacy_daily","finance_reviewed_daily","finance_reviewed_daily_provisional"].includes(item.lock_reason) && ["accrued","reviewed_provisional"].includes(item.settlement_state) && item.profit_status === item.settlement_state
       && required.every(key => item[key] != null && item[key] !== "" && Number.isFinite(Number(item[key])))
       && Math.abs(Number(item.actual_profit) - Number(item.net_profit_cny)) < 0.005
       && Math.abs(Number(item.sale_amount_cny) - costs.reduce((total, key) => total + Number(item[key]), 0) - Number(item.net_profit_cny)) < 0.011;
@@ -304,7 +304,15 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
     return acc;
   }, {});
   if (committedLegacyDaily) Object.assign(financeTotals, {commission: actual.commission, collecting_fee: actual.collecting, platform_delivery: actual.international, international_transport: 0, other: actual.service, aftersale_loss: actual.aftersale});
-  const financeMatchStatus = actualProfitReady || terminalTotals ? "settled" : financeRows.length ? "matched" : "unmatched";
+  const reviewed=order.reviewed_settlement_metadata;
+  const provisional=Boolean(rows.some(i=>i.lock_reason==='finance_reviewed_daily_provisional')||reviewed&&reviewed.quality!=='official');
+  const qualityNote=provisional?[
+    reviewed?.quality?.includes('estimated_acquiring')?'收单费按销售额5%估算，等待官方金额替换':'',
+    reviewed?.quality?.includes('refund_inventory_pending')?'已退款，货值回收入库尚未确认，暂保留历史采购成本':'',
+    !reviewed||reviewed.quality==='review_metadata_pending'?'核对依据尚未完整读取':''
+  ].filter(Boolean).join('；'):'';
+  if(provisional){for(const row of detailRows){if(row.key==='profit'||row.key==='costTotal')row.note=qualityNote;if(row.key==='collecting'&&reviewed?.quality?.includes('estimated_acquiring')){row.label='收单费（按5%估算）';row.note=qualityNote;}}}
+  const financeMatchStatus = provisional?'provisional':actualProfitReady || terminalTotals ? "settled" : financeRows.length ? "matched" : "unmatched";
   return {
     order_id: Number(order.id),
     shop_id: Number(order.shop_id),
@@ -319,7 +327,8 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
     actual_cost_total_cny: actualCostTotal,
     finance_match_status: financeMatchStatus,
     finance_rows: financeRows.length,
-    actual_profit_ready: actualProfitReady || terminalTotals ? 1 : 0,
+    actual_profit_ready: !provisional&&(actualProfitReady || terminalTotals) ? 1 : 0,
+    settlement_quality:reviewed?.quality||'official',
     summary: {
       saleAmount: sale,
       estimatedProfit,
@@ -328,7 +337,8 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
       actualProfitRate,
       actualCostTotal,
       financeRows: financeRows.length,
-      actualProfitReady: actualProfitReady || Boolean(terminalTotals),
+      actualProfitReady: !provisional&&(actualProfitReady || Boolean(terminalTotals)),
+      provisional,qualityNote,settlementQuality:reviewed?.quality||'official',
       financeMatchStatus
     },
     detailRows,
