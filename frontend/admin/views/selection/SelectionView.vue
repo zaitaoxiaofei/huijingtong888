@@ -1,4 +1,5 @@
 <script setup>
+import { defaultInventoryPackagingFee } from "../../../../src/shared/inventory-package-defaults.js";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -739,21 +740,8 @@ function resolvedReturnRate(row) {
   return value > 1 ? value / 100 : value;
 }
 
-function resolvePackagingAmount(row) {
-  const sale = Number(row?.sale_price_rmb || row?.air_sale_price_rmb || 0);
-  if (sale > 0) return sale;
-  const listed = Number(row?.listing_price_rub || 0);
-  const exchangeRate = Number(row?.exchange_rate || 0);
-  if (listed > 0 && exchangeRate > 0) return listed / exchangeRate;
-  return Number(row?.purchase_cost || 0);
-}
-
 function getDefaultPackagingFee(row) {
-  const weight = Number(row?.package_weight_g || 0);
-  const amount = resolvePackagingAmount(row);
-  if (weight < 100 && amount < 50) return 0.3;
-  if (weight < 500 && amount < 100) return 0.5;
-  return 1.0;
+  return defaultInventoryPackagingFee(row);
 }
 
 function syncPackagingFee(row = dialog.form) {

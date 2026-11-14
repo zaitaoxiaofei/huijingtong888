@@ -1,3 +1,4 @@
+import { assertInventoryPackage, defaultInventoryPackagingFee } from "../shared/inventory-package-defaults.js";
 import { productProfitParameterChanges } from "../shared/product-profit-parameters.js";
 import { scopedProductProfitRecalculation, preserveOrderEstimateParameters } from "./product-profit-recalculation.js";
 import { WB_REMOTE_WRITES_ENABLED } from "../shared/wb-capabilities.js";
@@ -14763,6 +14764,7 @@ export async function prepareInventoryProductCreationMysql() {
 }
 
 export async function createProductMysql(body = {}, transactionConnection = null, tenantId = "admin") {
+  assertInventoryPackage(body);
   await prepareInventoryProductCreationMysql();
   const structuredNaming = normalizeStructuredNamingMysql(body);
   const name = structuredNaming?.name || String(body.name || "").trim();
@@ -14858,7 +14860,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
       recommendShippingMysql(body),
       purchasePlan ? purchasePlan.unitPurchaseCost : Number(body.purchase_cost || 0),
       purchasePlan ? purchasePlan.unitDomesticShipping : Number(body.domestic_shipping || 0),
-      Number(body.handling_fee || 0),
+      body.handling_fee == null || body.handling_fee === "" ? defaultInventoryPackagingFee({ ...body, exchange_rate: exchangeRate }) : Number(body.handling_fee),
       Number(body.purchase_quantity || 1),
       Number(body.package_weight_g || 0),
       Number(body.length_cm || 30),
@@ -15141,6 +15143,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin", opti
   await withMysqlTransaction(async (connection) => {
   const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
   const lockedProduct=await assertInventoryRecord(scope, 'product', productId, run, { lock: true });
+  assertInventoryPackage({ ...lockedProduct, ...body });
   const personId=await auditActor(connection);
   const beforeIdentity=await readProductIdentity(run,scope,productId,lockedProduct);
   await assertInventoryReferences(scope, body, run);
