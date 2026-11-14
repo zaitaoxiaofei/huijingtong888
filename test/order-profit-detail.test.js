@@ -364,3 +364,19 @@ test("settled returned order preserves a legitimate zero actual freight", () => 
   assert.equal(rowByKey(frontend, "international").actual, 0);
   assert.equal(frontend.summary.actualProfit, -4);
 });
+
+test('committed legacy daily actuals render exact allocated costs without V1 bill fields', () => {
+  const row = {...items[0],lock_reason:'finance_accrued_legacy_daily'};
+  const raw = [{operation_id:'accrual_by_day:1',service_type:'SaleCommission',amount_cny:-3.11}];
+  const detail = buildOrderProfitDetailSnapshotPayload(order,[row],raw);
+  assert.equal(detail.actual_profit_ready,1);assert.equal(detail.actual_profit_cny,14.69);
+  for(const [key,value] of Object.entries({international:5.1,commission:3.11,collecting:0.48,service:0,aftersale:0,other:0}))assert.equal(detail.detailRows.find(x=>x.key===key).actual,value);
+  assert.equal(detail.estimated_profit_cny,12.42);
+  assert.equal(buildOrderProfitDetail(order,[row],raw,detail).summary.actualProfit,14.69);
+  // Parent bill amounts must not override committed per-posting allocations.
+  assert.equal(buildOrderProfitDetailSnapshotPayload(order,[row],[...raw,{service_type:'delivery_charge',amount_cny:-999}]).actual_profit_cny,14.69);
+});
+test('legacy daily display requires a complete reconciled committed projection',()=>{
+  const row={...items[0],lock_reason:'finance_accrued_legacy_daily'};
+  for(const patch of [{settlement_state:'pending'},{profit_status:'estimated'},{lock_reason:'finance_accrued'},{other_fee_cny:null},{net_profit_cny:99},{actual_profit:99}])assert.equal(buildOrderProfitDetailSnapshotPayload(order,[{...row,...patch}],[]).actual_profit_ready,0);
+});
