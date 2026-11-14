@@ -14,7 +14,7 @@ const validRoles = new Set(ROLE_DEFINITIONS.map(role => role.value));
 const business = ["orders.read", "orders.manage", "packing", "procurement", "procurement.request.submit", "inventory.read", "inventory.write", "operations", "analytics", "team"];
 const enterpriseAdministration = [...business, "inventory.review", "onboarding.edit", "finance"];
 const enterpriseFinancePages = new Set([
-  "/finance-center", "/finance/payroll", "/finance/inventory-capital", "/mobile/inventory-capital", "/mobile/finance", "/mobile/monthly-billing", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
+  "/finance-center", "/finance/company-statements", "/finance/payroll", "/finance/inventory-capital", "/mobile/inventory-capital", "/mobile/finance", "/mobile/monthly-billing", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
 ]);
 const rolePermissions = {
   admin: enterpriseAdministration, manager: [...business, "inventory.review", "onboarding.edit"], operator: business,

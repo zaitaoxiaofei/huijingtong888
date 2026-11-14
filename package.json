@@ -110,11 +110,14 @@
     "element-plus": "^2.11.5",
     "exceljs": "^4.4.0",
     "hls.js": "1.7.4",
+    "jszip": "^3.10.1",
     "lucide-vue-next": "^1.0.0",
     "mysql2": "3.23.1",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.6.205",
     "pinia": "^3.0.3",
     "playwright-core": "^1.55.0",
+    "saxes": "^5.0.1",
     "sharp": "0.35.5"
   },
   "devDependencies": {
