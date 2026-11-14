@@ -13,4 +13,12 @@ test('later official acquiring replaces provisional presentation without changin
  assert.equal(s.actual_profit_ready,1);assert.equal(s.actual_profit_cny,63);assert.equal(s.detailRows.find(r=>r.key==='collecting').label,'收单费');assert.equal(s.summary.provisional,false);
 });
 
+test('committed refunds retain zero and negative signed sales instead of restoring original item price',()=>{
+ for(const sale of [0,-0.01]){
+  const refunded={...item,sale_price:100,sale_amount_cny:sale,commission_fee_cny:0,other_fee_cny:0,actual_profit:sale-38,net_profit_cny:sale-38};
+  const s=buildOrderProfitDetailSnapshotPayload({id:1,status:'delivered',reviewed_settlement_metadata:{quality:'refund_inventory_pending'}},[refunded],[]);
+  assert.equal(s.sale_amount_cny,sale);assert.equal(s.actual_profit_cny,sale-38);assert.equal(s.actual_profit_ready,0);assert.equal(s.summary.provisional,true);
+ }
+});
+
 test('product profit stage does not mark provisional refunds as official even with complete bills',async()=>{const {readFile}=await import('node:fs/promises');const {runInNewContext}=await import('node:vm');const source=await readFile(new URL('../src/services/mysql-cutover.js',import.meta.url),'utf8');const code=source.match(/^function resolveProfitStageMysql\([^]*?^}/m)[0];const resolve=runInNewContext('('+code+')',{normalizeFinanceCompletenessMysql:()=>({complete:true,hasAnyFinance:true})});assert.equal(resolve({profit_status:'reviewed_provisional',settlement_state:'reviewed_provisional',is_locked:1}).actualReady,false);assert.equal(resolve({profit_status:'accrued',settlement_state:'accrued',is_locked:1}).actualReady,true);});

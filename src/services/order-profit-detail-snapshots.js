@@ -210,7 +210,9 @@ export function buildOrderProfitDetailSnapshotPayload(order = {}, items = [], fi
       && Math.abs(Number(item.sale_amount_cny) - costs.reduce((total, key) => total + Number(item[key]), 0) - Number(item.net_profit_cny)) < 0.011;
   });
   const actualProfitReady = committedLegacyDaily || (hasFinalFinanceBasis && rows.length > 0 && rows.every((item) => hasFinanceActualProfit(item)));
-  const sale = orderSaleAmount(rows, normalizedOrder, financeRows);
+  const sale = committedLegacyDaily
+    ? sumRows(rows, item => Number(item.sale_amount_cny))
+    : orderSaleAmount(rows, normalizedOrder, financeRows);
   const terminalTotals = terminalNoOriginalRevenue ? terminalComponentTotals(rows, normalizedOrder) : null;
   const estimated = {
     sale,
