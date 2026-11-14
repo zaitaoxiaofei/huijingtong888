@@ -176,7 +176,7 @@ function maskRepeatedAccruals(rows) {
  * This routine proves conversion/allocation only, not financial completeness.
  */
 export async function readOrderFxFinanceRows({ query, order, items = [], rateRubPerCny,
-  allocationRateRubPerCny = rateRubPerCny, classifyCategory = (row) => row.service_type || "other", currencyEvidence = null, lockForSettlement = false }) {
+  allocationRateRubPerCny = rateRubPerCny, classifyCategory = (row) => row.service_type || "other", currencyEvidence = null, lockForSettlement = false, convertRows = convertFxFinanceRows, legacySaleWeights = false, allowLegacyParentCollecting = false }) {
   const shopId = requiredShop(order);
   const rate = positiveRate(rateRubPerCny);
   const allocationRate = positiveRate(allocationRateRubPerCny);
@@ -185,9 +185,9 @@ export async function readOrderFxFinanceRows({ query, order, items = [], rateRub
   const parent = parentPostingNumber(order);
   const postings = [...new Set([posting, ...(parent && parent !== posting ? [parent] : [])])];
   const source = rowsOf(await query(`SELECT id, shop_id, operation_id, posting_number, order_number,
-    operation_type, operation_type_name, operation_date, service_type, service_name,
+    operation_type, operation_type_name, DATE_FORMAT(operation_date,'%Y-%m-%d %H:%i:%s') AS operation_date, service_type, service_name,
     amount, accruals_for_sale, sale_commission, delivery_charge, return_delivery_charge,
-    currency_code, raw_json
+    currency_code, raw_json, amount_cny, accruals_for_sale_cny, sale_commission_cny, delivery_charge_cny, return_delivery_charge_cny, exchange_rate
     FROM ozon_finance_items WHERE shop_id = ? AND posting_number IN (${postings.map(() => "?").join(",")})
     ORDER BY operation_date, id${lockForSettlement ? " FOR SHARE" : ""}`, [shopId, ...postings]));
   for (const row of source) {
@@ -200,26 +200,33 @@ export async function readOrderFxFinanceRows({ query, order, items = [], rateRub
   // accrual IDs are independent ledger events even when their fee names match.
   const parentOriginal = source.filter((row) => row.posting_number === parent && (hasDaily || !directKeys.has(key(row))));
   const applicable = [...directOriginal, ...parentOriginal];
-  if (hasDaily && applicable.some(row => !String(row.operation_id || "").startsWith("accrual_by_day:"))) return failure("FX_FINANCE_SOURCE_MIXED");
+  if (hasDaily && applicable.some(row => !String(row.operation_id || "").startsWith("accrual_by_day:"))) {
+    const legacy=applicable.filter(row=>!String(row.operation_id || "").startsWith("accrual_by_day:"));
+    const daily=applicable.filter(row=>String(row.operation_id || "").startsWith("accrual_by_day:"));
+    const day=row=>String(row.operation_date instanceof Date?row.operation_date.toISOString():row.operation_date).slice(0,10);
+    const legacyLast=legacy.map(day).sort().at(-1),dailyFirst=daily.map(day).sort()[0];
+    if(!allowLegacyParentCollecting || legacy.some(row=>row.posting_number!==parent || classifyCategory(row)!=='collecting_fee' || Number(row.accruals_for_sale)!==0)
+      || !/^\d{4}-\d{2}-\d{2}$/.test(legacyLast) || !(legacyLast<dailyFirst)) return failure("FX_FINANCE_SOURCE_MIXED");
+  }
   if (hasDaily) {
     const directEvents = new Set(directOriginal.map(row => String(row.operation_id)));
     if (parentOriginal.some(row => directEvents.has(String(row.operation_id)))) return failure("FX_FINANCE_ACCRUAL_SCOPE_CONFLICT");
   }
-  const direct = convertFxFinanceRows(directOriginal, { shopId, rateRubPerCny: rate, currencyEvidence });
+  const direct = await convertRows(directOriginal, { shopId, rateRubPerCny: rate, currencyEvidence });
   if (!direct.ok) return direct;
-  const allocated = convertFxFinanceRows(parentOriginal, { shopId, rateRubPerCny: rate, currencyEvidence });
+  const allocated = await convertRows(parentOriginal, { shopId, rateRubPerCny: rate, currencyEvidence });
   if (!allocated.ok) return allocated;
   let allocation = null;
   let parentRows = allocated.rows;
   if (parentRows.length) {
     const pattern = `${parent.replace(/[=%_]/g, (char) => `=${char}`)}-%`;
     const siblings = rowsOf(await query(`SELECT o.id AS order_id, o.shop_id, o.posting_number,
-      oi.id AS order_item_id, oi.ozon_sku, oi.quantity, oi.sale_price, raw.raw_json AS ozon_raw_json,
-      frozen.prices_json AS fx_prices_json
+      oi.id AS order_item_id, oi.ozon_sku, oi.quantity, oi.sale_price,
+      ${legacySaleWeights ? "NULL AS ozon_raw_json, NULL AS fx_prices_json" : "raw.raw_json AS ozon_raw_json, frozen.prices_json AS fx_prices_json"}
       FROM orders o JOIN shops owned_shop ON owned_shop.id = o.shop_id JOIN order_items oi ON oi.order_id = o.id
-      LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+      ${legacySaleWeights ? "" : `LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
       LEFT JOIN order_profit_fx_state frozen ON frozen.order_id = o.id
-        AND frozen.tenant_key = (CASE WHEN owned_shop.tenant_id > 0 THEN CAST(owned_shop.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
+        AND frozen.tenant_key = (CASE WHEN owned_shop.tenant_id > 0 THEN CAST(owned_shop.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci`}
       WHERE o.shop_id = ? AND (o.order_number = ? OR o.posting_number LIKE ? ESCAPE '=')
       ORDER BY o.id, oi.id${lockForSettlement ? " FOR SHARE" : ""}`, [shopId, parent, pattern]));
     const weights = new Map();
@@ -230,7 +237,8 @@ export async function readOrderFxFinanceRows({ query, order, items = [], rateRub
       if (!(siblingPosting === posting || siblingPosting.startsWith(`${parent}-`))) return failure("FX_FINANCE_PARENT_SCOPE_INVALID");
       if (seenItems.has(Number(row.order_item_id))) return failure("FX_FINANCE_PARENT_WEIGHT_DUPLICATE");
       seenItems.add(Number(row.order_item_id));
-      const weight = itemOriginalSale(row, siblingPosting === posting ? items : [], allocationRate);
+      const weight = legacySaleWeights ? (Number.isFinite(Number(row.sale_price)) && Number(row.sale_price)>0 && Number(row.quantity)>0 ? Number(row.sale_price)*Number(row.quantity) : null)
+        : itemOriginalSale(row, siblingPosting === posting ? items : [], allocationRate);
       if (weight === null) return failure("FX_FINANCE_PARENT_WEIGHT_UNKNOWN", [{ order_item_id: row.order_item_id, code: "FX_FINANCE_PARENT_WEIGHT_UNKNOWN" }]);
       weights.set(siblingPosting, (weights.get(siblingPosting) || 0) + weight);
     }
@@ -250,8 +258,29 @@ export async function readOrderFxFinanceRows({ query, order, items = [], rateRub
       if (!hasDaily && hasDirectSale) { result.accruals_for_sale = 0; result.accruals_for_sale_cny = 0; }
       return result;
     });
+    if (legacySaleWeights) {
+      // V5 makes the CNY cents of each parent category reconcile across all
+      // sibling postings, including a one-cent fee shared three ways.
+      const postings = [...weights.keys()].sort();
+      const categoryTotals = new Map();
+      for (const row of allocated.rows) { const category=classifyCategory(row); categoryTotals.set(category,(categoryTotals.get(category)||0)+row.amount_cny); }
+      for (const [category, value] of categoryTotals) {
+        const total=Math.round(value*100)/100;
+        let used=0,target=0;
+        for(let index=0;index<postings.length;index++){
+          const amount=index===postings.length-1?Math.round((total-used)*100)/100:Math.round(total*weights.get(postings[index])/totalWeight*100)/100;
+          used=Math.round((used+amount)*100)/100;if(postings[index]===posting)target=amount;
+        }
+        const categoryRows=parentRows.filter(row=>classifyCategory(row)===category);
+        const current=categoryRows.reduce((sum,row)=>sum+row.amount_cny,0);
+        if(categoryRows.length){const last=categoryRows.at(-1);last.amount_cny=round(last.amount_cny+target-current);last.fee_amount_cny=Math.max(0,-last.amount_cny);
+          if(category==='income')last.accruals_for_sale_cny=last.amount_cny;
+        }
+      }
+    }
     allocation = { parent_posting_number: parent, share, allocation_rate_rub_per_cny: allocationRate,
-      sibling_weights_cny: Object.fromEntries(weights), income_from_parent: hasDaily || !hasDirectSale };
+      sibling_weights_cny: Object.fromEntries(weights), income_from_parent: hasDaily || !hasDirectSale,
+      ...(legacySaleWeights ? { rounding_policy: 'category_cny_cent_remainder_last_posting' } : {}) };
   }
   let rows;
   try { rows = maskRepeatedAccruals([...direct.rows, ...parentRows]); }

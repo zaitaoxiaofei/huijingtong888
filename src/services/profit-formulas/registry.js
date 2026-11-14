@@ -1,3 +1,4 @@
+import * as legacyDailyFinance from "./v5/finance.js";
 import * as v1 from "./v1/profit.js";
 import * as outcome from "./v1/order-outcome.js";
 import * as aggregation from "./v1/aggregation.js";
@@ -14,7 +15,8 @@ const formulas = Object.freeze({
   V1: Object.freeze({ version: "V1", ...v1, ...aggregation, outcome }),
   V2: Object.freeze({ version: "V2", ...v2, ...aggregationV2, outcome: outcomeV2 }),
   V3: Object.freeze({ version: "V3", ...v1, ...aggregationV3, outcome: outcomeV3 }),
-  V4: Object.freeze({ version: "V4", ...v2, ...aggregationV3, outcome: outcomeV4 })
+  V4: Object.freeze({ version: "V4", ...v2, ...aggregationV3, outcome: outcomeV4 }),
+  V5: Object.freeze({ version: "V5", ...v1, ...aggregation, outcome, finance: legacyDailyFinance })
 });
 
 export function assertProfitFormulaSupported(version, { operation = "estimate" } = {}) {

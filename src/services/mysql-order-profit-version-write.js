@@ -102,7 +102,8 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
     if (options.expectedProjection && Object.entries(options.expectedProjection).some(([key, value]) => Number(before[key]) !== Number(value))) {
       throw Object.assign(new Error('订单利润或数量已变化，请重新预览'), { code: 'ORDER_PROFIT_PREVIEW_STALE', statusCode: 409 });
     }
-    const actualReady = before.profit_status === "accrued" && before.settlement_state === "accrued";
+    const actualReady = (before.profit_status === "accrued" && before.settlement_state === "accrued")
+      || (options.legacyDailyUpgrade && (Number(before.actual_profit) !== 0 || Number(before.is_locked) === 1));
     const state = await ensureOrderProfitCalculationState(connection, {
       tenantId: before.tenant_key, orderId: before.order_id, orderItemId: Number(orderItemId),
       baselineEstimate: before,
@@ -114,11 +115,20 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
     if (options.expectedEstimateRevisionId !== undefined && Number(options.expectedEstimateRevisionId) !== Number(state.current_estimate_revision_id)) {
       throw Object.assign(new Error('订单预估版本已变化，停止旧同步结果写入，请重新同步'), { code: 'ORDER_PROFIT_ESTIMATE_CHANGED', statusCode: 409 });
     }
-    const version = state.formula_version || "V1";
+    let version = state.formula_version || "V1";
     const expectedVersion = options.expectedFormulaVersion || options.inputs?.estimate?.formulaVersion;
     if (expectedVersion && expectedVersion !== version) throw Object.assign(new Error('利润公式版本已变化，停止写入并重新计算'), {
       code: 'ORDER_PROFIT_FORMULA_MISMATCH', statusCode: 409
     });
+    if (options.legacyDailyUpgrade) {
+      if (options.layer !== "actual" || options.source !== "ozon_finance_legacy_daily" || !["V1", "V5"].includes(version)) {
+        throw Object.assign(new Error("旧账单兼容升级仅允许 V1 实际利润迁移到 V5"), { code: "LEGACY_DAILY_UPGRADE_INVALID" });
+      }
+      if (version === "V1") {
+        await db.execute("UPDATE order_profit_calc_state SET formula_version = 'V5' WHERE tenant_key = ? AND order_item_id = ? AND formula_version = 'V1'", [before.tenant_key, Number(orderItemId)]);
+        version = "V5";
+      }
+    }
     assertProfitFormulaSupported(version, { operation: options.layer === "actual" ? "finance" : "estimate" });
     const fxState = usesDailyProfitFx(version) ? await readOrderProfitFxState(db, before.tenant_key, before.order_id) : null;
     if (usesDailyProfitFx(version) && !fxState) throw Object.assign(new Error("每日汇率订单缺少冻结记录，停止计算"), { code: "ORDER_PROFIT_FX_STATE_MISSING" });
