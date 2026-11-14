@@ -39,13 +39,13 @@ test('order gap and required purchase share leaf stock and incoming without dupl
 test('order action clearly distinguishes cancelled shortage, active shortage and covered supply',()=>{
  const source=readFileSync(new URL('../frontend/orders/components/OrdersTable.vue',import.meta.url),'utf8');
  const label=vm.runInNewContext('('+source.slice(source.indexOf('function procurementActionLabel('),source.indexOf('\nfunction procurementActionClass('))+')');
- assert.equal(label({procurement_coverage:{shortage_quantity:3,cancelled_purchase_quantity:2}}),'仍缺 3 · 已取消采购 2');
+ assert.equal(label({procurement_coverage:{shortage_quantity:3,cancelled_purchase_quantity:2,actionable_shortage_quantity:1}}),'待采购（缺 1；人工处理 2）');
  assert.equal(label({procurement_coverage:{shortage_quantity:1,cancelled_purchase_quantity:0}}),'待采购（缺 1）');
  assert.equal(label({procurement_coverage:{shortage_quantity:0,incoming_quantity:1}}),'采购在途');
 });
 
-test('cancelled unresolved shortages remain required work, ahead of optional replenishment, without appearing twice',()=>{
+test('cancelled shortages are manual handling records instead of required purchases',()=>{
  const all=[{product_id:49,workflow:{supply_plan:{known:true,cancelled_fbs:3,required_purchase:0,optional_purchase:5}}}];
- assert.equal(inventoryWorkspacePage(all,{task:'required'}).total,1);
- assert.equal(inventoryWorkspacePage(all,{task:'advisory'}).total,0);
+ assert.equal(inventoryWorkspacePage(all,{task:'required'}).total,0);
+ assert.equal(inventoryWorkspacePage(all,{task:'advisory'}).total,1);
 });

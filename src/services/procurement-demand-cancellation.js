@@ -1,3 +1,5 @@
+import {invalidateOrderReadCache} from './order-read-cache.js';
+import {broadcastGlobalEvent} from '../server/notifications.js';
 import {withMysqlTransaction} from '../mysql-pool.js';
 import {createHash} from 'node:crypto';
 import {authorizeBusinessTaskSession} from './business-task-tenant.js';
@@ -25,15 +27,15 @@ export async function readDemandCancellationEvents(query, tenantId, productIds) 
 }
 
 export function createProcurementDemandCancellation({transaction = withMysqlTransaction,
-  coverage = loadOrderProcurementCoverage, invalidate = invalidateOrderProcurementCoverage,
+  coverage = loadOrderProcurementCoverage, invalidate = invalidateOrderProcurementCoverage, broadcast = broadcastGlobalEvent,
   readState = async (id,tenantId) => (await (await import('./inventory-workflow.js')).createInventoryWorkflowService().batch([id],tenantId,{fresh:true,cache:false}))[0]} = {}) {
   return async function cancel(body, session) {
     const id = Number(body.product_id), ids = [...new Set((Array.isArray(body.order_item_ids) ? body.order_item_ids : []).map(Number))].sort((a,b) => a-b);
     const operation = body.operation || 'cancel', cause = String(body.cause || ''), note = String(body.note || '').trim(), key = String(body.request_key || '');
     if (!Number.isSafeInteger(id) || id <= 0 || !ids.length || ids.length > 100 || ids.some(value => !Number.isSafeInteger(value) || value <= 0)
-      || !['cancel','restore'].includes(operation) || !PROCUREMENT_CANCELLATION_CAUSES[cause] || !note || note.length > 300
+      || !['cancel','restore'].includes(operation) || !PROCUREMENT_CANCELLATION_CAUSES[cause] || note.length > 300
       || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(key)) {
-      throw fail('请选择本次不采购的订单商品，选择原因并填写1至300字说明；提交标识无效时请重新打开');
+      throw fail('请选择本次不采购的订单商品，选择处理原因；备注可不填，最多300字；提交标识无效时请重新打开');
     }
     const fingerprint = JSON.stringify({product_id:id,order_item_ids:ids,operation,cause,note});
     const result = await transaction(async connection => {
@@ -65,11 +67,20 @@ export function createProcurementDemandCancellation({transaction = withMysqlTran
           return {order_item_id,order_id:old.order_id,quantity:old.quantity};
         }
         if (!order || !order.needs_fulfillment || !(Number(order.shortage_quantity) > 0) || order.quantity_needs_review) throw fail('所选订单已无确定缺货，或库存绑定已经变化，请刷新明细后重试',409);
-        if (old) throw fail('所选订单商品已取消本次采购；如需重新采购，请先恢复',409);
         return {order_item_id,order_id:Number(order.order_id),quantity:Number(order.shortage_quantity)};
       });
       const [inserted] = await connection.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',
         [scope.id,id,current.personId,'procurement_demand_cancellation',JSON.stringify({request_key:key,fingerprint,operation,cause,note,sources})]);
+      if (operation === 'cancel') {
+        const message = `取消采购：${PROCUREMENT_CANCELLATION_CAUSES[cause]}${note ? '；' + note : ''}`;
+        for (const orderId of [...new Set(sources.map(source => source.order_id))].sort((a,b)=>a-b)) {
+          await connection.execute(`INSERT INTO order_marks(order_id,mark_type,note,updated_by_person_id,updated_at)
+            VALUES(?,'follow',?,?,CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE mark_type=IF(TRIM(COALESCE(mark_type,''))='',VALUES(mark_type),mark_type),
+              note=IF(TRIM(COALESCE(note,''))='',VALUES(note),CONCAT(note,'\n',VALUES(note))),
+              updated_by_person_id=VALUES(updated_by_person_id),updated_at=CURRENT_TIMESTAMP`, [orderId,message,current.personId]);
+        }
+      }
       if (operation === 'cancel') await connection.execute(`UPDATE procurement_requests SET status='cancelled',approval_status='cancelled',cancelled_at=CURRENT_TIMESTAMP,
         note=CONCAT(COALESCE(note,''),'；取消本次采购：',?) WHERE product_id=? AND ${inventoryTenantSql(scope)}
         AND source_order_item_id IN (${ids.map(() => '?').join(',')}) AND demand_type='real_order'
@@ -77,6 +88,9 @@ export function createProcurementDemandCancellation({transaction = withMysqlTran
       return {ok:true,duplicate:false,event_id:Number(inserted.insertId),product_id:id,operation,sources,tenantId:scope.id};
     });
     invalidate({tenantId:result.tenantId,productIds:[id]});
+    invalidateOrderReadCache();
+    try { broadcast('procurement-handled',{event_id:result.event_id,product_id:id,order_ids:result.sources.map(source=>source.order_id)},{tenantId:result.tenantId}); } catch {}
+
     const {tenantId,...response} = result;
     try { response.state = await readState(id,tenantId); }
     catch { response.refresh_needed = true; }

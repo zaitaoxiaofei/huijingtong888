@@ -73,19 +73,19 @@ onBeforeUnmount(() => {setMobileViewportState(false);window.visualViewport?.remo
     <nav class="mobile-tabbar" aria-label="手机导航">
       <RouterLink to="/mobile" active-class="mobile-home-parent" class="mobile-tabbar__item">
         <el-icon><House /></el-icon>
-        <span>首页</span>
+        <span>经营首页</span>
       </RouterLink>
       <RouterLink v-if="hasPermission(authStore.user,'procurement')" to="/mobile/procurement" class="mobile-tabbar__item">
         <el-icon><ShoppingCart /></el-icon>
-        <span>采购</span>
+        <span>采购中心</span>
       </RouterLink>
       <RouterLink v-if="hasPermission(authStore.user,'inventory.read')" to="/mobile/inventory" class="mobile-tabbar__item">
         <el-icon><Warehouse /></el-icon>
-        <span>库存</span>
+        <span>库存中心</span>
       </RouterLink>
       <RouterLink v-if="hasPermission(authStore.user,'orders.read')" to="/mobile/orders" class="mobile-tabbar__item">
         <el-icon><Package /></el-icon>
-        <span>订单</span>
+        <span>订单中心</span>
       </RouterLink>
       <RouterLink to="/mobile/account" class="mobile-tabbar__item"><el-icon><UserRound /></el-icon><span>我的</span></RouterLink>
     </nav>

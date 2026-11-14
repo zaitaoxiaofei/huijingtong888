@@ -26,11 +26,16 @@ test('reviewed procurement cancellation survives SQL refresh without changing fu
     await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(11,20,'CANCEL-SOURCE','awaiting_packaging',UTC_TIMESTAMP()),(12,20,'OTHER-SOURCE','awaiting_packaging',UTC_TIMESTAMP())");
     await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(11,11,'SKU200',200,3),(12,12,'SKU200',200,2)");
     await api.refreshProcurementDemandMysql(2,{session:buyer});
+    await q("INSERT INTO order_marks(order_id,mark_type,note,updated_by_person_id) VALUES(11,'quality','原有人工备注',2)");
     const before=await details.details(200,buyer),stock=await q('SELECT * FROM inventory_movements');
     assert.equal(before.state.supply_plan.required_fbs,5);
     const body={product_id:200,order_item_ids:[11],cause:'supplier_out_of_stock',note:'厂家断货，运营另行处理订单',request_key:randomUUID(),expected_revision:before.cancellation_revision};
     const saved=await cancel(body,buyer);assert.equal(saved.state.supply_plan.required_fbs,2);assert.equal(saved.state.supply_plan.cancelled_fbs,3);
+    const [mark]=await q('SELECT mark_type,note FROM order_marks WHERE order_id=11');
+    assert.equal(mark.mark_type,'quality');assert.match(mark.note,/原有人工备注/);assert.match(mark.note,/取消采购/);
     assert.equal((await cancel(body,buyer)).duplicate,true);
+    assert.deepEqual((await q('SELECT mark_type,note FROM order_marks WHERE order_id=11'))[0],mark,'retry does not append another note');
+
     await assert.rejects(cancel({...body,request_key:randomUUID()},foreign),{statusCode:404});
     for(let i=0;i<2;i++)await api.refreshProcurementDemandMysql(2,{session:buyer});
     const current=await details.details(200,buyer);
@@ -51,7 +56,8 @@ test('reviewed procurement cancellation survives SQL refresh without changing fu
     await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(13,20,'OLDER-CANCELLED','awaiting_packaging',DATE_SUB(UTC_TIMESTAMP(),INTERVAL 1 HOUR)),(14,20,'NEWER-ACTIVE','awaiting_packaging',UTC_TIMESTAMP())");
     await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(13,13,'SKU201',201,3),(14,14,'SKU201',201,2)");
     const fresh=await details.details(201,buyer);
-    await cancel({...body,product_id:201,order_item_ids:[13],request_key:randomUUID(),expected_revision:fresh.cancellation_revision},buyer);
+    await cancel({...body,product_id:201,order_item_ids:[13],cause:'no_shipment',note:'',request_key:randomUUID(),expected_revision:fresh.cancellation_revision},buyer);
+    const [manual]=await q('SELECT mark_type,note FROM order_marks WHERE order_id=13');assert.equal(manual.mark_type,'follow');assert.equal(manual.note,'取消采购：不发货');
     const bought=await api.recordProcurementPurchaseMysql({workspace_batch:true,request_key:randomUUID(),person_id:2,
       items:[{product_id:201,quantity:2,actual_quantity:2,amount:20,shipping_amount:0,purchase_mode:'shortage_purchase'}]},2,2);
     const allocations=await q('SELECT a.order_item_id,a.allocated_quantity FROM procurement_order_allocations a JOIN procurement_requests r ON r.id=a.procurement_request_id WHERE r.purchase_order_id=?',[bought.purchase_order_id]);

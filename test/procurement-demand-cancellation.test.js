@@ -30,10 +30,10 @@ test('fixed source decisions survive recomputation, preserve shortages, new orde
   assert.equal(cancelled.supply_plan.required_fbs,0);assert.equal(cancelled.demands[0].physical_gap,3);
   assert.equal(inventoryProcurementStatus(cancelled,'orders'),'warning');
   const rows=[{product_id:200,workflow:cancelled}];
-  assert.equal(inventoryWorkspacePage(rows,{task:'required'}).total,1);
+  assert.equal(inventoryWorkspacePage(rows,{task:'required'}).total,0);
   assert.equal(inventoryWorkspacePage(rows,{task:'cancelled'}).total,1);
   assert.equal(inventoryWorkspacePage(rows,{task:'cancelled'}).meta.cancelled,1);
-  assert.ok(cancelled.review_reasons.some(reason=>reason.includes('订单缺货仍未解决')));
+  assert.ok(cancelled.review_reasons.some(reason=>reason.includes('已转订单人工处理')));
 });
 
 test('restoration is source-specific and no history limit loses older decisions',()=>{
@@ -68,11 +68,12 @@ function fixture(){
   const connection={query:async(...args)=>[await query(...args)],execute:async(sql,args)=>{
     f.writes.push({sql,args});
     if(sql.startsWith('INSERT INTO inventory_flow_events')){const row={id:f.events.length+1,product_id:args[1],person_id:args[2],detail_json:args[4]};f.events.push(row);return [{insertId:row.id}];}
+    if(sql.startsWith('INSERT INTO order_marks'))return [{affectedRows:1}];
     if(sql.startsWith('UPDATE procurement_requests'))return [{affectedRows:1}];
     throw new Error('Unexpected write: '+sql);
   }};
   const coverage=async()=>new Map(f.orders.map(row=>[row.order_id,{order_id:row.order_id,needs_fulfillment:row.needs_fulfillment,stock_location:'LOCAL',items:[row]}]));
-  f.cancel=createProcurementDemandCancellation({transaction:work=>work(connection),coverage,invalidate:value=>f.invalidations.push(value),readState:async()=>state(f.orders,f.events)});
+  f.cancel=createProcurementDemandCancellation({transaction:work=>work(connection),coverage,invalidate:value=>f.invalidations.push(value),broadcast:()=>{},readState:async()=>state(f.orders,f.events)});
   f.revision=()=>demandCancellationRevision(f.orders,activeDemandCancellations(f.events),200);
   f.body=(extra={})=>({product_id:200,order_item_ids:[11],cause:'supplier_out_of_stock',note:'厂家断货，暂不采购；订单另行处理',request_key:randomUUID(),expected_revision:f.revision(),...extra});
   f.session={personId:2,tenant:{id:2,slug:'a'}};return f;
@@ -84,8 +85,8 @@ test('cancel/restore persists actor and reason, is idempotent after supply chang
   assert.equal(result.state.purchase_quantity,2);assert.equal(result.sources[0].quantity,3);assert.equal(f.events.length,1);
   assert.equal(f.events[0].person_id,2);assert.equal(JSON.parse(f.events[0].detail_json).note,body.note);
   assert.equal(JSON.stringify(f.orders),before);
-  assert.ok(f.writes.every(row=>/^(INSERT INTO inventory_flow_events|UPDATE procurement_requests)/.test(row.sql)));
-  assert.match(f.writes[1].sql,/purchase_order_id IS NULL/);assert.match(f.writes[1].sql,/status IN\('suggested','pending','submitted'\)/);
+  assert.ok(f.writes.every(row=>/^(INSERT INTO inventory_flow_events|INSERT INTO order_marks|UPDATE procurement_requests)/.test(row.sql)));
+  assert.match(f.writes.find(row=>row.sql.startsWith('UPDATE procurement_requests')).sql,/purchase_order_id IS NULL/);assert.match(f.writes.find(row=>row.sql.startsWith('UPDATE procurement_requests')).sql,/status IN\('suggested','pending','submitted'\)/);
   f.orders[0].shortage_quantity=1;
   assert.equal((await f.cancel(body,f.session)).duplicate,true);assert.equal(f.events.length,1);
   await assert.rejects(f.cancel({...body,note:'改过原因'},f.session),{statusCode:409});
@@ -104,4 +105,12 @@ test('live membership, tenant ownership, source changes and revisions are checke
   f.orders[0].needs_fulfillment=false;await assert.rejects(f.cancel(f.body(),f.session),{statusCode:409});
   f.orders[0].needs_fulfillment=true;f.orders[0].quantity_needs_review=true;await assert.rejects(f.cancel(f.body(),f.session),{statusCode:409});
   assert.equal(f.events.length,0);assert.equal(f.writes.length,0);
+});
+
+test('a reason without a note still marks selected orders and notifies the same enterprise',async()=>{
+ const f=fixture();const result=await f.cancel(f.body({cause:'no_shipment',note:''}),f.session);
+ assert.equal(result.ok,true);
+ const mark=f.writes.find(row=>row.sql.startsWith('INSERT INTO order_marks'));
+ assert.deepEqual(mark.args,[11,'取消采购：不发货',2]);
+ assert.match(mark.sql,/COALESCE\(mark_type/);assert.match(mark.sql,/CONCAT\(note/);
 });

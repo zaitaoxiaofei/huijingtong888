@@ -329,6 +329,11 @@ function openUpdateEventStream() {
     }}catch{}
 
   });
+  updateEventSource.addEventListener('procurement-handled',event=>{
+    if(!currentStream())return;
+    let data;try{data=JSON.parse(event.data||'{}');}catch{return;}
+    window.dispatchEvent(new CustomEvent('erp:procurement-handled',{detail:{...data,scope:currentApiCacheScope()}}));
+  });
   updateEventSource.addEventListener('inventory-product-request',()=>{if(currentStream())window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed',{detail:{scope:currentApiCacheScope()}}));});
   updateEventSource.addEventListener("sku-order-tracking", (event) => {
     if (!currentStream()) return;

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { performance } from "node:perf_hooks";
+import {applyOrderProcurementCancellations} from '../src/shared/procurement-demand-cancellation.js';
 import { inventoryLocation } from '../src/shared/inventory-fulfillment.js';
 import { createHash } from 'node:crypto';
 
@@ -11,7 +12,7 @@ const current = readFileSync(new URL("../src/services/order-procurement-coverage
 function calculator(source) {
   let dates = 0;
   class CountedDate extends Date { constructor(...args) { super(...args); dates += 1; } }
-  const context = vm.createContext({ Date: CountedDate, inventoryLocation });
+  const context = vm.createContext({ Date: CountedDate, inventoryLocation, applyOrderProcurementCancellations });
   vm.runInContext(source.replace(/^import[^\n]+\r?\n/gm, '').replace(/^export /gm, ""), context);
   return { run: input => { const started = performance.now(), result = context.calculateOrderProcurementCoverage(input); return { result, ms: performance.now() - started, dates }; } };
 }
@@ -31,8 +32,9 @@ function assertAllocationEqual(current, previous, input) {
     const row = roots.get(item.order_item_id);
     assert.deepEqual([item.root_product_id,item.root_product_name,item.root_inventory_number,item.root_quantity],
       [Number(row.root_product_id || row.product_id),row.root_product_name || row.product_name || '',row.root_inventory_number || null,Number(row.root_quantity || row.quantity)]);
-    for (const key of ['root_product_id','root_product_name','root_inventory_number','root_quantity']) delete item[key];
+    for (const key of ['root_product_id','root_product_name','root_inventory_number','root_quantity','cancellation','cancelled_purchase_quantity','actionable_shortage_quantity']) delete item[key];
   }
+  for(const order of allocation.values())for(const key of ['cancelled_purchase_quantity','actionable_shortage_quantity','procurement_manually_handled'])delete order[key];
   const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
   assert.equal(hash(allocation), hash(previous), 'Complete legacy allocation values and FIFO/trace ordering must match');
 }

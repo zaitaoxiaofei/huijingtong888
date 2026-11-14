@@ -1,6 +1,5 @@
 import { loadInventoryComposition } from './inventory-composition.js';
 import { expandCurrentProcurementDemands, procurementDemandAncestorIds } from './procurement-demand-composition.js';
-import { activeDemandCancellations, cancelledOrderPurchase } from '../shared/procurement-demand-cancellation.js';
 import { procurementQueueOrderIds } from './order-procurement-queues.js';
 import { invalidateInventoryWorkflow } from './inventory-workflow-cache.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
@@ -269,23 +268,10 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     }
     const priorityByItem = new Map(priorities.map(row => [`${row.product_id}:${row.order_item_id}`, Number(row.priority)]));
     const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
-    const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace, queuesOnly });
-    if (!queuesOnly) {
-      const events = await query(`SELECT id,product_id,detail_json,created_at FROM inventory_flow_events
-        WHERE tenant_id=? AND action='procurement_demand_cancellation' AND product_id IN (${scopedIdSql}) ORDER BY id`, [tenantPk]);
-      const cancellations = activeDemandCancellations(events);
-      for (const order of value.values()) {
-        order.cancelled_purchase_quantity = 0;
-        order.actionable_shortage_quantity = 0;
-        for (const item of order.items || []) {
-          const decision = cancelledOrderPurchase({...item, needs_fulfillment: order.needs_fulfillment}, item.product_id, cancellations);
-          Object.assign(item, decision);
-          order.cancelled_purchase_quantity += decision.cancelled_purchase_quantity;
-          order.actionable_shortage_quantity += decision.actionable_shortage_quantity;
-        }
-      }
-      value.inventory_stocks = [...byProduct.values()];
-    }
+    const cancellationEvents = await query(`SELECT id,product_id,detail_json,created_at FROM inventory_flow_events
+      WHERE tenant_id=? AND action='procurement_demand_cancellation' AND product_id IN (${scopedIdSql}) ORDER BY id`, [tenantPk]);
+    const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace, queuesOnly, cancellationEvents });
+    if (!queuesOnly) value.inventory_stocks = [...byProduct.values()];
     if (!fresh && generation === version) cached = { value, expires: Date.now() + COVERAGE_CACHE_TTL_MS };
     return value;
   })();

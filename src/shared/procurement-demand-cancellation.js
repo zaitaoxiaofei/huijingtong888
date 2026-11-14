@@ -1,7 +1,8 @@
 export const PROCUREMENT_CANCELLATION_CAUSES = {
-  replacement: '售后补发／其他商品替代',
+  replacement: '售后处理／其他商品替代',
   already_handled: '本次无需采购／需求有误',
-  supplier_out_of_stock: '厂家断货',
+  supplier_out_of_stock: '没货／厂家断货',
+  no_shipment: '不发货',
   other: '其他原因'
 };
 
@@ -44,8 +45,25 @@ export function applyDemandCancellations(workflow, orders, productId, active) {
       required_purchase_quantity: plan.required_fbs, cancelled_purchase_quantity: amount,
       submitted_quantity: Math.min(demand.submitted_quantity || 0, plan.required_fbs || 0),
       status: plan.required_fbs > 0 ? 'danger' : 'warning', process_status: 'purchase_cancelled' } : demand),
-    review_reasons: [...workflow.review_reasons, `已取消本次采购 ${amount} 件；订单缺货仍未解决，请核对替代处理或恢复采购`],
+    review_reasons: [...workflow.review_reasons, `已取消本次采购 ${amount} 件；已转订单人工处理，不再进入待采购；原因及备注保留在处理记录中`],
     overall: workflow.overall === 'success' ? 'warning' : workflow.overall,
     stock_status: workflow.stock_status === 'success' ? 'warning' : workflow.stock_status,
     local_stock_status: workflow.local_stock_status === 'success' ? 'warning' : workflow.local_stock_status };
+}
+
+// Keep factual shortages, but remove reviewed sources from purchasing queues.
+export function applyOrderProcurementCancellations(coverage, events = []) {
+  const active = activeDemandCancellations(events);
+  for (const order of coverage.values()) {
+    order.cancelled_purchase_quantity = 0;
+    order.actionable_shortage_quantity = 0;
+    for (const item of order.items || []) {
+      const decision = cancelledOrderPurchase({...item, needs_fulfillment: order.needs_fulfillment}, item.product_id, active);
+      Object.assign(item, decision);
+      order.cancelled_purchase_quantity += decision.cancelled_purchase_quantity;
+      order.actionable_shortage_quantity += decision.actionable_shortage_quantity;
+    }
+    order.procurement_manually_handled = order.cancelled_purchase_quantity > 0;
+  }
+  return coverage;
 }
