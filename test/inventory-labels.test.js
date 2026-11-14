@@ -1,8 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inventoryLabelItems, inventoryLabelType, validateInventoryLabels, wrapLabelName } from '../frontend/admin/utils/inventory-labels.js';
+import { inventoryLabelItems, inventoryLabelType, validateInventoryLabels, wrapLabelName, splitLabelQuantity } from '../frontend/admin/utils/inventory-labels.js';
 import { inventoryValuation, inventoryValuationExplanation } from '../frontend/admin/utils/inventory-valuation.js';
 const product = { id: 267, inventory_number: '2-6-7', name: '门槛条 VOLGA K40 红色 LOGO定制款 ABS塑料 激光 4个', component_count: 0 };
+test('label footer separates package quantity without confusing models, stock or print copies', () => {
+  for (const quantity of ['1个', '1套', '4个', '3件', '一套', '两只', '1.5米']) {
+    assert.deepEqual(splitLabelQuantity(`钥匙壳 TENET T4/T4L ${quantity}`), { name: '钥匙壳 TENET T4/T4L', quantity });
+  }
+  assert.deepEqual(splitLabelQuantity('钥匙壳橙色1个'), { name: '钥匙壳橙色', quantity: '1个' });
+  assert.deepEqual(splitLabelQuantity('门槛条 1 个 套装'), { name: '门槛条 套装', quantity: '1个' });
+  for (const name of ['钥匙壳 TENET T4/T4L', '门槛条 4+4个', '钥匙壳 1个 红色', '1个']) {
+    assert.deepEqual(splitLabelQuantity(name), { name, quantity: '' });
+  }
+});
 test('label task deduplicates product identity and preserves full name and per-product copies', () => {
   const items = inventoryLabelItems([product, product, { ...product, id: 268 }]);
   assert.equal(items.length, 2, 'same display number on different product IDs is not merged');

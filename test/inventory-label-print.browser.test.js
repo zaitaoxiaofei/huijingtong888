@@ -14,7 +14,7 @@ test('single and batch inventory labels print immediately and download exact pag
   const output = path.resolve('.verification');
   await fs.mkdir(output, { recursive:true });
   const script = `
-const task=await taskSpace('label-layout-camera-20261114'),page=task.page('p1');
+const task=await taskSpace('label-final-20261114'),page=task.page('p1');
 await page.goto('http://[::1]:8788/admin.html?labels='+Date.now()+'#/inventory/products');
 await page.waitForSelector('.product-inventory-number');console.log('LIST_READY');
 await page.waitForFunction(()=>document.querySelector('.inventory-value-cell').textContent.includes('820.00'));

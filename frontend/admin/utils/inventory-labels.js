@@ -55,6 +55,12 @@ export function wrapLabelName(text, measure, maxWidth) {
   return lines;
 }
 
+export function splitLabelQuantity(name) {
+  const match = name.match(/(?<![\d.+/×xX-])((?:\d+(?:\.\d+)?|[一二三四五六七八九十百两]+)\s*(?:个|套|件|对|只|张|片|支|根|条|包|袋|盒|卷|枚|组|台|块|瓶|米|双|份|副))(\s*(?:套装|单品|配件|耗材))?\s*$/u);
+  if (!match || !name.slice(0, match.index).trim()) return { name, quantity: '' };
+  return { name: (name.slice(0, match.index).trim() + (match[2] ? ` ${match[2].trim()}` : '')).trim(), quantity: match[1].replace(/\s+/g, '') };
+}
+
 // The preview, PDF and print pages share these 300 dpi pixels, including Chinese glyphs.
 export function renderInventoryLabel(item) {
   const canvas = document.createElement('canvas');
@@ -66,44 +72,62 @@ export function renderInventoryLabel(item) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = '#000';
   ctx.textBaseline = 'alphabetic';
+  const barcode = document.createElement('canvas');
+  let barcodeScale = 3;
+  bwipjs.toCanvas(barcode, { bcid: 'code128', text: item.number, height: 8, scale: barcodeScale, includetext: false, paddingwidth: 10 });
+  if (barcode.width > 360) {
+    barcodeScale = 2;
+    bwipjs.toCanvas(barcode, { bcid: 'code128', text: item.number, height: 8, scale: barcodeScale, includetext: false, paddingwidth: 10 });
+  }
+  if (barcode.width > 360) throw new Error(`${item.number}：条形码过长，无法清晰排入标签`);
+  const quietZone = 10 * barcodeScale;
+  ctx.font = `600 40px ${family}`;
+  const gap = Math.max(ctx.measureText('  ').width, quietZone);
   let numberSize = 128;
   do { ctx.font = `800 ${numberSize}px ${family}`; numberSize -= 1; }
   while (ctx.measureText(item.number).width > 340 && numberSize >= 40);
   if (ctx.measureText(item.number).width > 340) throw new Error(`${item.number}：编号过长，无法完整排入标签`);
-  ctx.fillText(item.number, 30, 157);
+  const numberWidth = ctx.measureText(item.number).width;
+  // Center the visible number and barcode together; retain the barcode's quiet zones.
+  const numberX = (canvas.width - numberWidth - gap - (barcode.width - quietZone * 2)) / 2;
+  const barcodeX = numberX + numberWidth + gap - quietZone;
+  ctx.fillText(item.number, numberX, 157);
 
   ctx.font = `700 28px ${family}`;
-  const badgeWidth = 104, badgeX = canvas.width - 30 - badgeWidth;
+  const badgeText = item.type === '单品' ? '单' : item.type === '套装' ? '套' : item.type;
+  const badgeWidth = badgeText.length === 1 ? 64 : 104, badgeX = canvas.width - 30 - badgeWidth;
   ctx.lineWidth = item.type === '配件' ? 4 : 2;
   if (item.type === '套装' || item.type === '耗材') {
     ctx.fillRect(badgeX, 20, badgeWidth, 44);
     ctx.fillStyle = '#fff';
   } else ctx.strokeRect(badgeX, 20, badgeWidth, 44);
-  ctx.fillText(item.type, badgeX + (badgeWidth - ctx.measureText(item.type).width) / 2, 52);
+  ctx.fillText(badgeText, badgeX + (badgeWidth - ctx.measureText(badgeText).width) / 2, 52);
   ctx.fillStyle = '#000';
-  const barcode = document.createElement('canvas');
-  bwipjs.toCanvas(barcode, { bcid: 'code128', text: item.number, height: 8, scale: 3, includetext: false, paddingwidth: 10 });
-  if (barcode.width > 360) bwipjs.toCanvas(barcode, { bcid: 'code128', text: item.number, height: 8, scale: 2, includetext: false, paddingwidth: 10 });
   // Keep module edges crisp and quiet zones intact at the label's 300 dpi resolution.
-  if (barcode.width > 360) throw new Error(`${item.number}：条形码过长，无法清晰排入标签`);
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(barcode, 389 + Math.floor((360 - barcode.width) / 2), 78, barcode.width, 84);
+  ctx.drawImage(barcode, Math.round(barcodeX), 78, barcode.width, 84);
   ctx.font = `400 19px ${family}`;
   ctx.textAlign = 'center';
-  ctx.fillText(item.number, 569, 184);
+  ctx.fillText(item.number, barcodeX + barcode.width / 2, 184);
   ctx.textAlign = 'start';
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(30, 203); ctx.lineTo(797, 203); ctx.stroke();
 
-  let lines, size = 40;
+  const labelName = splitLabelQuantity(item.name);
+  let lines, size = labelName.quantity ? 36 : 40;
   do {
     ctx.font = `600 ${size}px ${family}`;
-    lines = wrapLabelName(item.name, text => ctx.measureText(text).width, 767);
+    lines = wrapLabelName(labelName.name, text => ctx.measureText(text).width, 767);
     if (lines.length <= 2) break;
     size -= 1;
   } while (size >= 24);
   if (lines.length > 2) throw new Error(`${item.number}：名称过长，70 × 30 mm 标签无法清晰完整展示，请先缩短库存名称`);
-  lines.forEach((line, index) => ctx.fillText(line, 30, lines.length === 1 ? 274 : 253 + index * 52));
+  ctx.textAlign = 'center';
+  lines.forEach((line, index) => ctx.fillText(line, canvas.width / 2, labelName.quantity ? (lines.length === 1 ? 258 : 244 + index * 38) : (lines.length === 1 ? 274 : 253 + index * 52)));
+  if (labelName.quantity) {
+    ctx.font = `600 36px ${family}`;
+    ctx.fillText(labelName.quantity, canvas.width / 2, 330);
+  }
   return canvas.toDataURL('image/png');
 }
 
