@@ -20,6 +20,7 @@ export function createProfitRoutes({ services, readJson, authorize = authorizeDa
       view: "items"
     }),
     "GET /api/monthly-billing-details": (req, url) => services.monthlyBillingDetails(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/monthly-billing-source-records": (req, url) => { req._sensitiveResponse = true; return services.monthlyBillingSourceRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)); },
     "GET /api/monthly-billing-orders": (req, url) => services.monthlyBillingOrders(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/profit-aftersales": (req, url) => services.profitAftersales(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/profit-aftersales/details": (req, url) => services.profitAftersalesDetails(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

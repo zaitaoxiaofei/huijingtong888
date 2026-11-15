@@ -112,7 +112,7 @@ export function authorizeApiRequest(req, parts = []) {
     if (companyRead || reportRead || exportRead || collectionWrite || expenseDelete) return { allowed: true };
   }
   if (isEnterpriseAdmin(session) && read && (
-    (parts.length === 2 && ["monthly-billing-details", "monthly-billing-orders"].includes(resource))
+    (parts.length === 2 && ["monthly-billing-details", "monthly-billing-orders", "monthly-billing-source-records"].includes(resource))
     || (resource === "payroll" && parts.length === 3 && ["setup", "period"].includes(parts[2]))
     || (resource === "profit-aftersales" && (parts.length === 2 || (parts.length === 3 && parts[2] === "details")))
   )) return { allowed: true };
@@ -159,7 +159,7 @@ export function authorizeApiRequest(req, parts = []) {
     if (parts[2] === "task-action") return require("inventory.write", "packing");
     return require("inventory.write");
   }
-  if (["finance-center", "payroll", "profits", "monthly-billing-details", "monthly-billing-orders", "ozon-finance", "profit-reconciliation", "profit-snapshots", "pending-settlement-costs", "settings", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules"].includes(resource)) return deny("仅管理员可以访问财务、人员授权或修改基础配置");
+  if (["finance-center", "payroll", "profits", "monthly-billing-details", "monthly-billing-orders", "monthly-billing-source-records", "ozon-finance", "profit-reconciliation", "profit-snapshots", "pending-settlement-costs", "settings", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules"].includes(resource)) return deny("仅管理员可以访问财务、人员授权或修改基础配置");
   if (["ai-provider/chat", "ai-provider/stream"].includes(path)) return require("operations", "technical");
   if (["ai-provider", "scheduled-jobs", "scheduled-job-runs", "scheduled-job-run-events", "system-monitoring", "system", "docs"].includes(resource)) return require("technical");
   if (resource === "onboarding") return read ? { allowed: true } : require("onboarding.edit");

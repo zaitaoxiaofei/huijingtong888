@@ -1464,6 +1464,18 @@ const endpoints = [
       ],
       responses: [response(200, "application/json", objectOf("Existing months and selected statement; omitted appendices are empty objects, never synthetic zero amounts.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
     }),
+    endpoint("GET", "/api/monthly-billing-source-records", "Read current-enterprise Ozon ledger or advertising records for billing drilldowns. Read-only, with per-project totals and paginated original records. Company assignments apply on each record's Beijing date. Original signed ledger amounts are evidence, not extra costs or income added to order profit; unavailable currency conversion remains null.", {
+      auth: "authenticated; same finance authority and subscription gate as monthly billing",
+      query: [
+        ...["from", "to"].map(name => param(name, scalar("string", "Required inclusive Beijing date YYYY-MM-DD."), true)),
+        ...["shopId", "companyId"].map(name => param(name, scalar("string", "Owned ID or all."), false)),
+        param("source", scalar("string", "platform or advertising; default platform."), false),
+        param("itemName", scalar("string", "Exact original project name to filter records."), false),
+        param("page", scalar("integer", "One-based page."), false),
+        param("pageSize", scalar("integer", "Page size, at most 100."), false)
+      ],
+      responses: [response(200, "application/json", objectOf("groups (original project name, record count, amount_cny), rows, total, page and pageSize; amount_cny is null when conversion is unavailable.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("GET", "/api/profit-reconciliation", "Compare estimated and finance-accrued profit and identify inventory-data risks.", {
       auth: "authenticated",
       query: queryFieldsFromSchema("ProfitFiltersQuery"),

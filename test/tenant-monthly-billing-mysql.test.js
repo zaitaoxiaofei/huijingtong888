@@ -13,7 +13,7 @@ test('monthly billing reads only the current enterprise, including every financi
     fixture.useEnvironment();
     globalThis.fetch = async () => { throw Error('External requests forbidden in financial read tests'); };
     ({ closeMysqlPool } = await import('../src/mysql-pool.js'));
-    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql, prepareInventoryFlowMysql } = await import('../src/services/mysql-cutover.js');
+    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, monthlyBillingSourceRecordsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql, prepareInventoryFlowMysql } = await import('../src/services/mysql-cutover.js');
     const { ensureFinanceCenterSchema } = await import('../src/services/finance-center.js');
     const q = fixture.query;
     // Match the runtime component migration required by scoped reads.
@@ -202,11 +202,48 @@ test('monthly billing reads only the current enterprise, including every financi
       const historical=(await monthlyBillingDetailsMysql(range,'2')).selected.ai_usage;
       assert.equal(historical.people.find(row=>row.person_id===2).person_name,'A owner');
     });
+    await t.test('fixed AI, rent, utilities and subsidies deduct once and preserve shared expense scope',async()=>{
+      const before=(await monthlyBillingDetailsMysql(range,'2')).selected;
+      for(const [category,amount] of [['ai_subscription',700],['rent',2000],['utilities',80],['subsidy',120]]) {
+        await q("INSERT INTO finance_expenses(tenant_id,company_id,expense_date,category,amount_cny) VALUES(2,2,'2026-10-03',?,?)",[category,amount]);
+      }
+      const after=(await monthlyBillingDetailsMysql(range,'2')).selected;
+      assert.equal(after.summary.manual_expense-before.summary.manual_expense,2900);
+      assert.equal(Math.round((before.summary.net_profit-after.summary.net_profit)*100),290000);
+      assert.equal(after.summary.salary_expense,before.summary.salary_expense);
+      assert.equal(after.ai_usage.cost,before.ai_usage.cost);
+      const shop=(await monthlyBillingDetailsMysql({...range,shopId:20},'2')).selected;
+      assert.ok(!shop.expenses.some(row=>row.category==='ai_subscription'));
+      const foreign=(await monthlyBillingDetailsMysql(range,'3')).selected;
+      assert.ok(!foreign.expenses.some(row=>row.category==='ai_subscription'));
+    });
+    await t.test('source ledgers paginate exact fee records without tenant, company or date leakage',async()=>{
+      for(const [shop,op,name,amount,currency,rate] of [[20,'A-1','LastMile',-5,'CNY',1],[20,'A-2','LastMile',-7,'CNY',1],[30,'B-1','B secret',-99,'CNY',1],[20,'A-3','PendingFx',8,'JPY',0],[10,'Default-1','LegacyLedger',-3,'CNY',1],[11,'Default-2','DefaultLedger',-4,'CNY',1]]) {
+        await q("INSERT INTO ozon_finance_items(shop_id,operation_id,service_type,service_name,operation_date,amount,currency_code,exchange_rate) VALUES(?,?,'fixture',?,'2026-11-10',?,?,?)",[shop,op,name,amount,currency,rate]);
+      }
+      const range={from:'2026-11-01',to:'2026-11-30',companyId:2,pageSize:1};
+      const data=await monthlyBillingSourceRecordsMysql(range,'2');
+      assert.equal(data.total,3);assert.equal(data.rows.length,1);
+      const defaultLedger=await monthlyBillingSourceRecordsMysql({from:range.from,to:range.to},'admin');
+      assert.equal(defaultLedger.total,2);assert.deepEqual(defaultLedger.rows.map(row=>Number(row.shop_id)).sort((a,b)=>a-b),[10,11]);
+      assert.equal(data.groups.find(g=>g.item_name==='LastMile').amount_cny,-12);
+      assert.equal(data.groups.find(g=>g.item_name==='PendingFx').amount_cny,null);
+      assert.ok(!JSON.stringify(data).includes('B secret'));
+      const filtered=await monthlyBillingSourceRecordsMysql({...range,itemName:'LastMile',page:2},'2');
+      assert.equal(filtered.total,2);assert.equal(filtered.rows.length,1);assert.equal(filtered.rows[0].item_name,'LastMile');
+      assert.equal((await monthlyBillingSourceRecordsMysql({...range,shopId:30},'2')).total,0);
+      assert.equal((await monthlyBillingSourceRecordsMysql({...range,from:'2026-11-11'},'2')).total,0);
+      await assert.rejects(monthlyBillingSourceRecordsMysql({...range,companyId:3},'2'),{statusCode:404});
+      await q("INSERT INTO ozon_ad_sku_daily(shop_id,ozon_sku,date_key,campaign_name,spend_cny) VALUES(20,'A','2026-11-10','A广告',9),(30,'B','2026-11-10','B secret',99)");
+      const ad=await monthlyBillingSourceRecordsMysql({...range,source:'advertising'},'2');
+      assert.equal(ad.total,1);assert.equal(ad.groups[0].amount_cny,9);assert.equal(ad.rows[0].original_amount,null);assert.ok(!JSON.stringify(ad).includes('B secret'));
+      await assert.rejects(monthlyBillingSourceRecordsMysql({...range,source:'other'},'2'),{statusCode:400});
+    });
     await t.test('request tenant selectors cannot replace authenticated enterprise',async()=>{
-      const seen=[];const routes=createProfitRoutes({services:{monthlyBillingDetails:async(...args)=>seen.push(args),monthlyBillingOrders:async(...args)=>seen.push(args)}});
+      const seen=[];const routes=createProfitRoutes({services:{monthlyBillingDetails:async(...args)=>seen.push(args),monthlyBillingOrders:async(...args)=>seen.push(args),monthlyBillingSourceRecords:async(...args)=>seen.push(args)}});
       const req={_session:{personId:2,tenant:{id:2,slug:'a'}}};const url=new URL('http://localhost:8788/api/monthly-billing-details?tenant_id=3');
-      await routes['GET /api/monthly-billing-details'](req,url);await routes['GET /api/monthly-billing-orders'](req,url);
-      assert.deepEqual(seen.map(args=>args[1]),['2','2']);assert.throws(()=>routes['GET /api/monthly-billing-details']({},url),/企业上下文/);
+      await routes['GET /api/monthly-billing-details'](req,url);await routes['GET /api/monthly-billing-orders'](req,url);await routes['GET /api/monthly-billing-source-records'](req,url);
+      assert.deepEqual(seen.map(args=>args[1]),['2','2','2']);assert.throws(()=>routes['GET /api/monthly-billing-details']({},url),/企业上下文/);
     });
   } finally { globalThis.fetch=originalFetch;await closeMysqlPool?.();await fixture.cleanup(); }
 });
