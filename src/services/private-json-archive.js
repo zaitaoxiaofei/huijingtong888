@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
 import OSS from "ali-oss";
-import { ossStorageConfig } from "./object-storage.js";
+import { ossStorageConfig, verifyPrivateOssObject } from "./object-storage.js";
 
 export const jsonArchiveHash = text => crypto.createHash("sha256").update(text).digest("hex");
 const MAX_BYTES = 8 * 1024 * 1024;
@@ -16,7 +16,7 @@ export async function archivePrivateJson(text,{namespace,client=privateJsonArchi
   const sha256=jsonArchiveHash(text),objectKey=`database-archives/${namespace}/${sha256}.json.gz`,compressed=gzipSync(text,{level:9});
   let exists=false;try{await client.head(objectKey);exists=true;}catch(error){if(Number(error.status||error.statusCode)!==404&&error.code!=="NoSuchKey")throw error;}
   if(!exists)await client.put(objectKey,compressed,{headers:{"Content-Type":"application/gzip","x-oss-object-acl":"private"}});
-  if((await client.getACL(objectKey)).acl!=="private")throw new Error("JSON archive is not private; database unchanged");
+  await verifyPrivateOssObject(client,objectKey);
   const original=await readPrivateJson({objectKey,sha256},{client});
   if(original!==text)throw new Error("Private JSON archive differs from original bytes");
   return {objectKey,sha256,originalBytes:Buffer.byteLength(text),compressedBytes:compressed.length};

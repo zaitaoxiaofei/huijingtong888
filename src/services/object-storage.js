@@ -11,6 +11,27 @@ const DEFAULT_REMOTE_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_REMOTE_MEDIA_TIMEOUT_MS = 30000;
 const DEFAULT_OSS_REQUEST_TIMEOUT_MS = 60000;
 
+// Some least-privilege upload accounts can read/write objects but cannot read
+// ACL metadata. In that case verify the actual security property directly:
+// an unsigned read of the canonical OSS origin must be denied by OSS itself.
+export async function verifyPrivateOssObject(client, objectKey, { storage = ossStorageConfig(), request = fetch } = {}) {
+  try {
+    const result = await client.getACL(objectKey);
+    if (result.acl !== "private") throw new Error("Private OSS object ACL verification failed");
+    return { method: "object_acl" };
+  } catch (error) {
+    if (Number(error.status || error.statusCode) !== 403) throw error;
+  }
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(storage.bucket || "") || !/^oss-[a-z0-9-]+$/.test(storage.region || "")
+    || !/^[a-zA-Z0-9_./-]+$/.test(objectKey) || objectKey.split("/").some(part => !part || part === "." || part === "..")) throw new Error("Invalid private OSS origin");
+  const url = `https://${storage.bucket}.${storage.region}.aliyuncs.com/${objectKey.split("/").map(encodeURIComponent).join("/")}`;
+  const response = await request(url, { method: "GET", headers: { Range: "bytes=0-0", "Cache-Control": "no-cache" }, redirect: "error", signal: AbortSignal.timeout(15000) });
+  try {
+    if (response.status !== 403 || !response.headers.get("x-oss-request-id")) throw new Error("Private OSS object anonymous access verification failed");
+    return { method: "unsigned_origin_read_denied" };
+  } finally { await response.body?.cancel(); }
+}
+
 function trimSlashes(value = "") {
   return String(value || "").trim().replace(/^\/+|\/+$/g, "");
 }
@@ -330,7 +351,7 @@ export async function putContentAddressedFile(filePath, {
         ...(privateObject ? { "x-oss-object-acl": "private" } : {}) }
     });
   }
-  if (privateObject && (await ossClient.getACL(objectKey)).acl !== "private") throw new Error("Private media cache object ACL verification failed");
+  if (privateObject) await verifyPrivateOssObject(ossClient, objectKey, { storage });
   await assertMediaStorageAccess(beforeRequest, signal);
   return {
     driver: "oss", bucket: storage.bucket, objectKey, storageName: objectKey,

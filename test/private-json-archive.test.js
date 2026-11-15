@@ -20,7 +20,7 @@ test("existing public objects and corrupted archives cannot authorize database c
   const archive=await archivePrivateJson(text,{namespace:"listing-drafts/admin",client});
   objects.set(archive.objectKey,gzipSync(JSON.stringify({keep:"corrupted"})));
   await assert.rejects(archivePrivateJson(text,{namespace:"listing-drafts/admin",client}),/checksum/);
-  client.getACL=async()=>({acl:"public-read"});await assert.rejects(archivePrivateJson(text,{namespace:"listing-drafts/admin",client}),/not private/);
+  client.getACL=async()=>({acl:"public-read"});await assert.rejects(archivePrivateJson(text,{namespace:"listing-drafts/admin",client}),/Private OSS object ACL verification failed/);
 });
 test("JSON archive keys and enterprise namespaces cannot escape their boundary",async()=>{
   const {client}=store();await assert.rejects(archivePrivateJson("{}",{namespace:"listing-drafts/../finance",client}),/Invalid/);
