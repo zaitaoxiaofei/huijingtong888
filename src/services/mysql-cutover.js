@@ -31095,7 +31095,7 @@ async function loadOglDispatchMembersMysql(ids, tenantScope) {
 function assertTenantOrderListFiltersMysql(query = {}, tenantScope = null) {
   if (!tenantScope) return;
   const status = String(query.status || "all");
-  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "ogl_bound", "ogl_dispatched", "delivering", "dispute", "cancelled", "delivered", "unbound", "pending_purchase", "purchase_in_transit", "purchase_records_missing"]);
+  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "ogl_bound", "ogl_dispatched", "delivering", "dispute", "cancelled", "delivered", "unbound", "pending_purchase", "purchase_in_transit", "purchase_records_missing", "aftersale", "possible_return"]);
   if (!tenantSafeStatuses.has(status)) {
     throw Object.assign(new Error("企业订单列表暂不支持该状态筛选：关联库存或采购数据租户隔离尚未完成。"), { statusCode: 503 });
   }
