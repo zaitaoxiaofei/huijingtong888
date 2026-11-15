@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
+import { platformInvoiceFacts, rechargedServiceFacts, paymentAdjustmentFacts } from './finance-platform-text.js';
 import { financeXlsxRows } from './finance-xlsx-reader.js';
 
-export const PARSER_VERSION = 'ozon-monthly-1';
+export const PARSER_VERSION = 'ozon-monthly-2';
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 export const rounded = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 function amount(value) {
@@ -102,24 +103,17 @@ export async function parseFinanceDocument(buffer,name,{month}={}) {
   }else if(/Unified Transfer\s*Document/i.test(flat)&&/Invoice\s*[№#]/i.test(flat)){
     result.kind='platform-invoice';result.document_number=flat.match(/Invoice\s*[№#]\s*(\d+)/i)?.[1];
     if(!/Currency:.*?CNY,?\s*156/.test(flat))fail('平台综合发票不是CNY，不能直接记为人民币费用');
-    const segment=flat.slice(flat.indexOf('1 Agency fee'),flat.indexOf('In total for payment'));
-    const parts=segment.split(/(?=\b[1-5] (?:Agency fee|Cost Per Click|Electronic service|Ozon agency fee|Services for))/).filter(p=>/pcs/.test(p));
-    for(const [i,p]of parts.entries()){
-      const nums=p.match(/\d[\d,]*\.\d{2}/g);if(!nums)fail('综合发票项目金额无法识别');
-      const metric=p.includes('Cost Per Click')?'点击广告费':p.includes('Electronic service')?'平台物流连接服务费':p.includes('Ozon agency fee')?'佣金':p.includes('administration and management')?'国际货代合同管理服务费':'国际运输合同缔约服务费';
-      add(metric,Number(nums.at(-1).replaceAll(',','')),'CNY',`发票项目${i+1}：${p.split('pcs')[0].trim().slice(0,180)}`);
-    }
-    const tail=flat.slice(flat.indexOf('In total for payment'));const total=tail.match(/In total for payment\s+([\d,.]+)\s+([\d,.]+)\s+([\d,.]+)/);
-    if(!total||parts.length!==5||Math.abs(rounded(result.facts.reduce((s,r)=>s+r.amount,0))-Number(total[3].replaceAll(',','')))>0.01)fail('综合发票明细与总额不符，停止入账');
+    result.facts=platformInvoiceFacts(flat);
     result.controls.push({name:'费用明细与发票合计',difference:0,currency:'CNY'});
     result.warnings.push('买方税号及电子签署情况需会计核对；不能因识别为发票就自动确认税前扣除');
   }else if(/Report on the re-provision of services/i.test(flat)&&/Amount\s*\(CNY\)/i.test(flat)){
     result.kind='recharged-service';result.document_number=flat.match(/Report No\.\s*(\d+)/i)?.[1];
-    const body=flat.slice(flat.indexOf('Name of works'),flat.indexOf('Total services provided'));
-    const matches=[...body.matchAll(/\d+\s+(Payment for acquiring services|Cross charging for international delivery services)\s+(-?[\d ]+,\d{2})/g)];
-    for(const [i,m]of matches.entries())add(m[1].includes('acquiring')?'一般收单支付服务费':'国际物流费',m[2],'CNY',`转收费报告第${i+1}项：${m[1]}`);
-    const total=body.match(/Total\s+([\d ]+,\d{2})/);if(!total||!matches.length||Math.abs(rounded(result.facts.reduce((s,r)=>s+r.amount,0))-amount(total[1]))>0.01)fail('转收费报告明细与总额不符，停止入账');
+    result.facts=rechargedServiceFacts(flat);
     result.controls.push({name:'转收费明细与总额',difference:0,currency:'CNY'});result.warnings.push('需会计核实平台转收费关系及外部凭证链');
+  }else if(/^Payments report\s*[№#]/i.test(flat)){
+    const parsed=paymentAdjustmentFacts(flat);result.kind='platform-adjustment';result.document_number=parsed.document_number;result.business_scope=parsed.business_scope;result.facts=parsed.facts;
+    result.controls.push({name:'售后扣款明细与应付合计',difference:0,currency:'CNY'});
+    result.warnings.push('此为客户补偿或缺件扣款，不是平台回款；不得再次计为收款或整笔销售退回');
   }else if(/Compensation report/i.test(flat)&&!rows.length){
     result.kind='compensation';result.document_number=flat.match(/report\s*№\s*(\d+)/i)?.[1];const total=flat.match(/Total accrual:\s*([\d.]+)/);
     if(!total||!flat.includes('CNY'))fail('赔偿报告金额或币种不明确');add('平台赔偿收入',total[1],'CNY','Total accrual');result.warnings.push('赔偿为收入候选，确认时点和相应货损需会计另行审核');
@@ -143,7 +137,7 @@ export async function parseFinanceDocument(buffer,name,{month}={}) {
   if(result.facts.length&&!result.period)fail('无法识别正文业务期间（month），请提供完整原始文件，不能只按文件名入账');
   if(!result.document_number&&result.facts.length)fail('无法识别业务单据编号，停止自动入账，避免重复计费');
   result.currency=result.facts[0]?.currency||null;
-  result.business_key=result.facts.length?crypto.createHash('sha256').update([result.kind,result.document_number,result.period.from,result.currency].join('|')).digest('hex'):null;
+  result.business_key=result.facts.length?crypto.createHash('sha256').update([result.kind,result.document_number,result.period.from,result.currency,...(result.business_scope?[result.business_scope]:[])].join('|')).digest('hex'):null;
   if(!result.facts.length&&!result.controls.length)result.warnings.push('仅归档支持资料，不自动增加收入费用；格式未支持时请财务复核');
   return result;
 }

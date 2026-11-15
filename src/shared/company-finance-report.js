@@ -2,7 +2,7 @@
 export const FINANCE_GROUPS = [
  {id:'income',name:'销售与其他收入',sign:1,metrics:['已确认商品销售额','销售退回冲减额','合作伙伴补贴收入','平台赔偿收入']},
  {id:'goods',name:'已售商品成本',sign:-1,metrics:['已售商品采购成本']},
- {id:'platform',name:'平台费用',sign:-1,metrics:['佣金','国际物流费','平台物流连接服务费','尾程派送费','点击广告费','星级商品推广费','一般收单支付服务费','国际货代合同管理服务费','国际运输合同缔约服务费','退货处理及货损费用','平台其他费用']},
+ {id:'platform',name:'平台费用',sign:-1,metrics:['佣金','国际物流费','平台物流连接服务费','尾程派送费','点击广告费','星级商品推广费','一般收单支付服务费','国际货代合同管理服务费','国际运输合同缔约服务费','客户部分补偿扣款','缺件扣款','退货处理及货损费用','平台其他费用']},
  {id:'labor',name:'人工与社保',sign:-1,metrics:['工资','加班及补贴','公司承担社保','公司承担公积金']},
  {id:'premises',name:'场地费用',sign:-1,metrics:['场地租金','水电物业费']},
  {id:'software',name:'AI与软件费用',sign:-1,metrics:['AI使用费','软件订阅费']},
@@ -16,7 +16,7 @@ export const MANUAL_EXPENSE_METRICS = ['国内物流费','AI使用费','软件�
 export const UPLOAD_TYPES = [
  {value:'auto',label:'平台报告 · 自动识别',hint:'Z店销售报告、服务书、结算报告等；选择实际店铺。'},
  {value:'sales',label:'销售报告（销售、退货与补贴）',kinds:['sales'],shop:true,hint:'上传平台销售报告XLSX，按正文业务月份核对。取消未成交订单不自动记为收入。'},
- {value:'platform-fees',label:'平台费用服务书 / 综合凭证',kinds:['platform-invoice','recharged-service','star-service'],shop:true,hint:'上传UTD、转收费报告或星级推广服务书；综合凭证只记一次。'},
+ {value:'platform-fees',label:'平台费用服务书 / 综合凭证',kinds:['platform-invoice','recharged-service','star-service','platform-adjustment'],shop:true,hint:'上传UTD、转收费报告或星级推广服务书；综合凭证只记一次。'},
  {value:'compensation',label:'平台赔偿报告',kinds:['compensation'],shop:true,hint:'选择赔偿所属业务月份，不按下载日期归属。'},
  {value:'settlement',label:'平台结算与付款',kinds:['balance','currency-settlement','platform-payments'],shop:true,hint:'平台结算不等于营业额，不重复记为收入。'},
  {value:'collection-cash',label:'连连入账 / 提现流水',kinds:['collection-cash'],shared:true,hint:'公司共用上传一次；流水按实际交易日期筛选，CNY与CNH分列。'},

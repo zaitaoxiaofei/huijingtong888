@@ -84,6 +84,8 @@ onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort()
       <button v-for="(part,index) in inventoryParts" :key="part.value" class="inventory-part inventory-link" @click="capital(['local','fbp','transit'][index])" :aria-label="`查看${part.label}库存明细`"><span>{{ part.label }}</span><b>{{ inventory && !inventoryError ? (inventory[part.value]==null?'待核实':`¥${money(inventory[part.value])}`) : '—' }}</b><small>{{ inventory && !inventoryError ? (inventory[part.quantity]==null?'数量待核实':`${integer(inventory[part.quantity])} 件 · 查看明细 →`) : '当前库存' }}</small></button>
       <div class="inventory-status"><el-button text :icon="Refresh" :loading="inventoryLoading" aria-label="刷新库存占用" @click="loadInventory" /><small v-if="inventory && !inventoryError">{{ shanghaiDateTimeText(inventory.snapshot_at) }} 更新</small><small v-else-if="inventoryError" class="error-text">{{ inventoryError }}</small></div>
     </section>
+    <el-alert type="warning" :closable="false" title="这里是订单经营参考账，不是公司最终净利润" description="收入按订单日期统计，经营结余可能包含未结算预估；只扣除已入账的费用，待审工资、缺失凭证和未接入支出可能尚未反映。平台账单按账单业务月份另行核对，两个口径不可直接相加。" show-icon/>
+    <el-button @click="router.push({path:'/finance/company-statements',query:{month:`${year}-01`,...(companyId!=='all'?{company_id:companyId}:{})}})">查看公司账单与原始凭证</el-button>
     <section class="annual-statement">
       <div class="statement-header"><div><h2>年度经营账单</h2><p>{{ year === today.slice(0,4) ? `截至 ${today}` : `${year}年全年` }} · 人民币</p></div><div class="statement-filters">
         <el-date-picker v-model="year" type="year" value-format="YYYY" format="YYYY年" aria-label="经营年份" :clearable="false" :disabled-date="date => date.getFullYear() > Number(today.slice(0,4)) || date.getFullYear()<2020" @change="load" />
@@ -93,14 +95,14 @@ onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort()
       </div></div>
       <div v-if="loadError" class="statement-error"><span>{{ loadError }}</span><el-button link type="primary" @click="load">重新加载</el-button></div>
       <template v-else>
-        <div class="annual-totals"><div><span>累计收入</span><strong>{{ loaded ? `¥${money(totals.revenue)}` : '—' }}</strong></div><div><span>累计净利润</span><strong :class="{negative: loaded && totals.net_profit < 0}">{{ loaded ? `¥${money(totals.net_profit)}` : '—' }}</strong></div><div><span>净利润率</span><strong>{{ loaded ? ratio(totals.margin) : '—' }}</strong></div><div><span>费用与人工</span><strong>{{ loaded ? `¥${money((totals.manual_expense||0)+(totals.salary_expense||0))}` : '—' }}</strong></div></div>
+        <div class="annual-totals"><div><span>累计订单口径收入</span><strong>{{ loaded ? `¥${money(totals.revenue)}` : '—' }}</strong></div><div><span>累计经营参考结余</span><strong :class="{negative: loaded && totals.net_profit < 0}">{{ loaded ? `¥${money(totals.net_profit)}` : '—' }}</strong></div><div><span>参考结余率</span><strong>{{ loaded ? ratio(totals.margin) : '—' }}</strong></div><div><span>费用与人工</span><strong>{{ loaded ? `¥${money((totals.manual_expense||0)+(totals.salary_expense||0))}` : '—' }}</strong></div></div>
         <el-skeleton v-if="!loaded" class="statement-skeleton" :rows="8" animated />
         <el-table v-else :data="calendar" class="month-table" @row-click="bill">
           <el-table-column label="月份" min-width="145"><template #default="{row}"><div class="month-cell"><b>{{ row.label }}</b><span v-if="row.future">尚未开始</span><span v-else-if="row.month_key===today.slice(0,7)" class="current-month">进行中</span></div></template></el-table-column>
           <el-table-column label="订单数" align="right" min-width="100"><template #default="{row}">{{ row.future ? '—' : integer(row.summary?.order_count) }}</template></el-table-column>
-          <el-table-column label="收入" align="right" min-width="145"><template #default="{row}">{{ row.future ? '—' : money(row.summary?.revenue) }}</template></el-table-column>
-          <el-table-column label="净利润" align="right" min-width="145"><template #default="{row}"><span :class="{negative:Number(row.summary?.net_profit)<0}">{{ row.future ? '—' : money(row.summary?.net_profit) }}</span></template></el-table-column>
-          <el-table-column label="净利润率" align="right" min-width="120"><template #default="{row}">{{ row.future ? '—' : ratio(row.summary?.net_profit_margin) }}</template></el-table-column>
+          <el-table-column label="订单口径收入" align="right" min-width="145"><template #default="{row}">{{ row.future ? '—' : money(row.summary?.revenue) }}</template></el-table-column>
+          <el-table-column label="经营参考结余" align="right" min-width="145"><template #default="{row}"><span :class="{negative:Number(row.summary?.net_profit)<0}">{{ row.future ? '—' : money(row.summary?.net_profit) }}</span></template></el-table-column>
+          <el-table-column label="参考结余率" align="right" min-width="120"><template #default="{row}">{{ row.future ? '—' : ratio(row.summary?.net_profit_margin) }}</template></el-table-column>
           <el-table-column label="" width="66"><template #default="{row}"><el-button v-if="!row.future" text :icon="ArrowRight" :aria-label="`查看${row.label}账单`" @click.stop="bill(row)" /></template></el-table-column>
         </el-table>
       </template>

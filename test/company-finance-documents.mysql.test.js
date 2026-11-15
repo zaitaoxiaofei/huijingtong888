@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
+import { parseFinanceDocument } from '../src/services/finance-document-parser.js';
 import { createCompanyFinanceDocuments } from '../src/services/company-finance-documents.js';
 
 test('company import persistence, duplicate keys, closing, review and tenant isolation in independent MySQL', {skip:!process.env.TENANT_TEST_MYSQL_SOCKET},async()=>{
@@ -15,8 +16,9 @@ test('company import persistence, duplicate keys, closing, review and tenant iso
   const b=new ExcelJS.Workbook(),sheet=b.addWorksheet('Statement');sheet.getCell('B2').value='Statement of services provided No. ЗВ - 123 dated 10/15/2026';sheet.getCell('B3').value='for the period from 10/1/2026 to 10/15/2026';sheet.getCell('B13').value='Star Products';sheet.getCell('F15').value='Amount including VAT (CNY)';sheet.getCell('B17').value='Total:';sheet.getCell('F17').value=249.02;
   const buffer=Buffer.from(await b.xlsx.writeBuffer());
   const a={personId:10,roles:['operations'],tenant:{id:2,slug:'a',role:'owner'}},foreign={...a,tenant:{id:3,slug:'b',role:'owner'}};
-  const files={owned:async(url,s)=>{assert.equal(s.tenant.id,2);},read:async url=>url.endsWith('manual.png')?{buffer:Buffer.from('manual receipt'),row:{original_name:'Оплата AI октябрь.png'}}:url.endsWith('invoice.pdf')?{buffer:Buffer.from('invoice evidence'),row:{original_name:'Счёт-фактура.pdf'}}:{buffer,row:{original_name:'test.xlsx'}}};
-  const service=createCompanyFinanceDocuments({query:q,execute:q,files,authorize:async s=>s,transaction:async worker=>{await fixture.connection.beginTransaction();try{const result=await worker({query:q,execute:q});await fixture.connection.commit();return result;}catch(e){await fixture.connection.rollback();throw e;}}});
+  let legacySupported=false;
+  const files={owned:async(url,s)=>{assert.equal(s.tenant.id,2);},read:async url=>url.endsWith('legacy.pdf')?{buffer:Buffer.from('immutable legacy original'),row:{original_name:'legacy.pdf'}}:url.endsWith('manual.png')?{buffer:Buffer.from('manual receipt'),row:{original_name:'Оплата AI октябрь.png'}}:url.endsWith('invoice.pdf')?{buffer:Buffer.from('invoice evidence'),row:{original_name:'Счёт-фактура.pdf'}}:{buffer,row:{original_name:'test.xlsx'}}};
+  const service=createCompanyFinanceDocuments({query:q,execute:q,files,authorize:async s=>s,parse:async(buffer,name,options)=>{if(name!=='legacy.pdf')return parseFinanceDocument(buffer,name,options);if(!legacySupported)throw new Error('旧格式待解析');return {kind:'platform-invoice',business_key:'c'.repeat(64),facts:[{metric:'佣金',amount:12,currency:'CNY'}],cash:[],controls:[],warnings:[]};},transaction:async worker=>{await fixture.connection.beginTransaction();try{const result=await worker({query:q,execute:q});await fixture.connection.commit();return result;}catch(e){await fixture.connection.rollback();throw e;}}});
   const input={company_id:20,shop_id:200,month:'2026-10',attachment_url:'/uploads/team-attachments/test.xlsx'};
   const first=await service.preview(input,a);await service.confirm({company_id:20,document_id:first.document.id},a);
   assert.equal((await service.preview(input,a)).duplicate,true);
@@ -27,6 +29,11 @@ test('company import persistence, duplicate keys, closing, review and tenant iso
   const doc=(await q('SELECT * FROM finance_import_documents WHERE id=?',[first.document.id]))[0];assert.equal(doc.review_status,'needs_info');
   const p=typeof doc.payload_json==='string'?JSON.parse(doc.payload_json):doc.payload_json;assert.equal(p.review_history.length,1);
   const result=await service.export({company_id:20,month:'2026-10'},a);assert.ok(result.buffer.length>1000);
+  const legacyInput={company_id:20,shop_id:200,month:'2026-10',attachment_url:'/uploads/team-attachments/legacy.pdf'};
+  const failed=await service.preview(legacyInput,a);assert.equal(failed.document.parse_status,'error');
+  await service.review({company_id:20,document_id:failed.document.id,review_status:'needs_info',review_note:'原件已有，等旧格式兼容'},a);
+  legacySupported=true;const retried=await service.preview(legacyInput,a);assert.equal(retried.document.id,failed.document.id);assert.equal(retried.document.parse_status,'preview');assert.equal(retried.document.review_status,'pending');assert.deepEqual(retried.document.payload_json.review_history.map(h=>h.status),['needs_info','pending']);
+  await service.confirm({company_id:20,document_id:retried.document.id},a);assert.equal((await service.report({company_id:20,month:'2026-10'},a)).metrics['佣金'],12);
   const manual=await service.preview({company_id:20,shop_id:0,month:'2026-10',upload_type:'manual-expense',attachment_url:'/uploads/team-attachments/manual.png',display_name:'AI实际使用',manual:{metric:'AI使用费',amount:88.20,currency:'CNY',note:'本地测试：10月服务账单'}},a);
   assert.equal(manual.document.parse_status,'preview');
   await service.preview({company_id:20,shop_id:0,month:'2026-10',upload_type:'manual-expense',attachment_url:'/uploads/team-attachments/manual.png',display_name:'AI实际使用',expected_revision:0,manual:{metric:'AI使用费',amount:99,currency:'CNY',note:'修改后实际账单'}},a);

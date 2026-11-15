@@ -10,6 +10,7 @@ import { createTenantMysqlFixture } from '../test/helpers/tenant-mysql-fixture.j
 import { createCompanyFinanceDocuments } from '../src/services/company-finance-documents.js';
 
 const manifest=JSON.parse(await fs.readFile(process.argv[2],'utf8'));
+const overviewSnapshot=manifest.overview_snapshot?JSON.parse(await fs.readFile(manifest.overview_snapshot,'utf8')):null;
 const fixture=await createTenantMysqlFixture('finance_preview');
 // Match the application's UTC mysql2 decoder; the fixture's SQL session already uses UTC.
 fixture.connection.connection.config.timezone='Z';
@@ -27,28 +28,32 @@ let fileCounter=0;
 for(const file of manifest.files){
  const url=`/uploads/team-attachments/preview-${++fileCounter}${path.extname(file.name)}`;
  privateFiles.set(url,{row:{original_name:file.name},buffer:await fs.readFile(file.source)});
- const doc=await service.preview({company_id:20,shop_id:/^(entry|withdraw)_export/.test(file.name)?0:200,month:'2026-10',attachment_url:url},session);
+ const doc=await service.preview({company_id:20,shop_id:file.shared||/^(entry|withdraw)_export/.test(file.name)?0:200,month:file.existing_month||file.month||'2026-10',upload_type:file.upload_type||'auto',display_name:(file.display_name||'').replace(/^待兼容 · /,''),attachment_url:url},session);
  if(doc.document.parse_status==='error')throw new Error(`${file.name}: ${doc.document.payload_json.warnings.join('；')}`);
  await service.confirm({company_id:20,document_id:doc.document.id},session);
 }
 const report=await service.report({company_id:20,month:'2026-10'},session);
 const incomes=new Set(['已确认商品销售额','销售退回冲减额','合作伙伴补贴收入','平台赔偿收入']);
 const platformFees=Math.round(Object.entries(report.metrics).filter(([k])=>!incomes.has(k)).reduce((s,[,v])=>s+v,0)*100)/100;
-const expectedFees=Math.round(manifest.reviews.reduce((s,r)=>s+r[2],0)*100)/100;
-const expectedMetric=metric=>Math.round(manifest.raw.filter(r=>r[1]===metric).reduce((s,r)=>s+r[2],0)*100)/100;
+const expectedFees=manifest.expected_months?.['2026-10']?.platform_fees??Math.round(manifest.reviews.reduce((s,r)=>s+r[2],0)*100)/100;
+const expectedMetric=metric=>manifest.expected_months?.['2026-10']?.[metric]??Math.round(manifest.raw.filter(r=>r[1]===metric).reduce((s,r)=>s+r[2],0)*100)/100;
 if(platformFees!==expectedFees||report.metrics['已确认商品销售额']!==expectedMetric('已确认商品销售额')||report.metrics['销售退回冲减额']!==expectedMetric('销售退回冲减额'))throw new Error('Z店10月验收金额与独立整理结果不一致');
 if(report.cash_reconciliation.matches.length!==2||report.cash_reconciliation.matches.some(m=>m.status!=='amount_date_candidate'))throw new Error('10月两笔收款候选匹配不一致');
+const annual=await service.report({company_id:20,from:'2026-01',to:'2026-12',period_mode:'year'},session);
+if(manifest.expected_annual)for(const [metric,value]of Object.entries(manifest.expected_annual))if(annual.metrics[metric]!==value)throw new Error(`全年指标不一致：${metric}`);
+if(manifest.expected_months)for(const [month,expected]of Object.entries(manifest.expected_months)){const monthly=await service.report({company_id:20,month},session);const fees=Math.round(Object.entries(monthly.metrics).filter(([k])=>!incomes.has(k)).reduce((n,[,v])=>n+v,0)*100)/100;if(fees!==expected.platform_fees)throw new Error(`${month}平台费用与独立整理结果不一致`);}
+if(manifest.expected_payments)for(const [month,count]of Object.entries(manifest.expected_payments)){const r=await service.report({company_id:20,month},session);if(r.cash_reconciliation.matches.length!==count)throw new Error(`${month}付款跨归档月份读取不一致`);}
 const periodColumns={};
 for(const [mode,count]of [['month',12],['quarter',4],['year',1]]){
  const r=await service.report({company_id:20,from:'2026-01',to:'2026-12',period_mode:mode},session);
- if(r.matrix.periods.length!==count||JSON.stringify(r.metrics)!==JSON.stringify(report.metrics))throw new Error(`${mode}期间列数或跨期间汇总不一致`);
+ if(r.matrix.periods.length!==count||JSON.stringify(r.metrics)!==JSON.stringify(annual.metrics))throw new Error(`${mode}期间列数或跨期间汇总不一致`);
  periodColumns[mode]=r.matrix.periods.map(p=>p.label);
 }
 const exported=await service.export({company_id:20,month:'2026-10'},session);
 const output=path.resolve(process.argv[3]||'/private/tmp/finance-preview');await fs.mkdir(output,{recursive:true});
 await fs.writeFile(path.join(output,'Z店10月_系统导出验收.zip'),exported.buffer);
-await fs.writeFile(path.join(output,'验收结果.json'),JSON.stringify({files:manifest.files.length,metrics:report.metrics,platform_fees:platformFees,cash_matches:report.cash_reconciliation.matches.length,coverage:report.coverage,period_columns:periodColumns,database:fixture.database},null,2));
-const previewEntry=`import {createApp,h} from 'vue';import {createPinia}from 'pinia';import{createRouter,createWebHashHistory,RouterView}from 'vue-router';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Page from '/frontend/admin/views/finance/CompanyStatementsView.vue';import{useAuthStore}from '/frontend/admin/stores/auth.js';const app=createApp({render:()=>h(RouterView)}),pinia=createPinia(),router=createRouter({history:createWebHashHistory(),routes:[{path:'/:pathMatch(.*)*',component:Page}]});app.use(pinia);app.use(router);app.use(ElementPlus);const auth=useAuthStore();auth.user=${JSON.stringify(session)};auth.bootstrapped=true;app.mount('#app');`;
+await fs.writeFile(path.join(output,'验收结果.json'),JSON.stringify({files:manifest.files.length,metrics:report.metrics,platform_fees:platformFees,cash_matches:report.cash_reconciliation.matches.length,coverage:report.coverage,annual_metrics:annual.metrics,period_columns:periodColumns,database:fixture.database},null,2));
+const previewEntry=`import {createApp,h} from 'vue';import {createPinia}from 'pinia';import{createRouter,createWebHashHistory,RouterView}from 'vue-router';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Page from '/frontend/admin/views/finance/CompanyStatementsView.vue';import Overview from '/frontend/admin/views/finance/FinanceOverviewView.vue';import{useAuthStore}from '/frontend/admin/stores/auth.js';const app=createApp({render:()=>h(RouterView)}),pinia=createPinia(),router=createRouter({history:createWebHashHistory(),routes:[{path:'/finance-center',component:Overview},{path:'/:pathMatch(.*)*',component:Page}]});app.use(pinia);app.use(router);app.use(ElementPlus);const auth=useAuthStore();auth.user=${JSON.stringify(session)};auth.bootstrapped=true;app.mount('#app');`;
 const vite=await createServer({configFile:false,plugins:[vue(),{name:'finance-preview-entry',resolveId(id){if(id==='/finance-preview-entry.js')return '\0finance-preview-entry';},load(id){if(id==='\0finance-preview-entry')return previewEntry;}}],optimizeDeps:{include:['vue','pinia','vue-router','element-plus']},server:{middlewareMode:true,hmr:false},appType:'custom',publicDir:false});
 const json=(res,value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
 const body=async req=>{const parts=[];let n=0;for await(const chunk of req){n+=chunk.length;if(n>21*1024*1024)throw new Error('请求超过21MB');parts.push(chunk);}return Buffer.concat(parts);};
@@ -58,12 +63,17 @@ const server=http.createServer(async(req,res)=>{
   if(url.pathname==='/admin.html'){
    res.setHeader('Set-Cookie',`finance_preview=${token}; HttpOnly; SameSite=Strict; Path=/`);
 
-   const html=await vite.transformIndexHtml(url.pathname,`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>公司账单本地验收</title><body style="margin:24px"><p style="color:#795000">独立测试数据库 · Z店真实文件验收 · 未连接生产</p><div id="app"></div><script type="module" src="/finance-preview-entry.js"></script></body></html>`);
+   const html=await vite.transformIndexHtml(url.pathname,`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>公司账单本地验收</title><body style="margin:24px"><p style="color:#795000">独立测试数据库 · Z店真实文件验收 · 未连接生产</p><nav><a href="/admin.html#/finance/company-statements?month=2026-10">公司账单与文件分类</a> · <a href="/admin.html#/finance-center">经营总览口径说明</a></nav><div id="app"></div><script type="module" src="/finance-preview-entry.js"></script></body></html>`);
    res.setHeader('Content-Type','text/html; charset=utf-8');return res.end(html);
   }
   if(url.pathname.startsWith('/api/')||url.pathname.startsWith('/uploads/')){
    if(!String(req.headers.cookie||'').split(';').some(s=>s.trim()===`finance_preview=${token}`))return json(res,{error:'仅本地验收会话可访问'},403);
    if(url.pathname==='/api/finance-center/companies')return json(res,{companies:await q('SELECT * FROM finance_companies WHERE tenant_id=2'),assignments:await q('SELECT * FROM finance_shop_company_assignments WHERE tenant_id=2'),shops:await q('SELECT id,name FROM shops WHERE tenant_id=2')});
+   if(url.pathname==='/api/monthly-billing-details'&&overviewSnapshot){
+    const selected=url.searchParams.get('shopId')||'all';if(url.searchParams.get('year')!=='2026'||!['all','200'].includes(selected))return json(res,{error:'本地仅载入合肥公司及Z店2026年快照'},400);
+    const data=structuredClone(selected==='200'?overviewSnapshot.overview:overviewSnapshot.company_overview);data.companies=[{id:20,name:'合肥公司（本地验收）'}];data.shops=await q('SELECT id,name FROM shops WHERE tenant_id=2');return json(res,data);
+   }
+   if(url.pathname==='/api/finance-center/inventory-capital'&&overviewSnapshot)return json(res,{inventory_total_value:null,local_inventory_value:null,local_inventory_quantity:null,fbp_inventory_value:null,fbp_inventory_quantity:null,in_transit_value:null,in_transit_quantity:null,snapshot_at:null});
    if(url.pathname==='/api/finance-center/document-report')return json(res,await service.report(Object.fromEntries(url.searchParams),session));
    if(url.pathname==='/api/finance-center/document-import'){
     const data=JSON.parse((await body(req)).toString());if(!['preview','confirm','review'].includes(data.action))throw new Error('操作无效');return json(res,await service[data.action](data,session));
@@ -80,5 +90,5 @@ const server=http.createServer(async(req,res)=>{
   vite.middlewares(req,res,()=>{res.writeHead(404);res.end();});
  }catch(e){json(res,{error:e.message},e.statusCode||500);}
 });
-server.listen(8788,'127.0.0.1',()=>console.log(`本地验收：http://127.0.0.1:8788/admin.html#/finance/company-statements\n27份原件、平台费用${platformFees} CNY、两笔收款候选、ZIP导出已通过；数据库${fixture.database}`));
+server.listen(8788,'127.0.0.1',()=>console.log(`本地验收：http://127.0.0.1:8788/admin.html#/finance/company-statements\n${manifest.files.length}份原件、10月平台费用${platformFees} CNY、两笔收款候选、ZIP导出已通过；数据库${fixture.database}`));
 for(const signal of ['SIGINT','SIGTERM'])process.once(signal,async()=>{await vite.close();server.close();await fixture.cleanup();process.exit(0);});

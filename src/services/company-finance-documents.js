@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { FINANCE_FILE_CATEGORIES, financeDocumentCategories } from '../shared/finance-document-categories.js';
 import { UPLOAD_TYPES, MANUAL_EXPENSE_METRICS, financeMatrix } from '../shared/company-finance-report.js';
 import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
@@ -80,7 +81,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
  async function getDocs(ctx,period){
   await ready();
   // Shared cash files can contain multiple months. Keep once and filter events by their own dates.
-  return query(`SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND ((month_key>=? AND month_key<=?) OR (shop_key=0 AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='collection-cash')) ORDER BY month_key,id`,[ctx.tenantId,ctx.companyId,period.from,period.to]);
+  return query(`SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND ((month_key>=? AND month_key<=?) OR (shop_key=0 AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='collection-cash') OR JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='platform-payments') ORDER BY month_key,id`,[ctx.tenantId,ctx.companyId,period.from,period.to]);
  }
  async function locked(ctx,month){
   const closed=await query(`SELECT id FROM finance_periods WHERE company_id=? AND month_key=? AND status='closed' AND (tenant_id=? OR (?=1 AND tenant_id IS NULL))`,[ctx.companyId,month,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0]);
@@ -155,9 +156,12 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     if(uploadType==='manual-expense'&&existing[0].parse_status!=='error'&&JSON.stringify(payload(existing[0]).facts)!==JSON.stringify(p.facts))fail('此原件已有不同的记账内容，请先核对已有记录，不能用同一原件重复录入或改写金额',409);
     if(existing[0].sha256!==hash)fail('同编号业务已有不同内容原件，请人工核对并保留更正依据，不能重复累计',409);
     if(existing[0].parse_status==='error'&&status==='preview'){
-     p.previous_errors=payload(existing[0]).warnings;
-     await writePeriod(ctx,month,db=>db.execute("UPDATE finance_import_documents SET month_key=?,business_key=?,parse_status='preview',payload_json=? WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='error'",[month,p.business_key||null,JSON.stringify(p),existing[0].id,ctx.tenantId,ctx.companyId]));
-     return {document:{...existing[0],month_key:month,parse_status:'preview',payload_json:p},duplicate:true};
+     const old=existing[0],previous=payload(old),revision=Number(old.revision||0);
+     p.previous_errors=[...(previous.previous_errors||[]),...(previous.warnings||[])];p.review_history=[...(previous.review_history||[])];
+     if(old.review_status!=='pending')p.review_history.push({person_id:ctx.s.personId,status:'pending',note:'原件重新解析，须重新审核',at:new Date().toISOString()});
+     const saved=await writePeriod(ctx,month,db=>db.execute("UPDATE finance_import_documents SET month_key=?,business_key=?,parse_status='preview',payload_json=?,review_status='pending',review_note=NULL,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='error' AND revision=?",[month,p.business_key||null,JSON.stringify(p),old.id,ctx.tenantId,ctx.companyId,revision]));
+     if(!saved.affectedRows)fail('原件已被其他人重新解析或审核，请刷新后重试',409);
+     return {document:{...old,month_key:month,parse_status:'preview',payload_json:p,review_status:'pending',review_note:null,revision:revision+1},duplicate:true};
     }
     return {document:{...existing[0],payload_json:payload(existing[0])},duplicate:true};}
    try{
@@ -197,7 +201,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    }
    for(const line of summary.lines)line.linked_evidence=evidence.get(Number(line.document_id))||[];
    const year=period.from.slice(0,4),mode=['month','quarter','year'].includes(input.period_mode)?input.period_mode:'month';
-   return {matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:covered.size,company_complete:false},gaps:['仅汇总已确认导入资料，不与现有订单利润再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
+   return {matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d),categories:financeDocumentCategories(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:covered.size,company_complete:false},gaps:['仅汇总已确认导入资料，不与现有订单利润再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
   },
   async export(input,session){
    const ctx=await company(input,session),period=range(input),report=await this.report(input,ctx.s);
@@ -207,7 +211,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    addSheet('期间分类汇总',['项目',...report.matrix.periods.map(p=>p.label)],report.matrix.rows.flatMap(g=>[[g.name,...report.matrix.periods.map(p=>g.cells[p.id])],...g.children.map(c=>[`  ${c.name}`,...report.matrix.periods.map(p=>c.cells[p.id])])]));
    addSheet('公司已采集汇总',['项目','金额CNY','范围'],Object.entries(report.metrics).map(([k,v])=>[k,v,'仅已确认导入资料；公司未齐']));
    addSheet('店铺费用来源',['月份','店铺ID','项目','金额','币种','原件编号','原文件名','提取位置'],report.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.currency,l.document_id,l.original_name,l.source]));
-   addSheet('凭证审核',['原件编号','月份','原文件名','显示名称','上传类型','关联业务编号','导入状态','会计审核','审核意见'],report.documents.map(d=>[d.id,d.month_key,d.original_name,d.payload_json.display_name,d.payload_json.upload_type||'auto',d.payload_json.related_document_id,d.parse_status,d.review_status,d.review_note]));
+   addSheet('凭证审核',['原件编号','月份','原文件名','显示名称','文件分类','上传类型','关联业务编号','导入状态','会计审核','审核意见'],report.documents.map(d=>[d.id,d.month_key,d.original_name,d.payload_json.display_name,(d.categories||[]).map(id=>FINANCE_FILE_CATEGORIES.find(c=>c.id===id)?.name||id).join('、'),d.payload_json.upload_type||'auto',d.payload_json.related_document_id,d.parse_status,d.review_status,d.review_note]));
    addSheet('手工草稿修改历史',['原件编号','修改时间（北京时间）','经办人ID','原项目','原金额CNY','原用途'],report.documents.flatMap(d=>(d.payload_json.preview_history||[]).map(h=>[d.id,new Date(h.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),h.person_id,h.manual?.metric,h.manual?.amount,h.manual?.note])));
    addSheet('会计审核历史',['原件编号','审核时间（北京时间）','经办人ID','状态','意见'],report.documents.flatMap(d=>(d.payload_json.review_history||[]).map(r=>[d.id,new Date(r.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),r.person_id,r.status,r.note])));
    addSheet('缺件与限制',['待办'],report.gaps.map(g=>[g]));
@@ -221,9 +225,9 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     if(crypto.createHash('sha256').update(file.buffer).digest('hex')!==doc.sha256)fail(`原件${doc.id}校验失败，停止导出`,409);
     const part=doc.review_status==='accepted'?'02_会计认可凭证':'03_待审及业务配套资料';
     const shop=report.shops.find(s=>Number(s.id)===Number(doc.shop_key));
-    const category=payload(doc).kind==='manual-expense'?({'AI使用费':'12_AI与软件','软件订阅费':'12_AI与软件','场地租金':'13_场地费用','水电物业费':'13_场地费用','商品采购支出':'10_采购与库存','设备采购支出':'14_资产及预付款','押金及预付款':'14_资产及预付款'})[payload(doc).facts?.[0]?.metric]||'11_公司或店铺费用':({'sales':'01_销售与退货','star-service':'04_广告与推广','foreign-invoice':'04_广告与推广','platform-invoice':'90_多项费用综合凭证','recharged-service':'90_多项费用综合凭证','compensation':'08_赔偿','balance':'09_结算与回款','currency-settlement':'09_结算与回款','platform-payments':'09_结算与回款','collection-cash':'09_结算与回款'})[payload(doc).kind]||'99_业务配套';
+    const category=payload(doc).kind==='manual-expense'?({'AI使用费':'12_AI与软件','软件订阅费':'12_AI与软件','场地租金':'13_场地费用','水电物业费':'13_场地费用','商品采购支出':'10_采购与库存','设备采购支出':'14_资产及预付款','押金及预付款':'14_资产及预付款'})[payload(doc).facts?.[0]?.metric]||'11_公司或店铺费用':({'sales':'01_销售与退货','star-service':'04_广告与推广','foreign-invoice':'04_广告与推广','platform-invoice':'90_多项费用综合凭证','platform-adjustment':'08_赔偿与售后扣款','recharged-service':'90_多项费用综合凭证','compensation':'08_赔偿','balance':'09_结算与回款','currency-settlement':'09_结算与回款','platform-payments':'09_结算与回款','collection-cash':'09_结算与回款'})[payload(doc).kind]||'99_业务配套';
     const filePath=`${base}/${part}/${payload(doc).kind==='collection-cash'?'公司共用跨月':doc.month_key}/${doc.shop_key?safeName(shop?.name||`店铺_${doc.shop_key}`):'公司共用'}/${category}/${doc.id}_${safeName(doc.original_name)}`;
-    zip.file(filePath,file.buffer);manifest.push({id:doc.id,original_name:doc.original_name,display_name:payload(doc).display_name||'',related_document_id:payload(doc).related_document_id||null,path:filePath,sha256:doc.sha256,status:doc.parse_status,review:doc.review_status});
+    zip.file(filePath,file.buffer);manifest.push({id:doc.id,original_name:doc.original_name,display_name:payload(doc).display_name||'',categories:doc.categories||[],related_document_id:payload(doc).related_document_id||null,path:filePath,sha256:doc.sha256,status:doc.parse_status,review:doc.review_status});
    }
    zip.file(`${base}/来源索引.json`,JSON.stringify(manifest,null,2));
    zip.file(`${base}/先读说明.txt`,'公司会计交接包（草稿）\n只包含已上传资料，其他店铺及公司共用费用未齐。原始文件按索引保存一次。\n平台销售退回冲减收入；服务书、发票、结算不得重复记费。\n会计认可不是税务审批。现有ERP采购成本未自动结转到本导入账簿，避免混用历史或当前成本。\n'+report.gaps.join('\n'));
