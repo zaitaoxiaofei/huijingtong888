@@ -1,3 +1,4 @@
+import { financeOriginalName } from './finance-original-name.js';
 import { readOzonCategoryIdentity, ozonCategoryIdentityError, ozonCategoryProductRefs, findOzonCategoryProduct } from "./ozon-category-identity.js";
 import { retargetVariantVehicleAttributes } from '../shared/variant-vehicle-attributes.js';
 import { vehicleMetaFromTarget } from './product-development-meta.js';
@@ -3672,6 +3673,7 @@ function listingMediaUploadResult(asset, options = {}) {
 export async function uploadTeamAttachment(req, { purpose = "team" } = {}) {
   const session = await authorizeBusinessTaskSession(req._session);
   const file = await readTeamAttachmentMultipart(req);
+  const originalName = purpose === "finance" ? financeOriginalName(file.filename) : null;
   const safeName = sanitizeListingMediaFilename(file.filename || "attachment");
   const extension = path.extname(safeName).toLowerCase();
   const expectedContentType = TEAM_ATTACHMENT_TYPES.get(extension);
@@ -3693,11 +3695,11 @@ export async function uploadTeamAttachment(req, { purpose = "team" } = {}) {
   const baseName = path.basename(safeName, extension).slice(0, 90) || "attachment";
   const storedName = `${Date.now()}-${crypto.randomUUID()}-${baseName}${extension}`;
   await writeTeamAttachmentFile(storedName, file.buffer);
-  const url = await tenantPrivateFiles.register({ storageName: storedName, name: safeName, size: file.buffer.length, contentType: expectedContentType }, session, purpose);
+  const url = await tenantPrivateFiles.register({ storageName: storedName, name: originalName || safeName, size: file.buffer.length, contentType: expectedContentType }, session, purpose);
   return {
     ok: true,
     url,
-    name: safeName,
+    name: originalName || safeName,
     storageName: storedName,
     size: file.buffer.length,
     contentType: expectedContentType,
