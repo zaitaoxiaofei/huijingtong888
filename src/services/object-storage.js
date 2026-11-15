@@ -297,6 +297,7 @@ export async function putContentAddressedFile(filePath, {
   timeoutMs = DEFAULT_OSS_REQUEST_TIMEOUT_MS,
   env = process.env,
   client = null,
+  privateObject = false,
   beforeRequest,
   signal
 } = {}) {
@@ -325,9 +326,11 @@ export async function putContentAddressedFile(filePath, {
   if (!exists) {
     await ossClient.putStream(objectKey, fs.createReadStream(filePath, { signal }), {
       contentLength: size,
-      headers: { "Content-Type": contentType, "Cache-Control": "public, max-age=31536000, immutable" }
+      headers: { "Content-Type": contentType, "Cache-Control": privateObject ? "private, no-store" : "public, max-age=31536000, immutable",
+        ...(privateObject ? { "x-oss-object-acl": "private" } : {}) }
     });
   }
+  if (privateObject && (await ossClient.getACL(objectKey)).acl !== "private") throw new Error("Private media cache object ACL verification failed");
   await assertMediaStorageAccess(beforeRequest, signal);
   return {
     driver: "oss", bucket: storage.bucket, objectKey, storageName: objectKey,

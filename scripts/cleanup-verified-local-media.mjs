@@ -123,6 +123,7 @@ export async function cleanupVerifiedLocalMedia({
   client = null,
   now = Date.now()
 } = {}) {
+  if (write) throw new Error("旧清理入口已停用：请使用 scripts/manage-media-cache.mjs 审阅引用和内容校验清单，再执行离线缓存清理");
   const storage = ossStorageConfig(env);
   if (!storage.enabled) throw new Error("OSS is not enabled; local media cleanup is blocked");
   const ossClient = client || new OSS({
@@ -136,6 +137,8 @@ export async function cleanupVerifiedLocalMedia({
   });
   const cutoffMs = now - retentionDays * 86400000;
   const report = {
+    safeForDeletion: false,
+    verification: "legacy_size_and_presence_only_use_reviewed_cache_manifest_for_cleanup",
     mode: write ? "write" : "dry-run",
     retentionDays,
     cutoff: new Date(cutoffMs).toISOString(),

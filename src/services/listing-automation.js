@@ -5,6 +5,7 @@ import { vehicleMetaFromTarget } from './product-development-meta.js';
 import { assertVariantCopyIdentity } from '../shared/variant-copy-identity.js';
 import { config } from "../config.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
+import { archiveMediaCacheFile, restoreMediaCacheFile, MEDIA_CACHE_ROOTS } from "./media-cache-files.js";
 import { tenantPrivateFiles } from "./tenant-private-files.js";
 import crypto from "node:crypto";
 import fsSync from "node:fs";
@@ -5581,6 +5582,11 @@ export async function registerListingMediaAssetFromFile(body = {}, session = nul
   const sourceName = sanitizeListingMediaFilename(body.original_name || path.basename(sourcePath));
   const storedName = `${Date.now()}-${crypto.randomUUID()}-${role}${extension}`;
   const storedMedia = await writeListingMediaFile(storedName, buffer, contentType);
+  const cacheRelative = path.relative(path.resolve("uploads"), sourcePath).split(path.sep);
+  if (MEDIA_CACHE_ROOTS.includes(cacheRelative[0]) && (cacheRelative[0] !== "temp" || cacheRelative[1] === "image-cropper")) await archiveMediaCacheFile(sourcePath, { storedObject: storedMedia.driver ? storedMedia : {
+    bucket: ossStorageConfig().bucket, objectKey: storedMedia.storageName, hashSha256: storedMedia.hashSha256,
+    size: buffer.length, url: storedMedia.publishUrl
+  } });
   const targetPath = storedMedia.localPath;
   const url = storedMedia.previewUrl;
   const configuredPublishUrl = buildListingMediaPublishUrl(url);
@@ -5730,6 +5736,7 @@ async function resolveListingShopWatermarkPath(shop = {}) {
     ? SHOP_WATERMARK_ROOTS.map((root) => path.resolve(root, filename)).filter((target, index) => isListingPathInside(target, SHOP_WATERMARK_ROOTS[index]))
     : [];
   for (const candidate of candidates) {
+    if(candidate.startsWith(`${path.resolve("uploads","shop-watermarks")}${path.sep}`))await restoreMediaCacheFile(candidate);
     const stat = await fs.stat(candidate).catch(() => null);
     if (stat?.isFile()) return candidate;
   }

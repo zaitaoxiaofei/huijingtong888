@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import {decodeFrozenContentStorage} from "./listing-frozen-codec.js";
 
 export const AI_MEDIA_RETENTION_DAYS = 7;
 export const AI_MEDIA_RETENTION_FORMAT = "ai-media-retention-v1";
@@ -75,12 +76,13 @@ function strings(value, output = new Set(), ids = new Set(), key = "") {
   if (typeof value !== "string") return output;
   const text = value.trim();
   if (!text) return output;
-  if (/^(?:https?:\/\/|\/(?:api|uploads)\/|(?:public\/)?uploads\/|[a-z]:[\\/])/i.test(text)) output.add(canonical(text));
+  if (/^(?:https?:\/\/|\/(?:api|uploads)\/|(?:public\/)?uploads\/|shop-watermarks\/|[a-z]:[\\/])/i.test(text)) output.add(canonical(text));
   if (/^[\[{]/.test(text)) {
     try { strings(JSON.parse(text), output, ids); } catch { /* The caller separately rejects malformed JSON columns. */ }
   }
   for (const match of text.matchAll(/(?:material_asset_id|materialAssetId|listing_media_asset_id|media_asset_id|asset_id)["']?\s*[:=]\s*["']?([0-9]+)/g)) ids.add(match[1]);
   for (const match of text.replaceAll("\\/", "/").matchAll(/https?:\/\/[^\s"'<>\\]+/g)) output.add(canonical(match[0].replace(/[),;]+$/, "")));
+  for (const match of text.replaceAll("\\/", "/").matchAll(/\/(?:uploads|api\/ai\/file|api\/asset-variant-engine\/files|api\/tools\/image-cropper\/file)\/[^\s"'<>\\]+/g)) output.add(canonical(match[0].replace(/[),;]+$/, "")));
   return output;
 }
 function candidate(row, table, cutoff) {
@@ -347,6 +349,10 @@ async function scanReferences(query, tables, { excludeRows, cutoff, maxScanRows,
               }
             }
           }
+          if (table === "listing_frozen_content" && column.column_name === "payload_json") {
+            try { referenceValue = decodeFrozenContentStorage(referenceValue); }
+            catch { warnings.push(`${table}:${row.id ?? "composite"}:invalid_compressed_frozen_content`); continue; }
+          }
           const found = strings(referenceValue, new Set(), assetIds, column.column_name);
           for (const text of found) {
             if (targets.urls.has(text)) protect(`url:${text}`, `${table}:${row.id ?? "composite"}`);
@@ -384,6 +390,16 @@ function rowReasons(item, scan, storage, defaultId) {
     if (key && scan.references.has(`key:${key}`)) reasons.push(...scan.references.get(`key:${key}`));
   }
   return [...new Set(reasons)];
+}
+
+export async function auditMediaCacheReferences({ query, sources, storage = {}, maxScanRows = 2000000 } = {}) {
+  if (!Array.isArray(sources) || sources.length > 5000) throw fail("Invalid media cache reference bounds");
+  const database = await identity(query), { tables, uniqueIdTables, primaryKeys } = await schema(query);
+  const targets = { urls: new Set(sources.map(canonical)), keys: new Set() };
+  const scan = await scanReferences(query, tables, { cutoff: 0, maxScanRows, targets, uniqueIdTables, primaryKeys, storage,
+    defaultId: database.default_tenant_id, ignoreExpiredWorkIndexes: false, excludeRows: new Set() });
+  return { database, complete: scan.complete, scanned: scan.scanned, warnings: scan.warnings, missing: scan.missing,
+    references: Object.fromEntries(scan.references), blockers: scan.blockers, unresolved_tasks: scan.taskGuards.length };
 }
 
 export async function auditAiMediaRetention({ query, storage = {}, headObject = null, objects = [], priorManifests = [], afterIds = {}, now = new Date(), limit = 200, maxScanRows = 500000, reviewCurrentVersions = false } = {}) {

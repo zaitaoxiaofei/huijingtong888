@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {encodeFrozenContentStorage} from "../src/services/listing-frozen-codec.js";
 import { aiMediaRetentionFingerprint, auditAiMediaRetention, applyAiMediaRetention, createAiMediaRetentionSweep, reviewAiMediaRetentionCurrentVersions } from "../src/services/ai-media-retention.js";
 import { headManagedOssRetentionObject, deleteManagedOssRetentionObject, listManagedOssRetentionObjects } from "../src/services/object-storage.js";
 import { verifyAiMediaRetentionMaintenance, runAiMediaRetentionCli } from "../scripts/cleanup-ai-media-retention.mjs";
@@ -9,6 +10,11 @@ const storage = { bucket: "fixture", region: "oss-cn-test", publicBaseUrl: "http
 const key = name => `listing-media/aa/${name}.jpg`;
 const url = name => `${storage.publicBaseUrl}/${key(name)}`;
 const asset = (id = 1, extra = {}) => ({ id, tenant_id: 7, source_type: "ai_generated", role: "main_image", status: "pending_review", url: url(String(id)), created_at: old, updated_at: old, ...extra });
+test("compressed immutable draft masters still protect their referenced OSS images",async()=>{
+  const payload={payload:{image:url("1"),attributes:"metadata".repeat(1000)}};
+  const f=fixture({listing_frozen_content:[{id:1,tenant_id:7,payload_json:JSON.stringify(encodeFrozenContentStorage(payload))}]});
+  const manifest=await auditAiMediaRetention(f.dependencies);assert.equal(manifest.rows.length,0);assert.ok(manifest.kept.some(row=>row.reasons.some(reason=>reason.startsWith("listing_frozen_content:"))));
+});
 function fixture(extra = {}, { nonUniqueIdTables = [] } = {}) {
   const tables = { material_assets: [asset()], listing_media_assets: [], listing_drafts: [], listing_category_templates: [], listing_publish_records: [], online_products: [], products: [], ...structuredClone(extra) };
   const deleted = [], removed = [], heads = new Map(), candidatePageSizes = [], referencePageSizes = [], referenceQueries = [];

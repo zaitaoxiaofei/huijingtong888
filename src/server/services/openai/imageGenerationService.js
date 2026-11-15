@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { restoreMediaCacheFile } from "../../../services/media-cache-files.js";
 import fsSync from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -41,6 +42,10 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
   for (let index = 1; index <= count; index += 1) {
     const filename = `generated_${String(index).padStart(3, "0")}.png`;
     const filePath = path.join(taskDir, filename);
+    if (await restoreMediaCacheFile(filePath)) {
+      generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
+      continue;
+    }
     const image = await requestCompatibleImage({
       runtimeConfig: resolvedRuntimeConfig,
       prompt: [String(finalPrompt || "").trim(), `Image ${index} of ${count}.`].filter(Boolean).join("\n"),

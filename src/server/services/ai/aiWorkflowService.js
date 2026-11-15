@@ -1,5 +1,7 @@
 import { resolveWorkflowImageRuntime } from "../../../services/ai-image-runtime-selection.js";
 import crypto from "node:crypto";
+import { archiveMediaCacheFile, restoreMediaCacheFile, mediaCacheSource } from "../../../services/media-cache-files.js";
+import {cleanupTemporaryImageCache} from "../../../services/temporary-image-cache.js";
 import { aiImageCharge } from "../../../shared/ai-image-pricing.js";
 import fs from "node:fs/promises";
 import fsSync, { createReadStream } from "node:fs";
@@ -26,7 +28,6 @@ import {
   downloadGeneratedImageToFile,
   editOpenAiImage,
   generateOpenAiImages,
-  resolveGeneratedImagePath,
   resolveGeneratedTaskDir,
   validateTaskId
 } from "../openai/imageGenerationService.js";
@@ -38,6 +39,11 @@ const AI_SOURCE_IMAGE_CACHE_TTL_MS = Math.max(30000, Number(process.env.AI_SOURC
 const AI_SOURCE_IMAGE_CACHE_MAX_ENTRIES = Math.max(1, Number(process.env.AI_SOURCE_IMAGE_CACHE_MAX_ENTRIES || 32));
 const AI_SOURCE_IMAGE_CACHE_ROOT = path.resolve(ROOT_DIR, process.env.AI_SOURCE_IMAGE_CACHE_DIR || "uploads/temp/ai-source-cache");
 const sourceImageCache = new Map();
+
+export async function cleanupAiSourceImageCache(){
+  const protectedHashes=new Set([...sourceImageCache.keys()].map(key=>crypto.createHash("sha256").update(key).digest("hex")));
+  return cleanupTemporaryImageCache({root:AI_SOURCE_IMAGE_CACHE_ROOT,retentionHours:48,limit:200,protectedHashes});
+}
 
 export async function getAiStatus() {
   return aiProviderConfig().then((providerConfig) => ({
@@ -90,6 +96,7 @@ async function mergeCreditedImageResults(results, failures) {
         const filename = `${index + 1}_${image.filename}`;
         const filePath = path.join(directory, filename);
         await fs.copyFile(file.filePath, filePath);
+        await archiveMediaCacheFile(filePath);
         output[field].push({ ...image, ...createImageRecord(taskId, scope, filename, filePath) });
       }
     }
@@ -159,7 +166,7 @@ async function generateImagesInternal(payload = {}, taskId = null) {
     // explicitly materialize an owned image into the public Ozon media store.
     const storedGeneratedImages = generatedImages;
     const storedCroppedImages = crop.croppedImages;
-    return {
+    const output = {
       taskId,
       generationMode: sourceImage ? "image_to_image" : "text_to_image",
       generatedImages: storedGeneratedImages,
@@ -172,6 +179,20 @@ async function generateImagesInternal(payload = {}, taskId = null) {
       channelId: imageRuntimeConfig?.channelId || "",
       channelName: imageRuntimeConfig?.channelName || imageRuntimeConfig?.name || ""
     };
+    // Commit the generated-result checkpoint before storage can fail. A retry
+    // must reuse these owned originals rather than buy another generation.
+    if (payload.onGeneratedOutput) await payload.onGeneratedOutput({ stage: "generated_image_v1", result: output });
+    try {
+      for (const [scope, images] of [["generated", output.generatedImages], ["cropped", output.croppedImages]]) {
+        for (const image of images) {
+          const file = await getAiTaskFile(taskId, scope, image.filename);
+          await archiveMediaCacheFile(file.filePath, { sourceUrl: image.url });
+        }
+      }
+    } catch (cause) {
+      throw Object.assign(new Error("图片已生成，OSS 保存尚未完成；请恢复原任务，复用原图而不重新生图", { cause }), { status: 503, code: "AI_GENERATION_STORAGE_PENDING" });
+    }
+    return output;
   } catch (error) {
     console.error("AI image generation failed", error);
     const detail = error?.message ? `：${error.message}` : "";
@@ -294,6 +315,10 @@ async function generateImageEdits({ taskId, finalPrompt, ratio, imageCount, sour
   for (let index = 1; index <= count; index += 1) {
     const filename = `generated_${String(index).padStart(3, "0")}.png`;
     const filePath = path.join(taskDir, filename);
+    if (await restoreMediaCacheFile(filePath)) {
+      generatedImages.push({ ...createImageRecord(safeTaskId, "generated", filename, filePath), sourceImage: sourceImage.source });
+      continue;
+    }
     const image = await editOpenAiImage({
       imageBuffer: sourceImage.buffer,
       imageFilePath: sourceImage.filePath,
@@ -771,7 +796,7 @@ export async function cropGeneratedImages({ taskId, generatedImages = [], cropMo
     let cropIndex = 0;
     for (const image of generatedImages) {
       const sourceFilename = image.filename || path.basename(image.path || "");
-      const sourcePath = resolveGeneratedImagePath(safeTaskId, sourceFilename);
+      const sourcePath = (await getAiTaskFile(safeTaskId, "generated", sourceFilename)).filePath;
       const tempOutputDir = path.join(croppedTaskDir, `.source_${String(cropIndex + 1).padStart(3, "0")}`);
       await fs.mkdir(tempOutputDir, { recursive: true });
       const result = await runPythonCropper(sourcePath, tempOutputDir, safeTaskId, { mode: cropMode || "auto" });
@@ -813,6 +838,7 @@ export async function getAiTaskFile(taskId, scope, filename, session = currentAi
     error.status = 400;
     throw error;
   }
+  await restoreMediaCacheFile(filePath);
   const stat = await fs.stat(filePath).catch(() => null);
   if (!stat?.isFile()) {
     const error = new Error("File not found");
@@ -850,10 +876,15 @@ function resolveCroppedTaskDir(taskId) {
 async function collectImageFiles(root, prefix) {
   const files = [];
   const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    if (!entry.isFile() || !ALLOWED_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-    const filePath = path.join(root, entry.name);
-    files.push({ name: `${prefix}/${entry.name}`, data: await fs.readFile(filePath) });
+  const sourcePrefix = mediaCacheSource(path.join(root, "index.png")).replace(/index\.png$/, "");
+  const mappings = await mysqlQuery("SELECT source_url FROM media_migration_map WHERE status='verified' AND source_url LIKE ? ESCAPE '!' LIMIT 1000", [`${sourcePrefix.replace(/[!_%]/g, match => `!${match}`)}%`]).catch(error => { if (error.code === "ER_NO_SUCH_TABLE") return []; throw error; });
+  const names = new Set(entries.filter(entry => entry.isFile()).map(entry => entry.name));
+  for (const row of mappings) if (row.source_url.startsWith(sourcePrefix) && !row.source_url.slice(sourcePrefix.length).includes("/")) names.add(row.source_url.slice(sourcePrefix.length));
+  for (const name of names) {
+    if (!ALLOWED_EXTENSIONS.has(path.extname(name).toLowerCase())) continue;
+    const filePath = path.join(root, name);
+    await restoreMediaCacheFile(filePath);
+    files.push({ name: `${prefix}/${name}`, data: await fs.readFile(filePath) });
   }
   return files.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
 }
