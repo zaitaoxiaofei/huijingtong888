@@ -38,5 +38,17 @@ test('return writes are scoped, idempotent and retain history without changing p
     assert.equal((await q('SELECT COUNT(*) n FROM ozon_return_history'))[0].n,2);
     assert.equal(JSON.stringify(await q('SELECT * FROM order_profit_items')),ledgerBefore);
     assert.equal((await q('SELECT actual_profit FROM order_items WHERE id=901'))[0].actual_profit,'25.0000');
+    const {ordersPagedMysql}=await import('../src/services/mysql-cutover.js');
+    const filters={status:'aftersale',includeCounts:'0',includeLogisticsOptions:'0',includeInventoryAvailability:'0',searchQuery:'same-posting',searchType:'order',searchMatch:'exact',pageSize:10};
+    const own=await ordersPagedMysql(filters,'901');
+    assert.equal(own.total,1);assert.equal(own.rows[0].id,901);assert.equal(own.rows[0].aftersale.status,'disposed');
+    const foreign=await ordersPagedMysql(filters,'902');assert.equal(foreign.total,0);assert.equal(foreign.rows.length,0);
+    await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(903,901,'maybe-posting','delivered','2026-01-02')");
+    await q("INSERT INTO order_items(id,order_id,ozon_sku,quantity,sale_price) VALUES(903,903,'2',1,20)");
+    await storeOzonReturnObservations(fixture.connection,scope,901,[{...row,return_id:'78',posting_number:'maybe-posting',state:{state:'OnSellerClarification'},product:{sku:2}}]);
+    const possible=await ordersPagedMysql({...filters,status:'possible_return',searchQuery:'maybe-posting'},'901');
+    assert.equal(possible.total,1);assert.equal(possible.rows[0].id,903);assert.equal(possible.rows[0].aftersale.needs_review,true);
+    await assert.rejects(ordersPagedMysql({...filters,status:'unreviewed_status'},'901'),e=>e.statusCode===503);
+
   }finally{const {closeMysqlPool}=await import('../src/mysql-pool.js');await closeMysqlPool();await fixture.cleanup();}
 });
