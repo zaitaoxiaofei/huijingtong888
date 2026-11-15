@@ -2407,6 +2407,47 @@ Read the safe shared tariff projection for enterprise calculators. Includes enab
 - Responses:
   - `200` `application/json` -> `array<object>`
 
+### Imported Payroll Ledger
+
+#### `GET /api/finance-submissions/payroll-ledger`
+
+Read the current enterprise's annual payroll records for the twelve-month summary and month dialogs. Each row includes a revision hash for concurrent-edit protection. Pending and approved payroll are visible; payment registration does not book salary costs again.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Query parameters:
+  - `year` (`string`, optional): Four-digit payroll year.
+  - `company_id` (`string`, optional): Owned company ID or all.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/finance-submissions/payroll-item`
+
+Create or edit one current-enterprise payroll item without a workbook. Existing item company/month are immutable; copying creates a new item in the selected company/month. New months remain pending approval. Approved-month additions and edits update the corresponding salary expense transactionally, preserve payment history, and append before/after audit records. Closed periods and duplicate employee names in a company/month are rejected.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/finance-submissions/payroll-paid-batch`
+
+Atomically register up to 500 selected wages as fully paid using each row's current net pay. Rows already fully paid are skipped. Stale wage/payment snapshots or inaccessible rows reject the entire batch. Does not execute transfers or change booked salary expenses.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 ### Dashboard And Profit
 
 #### `GET /api/dashboard`

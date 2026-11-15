@@ -30,5 +30,12 @@ export const FINANCE_SUBMISSIONS_SCHEMA = [
     recorded_by BIGINT UNSIGNED NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY idx_payroll_paid_tenant_item (tenant_id, item_id, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+  `CREATE TABLE IF NOT EXISTS finance_payroll_item_revisions (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id BIGINT UNSIGNED NOT NULL, item_id BIGINT UNSIGNED NOT NULL,
+    operation VARCHAR(24) NOT NULL, before_json MEDIUMTEXT NULL, after_json MEDIUMTEXT NOT NULL,
+    recorded_by BIGINT UNSIGNED NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_payroll_revision_tenant_item (tenant_id, item_id, id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`
 ];

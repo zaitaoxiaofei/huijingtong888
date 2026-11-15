@@ -1384,6 +1384,23 @@ const endpoints = [
       responses: [response(200, "application/json", arrayOf(scalar("object", "Public tariff fields and effective dates; no tenant ownership, notes or usage counts."), "Shared tariff reference rows."))]
     })
   ]),
+  section("Imported Payroll Ledger", [
+    endpoint("GET", "/api/finance-submissions/payroll-ledger", "Read the current enterprise's annual payroll records for the twelve-month summary and month dialogs. Each row includes a revision hash for concurrent-edit protection. Pending and approved payroll are visible; payment registration does not book salary costs again.", {
+      auth: "authenticated current-enterprise finance reviewer",
+      query: [param("year", scalar("string", "Four-digit payroll year."), false), param("company_id", scalar("string", "Owned company ID or all."), false)],
+      responses: [response(200, "application/json", objectOf("year, companies and rows including recorded pay, net pay, contribution parts, remaining pay, approval_status and revision."))]
+    }),
+    endpoint("POST", "/api/finance-submissions/payroll-item", "Create or edit one current-enterprise payroll item without a workbook. Existing item company/month are immutable; copying creates a new item in the selected company/month. New months remain pending approval. Approved-month additions and edits update the corresponding salary expense transactionally, preserve payment history, and append before/after audit records. Closed periods and duplicate employee names in a company/month are rejected.", {
+      auth: "authenticated current-enterprise finance reviewer",
+      requestBody: body(objectOf("company_id, month, person_name, department, base, tax, employer_items/employee_items (recorded parts) or legacy employer/employee totals. Optional item_id and required expected_revision for edits. Server derives net pay and company cost; client totals are not authoritative.")),
+      responses: [response(200, "application/json", objectOf("ok, id, status and revision; identical create retries return unchanged.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/finance-submissions/payroll-paid-batch", "Atomically register up to 500 selected wages as fully paid using each row's current net pay. Rows already fully paid are skipped. Stale wage/payment snapshots or inaccessible rows reject the entire batch. Does not execute transfers or change booked salary expenses.", {
+      auth: "authenticated current-enterprise finance reviewer",
+      requestBody: body(objectOf("items: array of item_id, expected_paid_amount and expected_revision snapshots.")),
+      responses: [response(200, "application/json", objectOf("ok, changed and skipped counts.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
   section("Dashboard And Profit", [
     endpoint("GET", "/api/dashboard", "Return dashboard summary counters and grouped metrics. All views recheck current enterprise membership. Non-financial members receive no profit, purchase/transport costs, inventory valuations, financial loss amounts or derived cost ratios, including nested shop rows and partial snapshots; responses use no-store. Desktop financial identifies the current authority. Optional view=mobile returns a fresh-member, explicit mobile metric allow-list; staff never receive profit/cost sections. Mobile date/dateKey/date_key must identify the same valid Beijing-calendar day no later than today; invalid or future days return 400 before loading or queuing a snapshot. Mobile includes month cancellation count; transport cost remains financial-only. Daily metrics use the selected day, month metrics accumulate from that month's start through the selected day, and ad_date_key identifies the actual advertising snapshot day. view=mobile-finance requires fresh finance duty and returns actual purchases for that same period plus current local/FBP/in-transit inventory values. Its period contains month_key/from/to/timezone; inventory_basis=current and inventory_snapshot_at identify the current read, not historical end-of-day inventory. Mobile sections load independently; no external sync or historical profit recalculation. Desktop date compatibility remains unchanged.", {
       auth: "authenticated",
