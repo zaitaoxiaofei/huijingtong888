@@ -22,7 +22,7 @@ function database(){
    assert.match(sql,/tenant_id=\?/);assert.match(sql,/company_id=\?/);
    if(sql.includes('WHERE id=?'))return docs.filter(d=>d.id===p[0]&&d.tenant_id===p[1]&&d.company_id===p[2]);
    if(sql.includes('sha256=?'))return docs.filter(d=>d.tenant_id===p[0]&&d.company_id===p[1]&&d.shop_key===p[2]&&(d.sha256===p[3]||(d.business_key&&d.business_key===p[4])));
-   return docs.filter(d=>d.tenant_id===p[0]&&d.company_id===p[1]&&((d.month_key>=p[2]&&d.month_key<=p[3])||(d.shop_key===0&&JSON.parse(d.payload_json).kind==='collection-cash')));
+   return docs.filter(d=>d.tenant_id===p[0]&&d.company_id===p[1]&&((d.month_key>=p[2]&&d.month_key<=p[3])||(d.shop_key===0&&JSON.parse(d.payload_json).kind==='collection-cash')||JSON.parse(d.payload_json).kind==='platform-payments'));
   }throw new Error('Unexpected query '+sql);
  };
  const execute=async(sql,p=[])=>{
@@ -154,4 +154,9 @@ test('editing a reviewed manual draft invalidates approval and retains its revie
  const input={company_id:1,shop_id:0,month:'2026-10',attachment_url:url,upload_type:'manual-expense',manual:{metric:'AI使用费',amount:10,currency:'CNY',note:'实际服务费用'}};
  const d=await db.service.preview(input,s);await db.service.review({company_id:1,document_id:d.document.id,review_status:'accepted',review_note:'原金额资料核对'},s);
  const e=await db.service.preview({...input,manual:{...input.manual,amount:20},expected_revision:1},s);assert.equal(e.document.review_status,'pending');assert.equal(e.document.revision,2);assert.deepEqual(e.document.payload_json.review_history.map(h=>h.status),['accepted','pending']);
+});
+
+test('a whole-year payment original archived in October remains available for August cash reconciliation',async()=>{
+ const db=database();db.docs.push({id:1,tenant_id:1,company_id:1,shop_key:10,month_key:'2026-10',original_name:'year-payment.xlsx',parse_status:'confirmed',payload_json:JSON.stringify({kind:'platform-payments',facts:[],cash:[{type:'platform-payment',date:'2026-08-24',amount:100,currency:'CNY'}]})});
+ const report=await db.service.report({company_id:1,month:'2026-08'},session());assert.equal(report.documents.length,1);assert.equal(report.documents[0].month_key,'2026-10');assert.equal(report.cash_reconciliation.matches.length,1);assert.equal(report.cash_reconciliation.matches[0].payment.amount,100);assert.deepEqual(report.metrics,{});
 });

@@ -1,4 +1,5 @@
 <script setup>
+import { FINANCE_FILE_CATEGORIES, financeDocumentCategories } from '../../../../src/shared/finance-document-categories.js';
 import { FINANCE_GROUPS, MANUAL_EXPENSE_METRICS, UPLOAD_TYPES, financeMatrix, financeSourceShops, financeLineSign } from '../../../../src/shared/company-finance-report.js';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
@@ -13,6 +14,7 @@ const allowed=computed(()=>canAccessPage(auth.user,'/finance/company-statements'
 const initialMonth=/^20\d{2}-(0[1-9]|1[0-2])$/.test(String(route.query.month||''))?String(route.query.month):shanghaiDateKey().slice(0,7);
 const companies=ref([]),assignments=ref([]),allShops=ref([]),companyId=ref(''),shopId=ref(0),month=ref(initialMonth),period=ref('month');
 const report=ref(null),error=ref(''),loading=ref(false),busy=ref(false),tab=ref('summary'),preview=ref(null),editManual=ref(null),review=ref(null),fileInput=ref(null),uploads=ref([]);
+const fileCategory=ref('all'),guideOpen=ref(false);
 const uploadMonth=ref(initialMonth),uploadType=ref('auto'),displayName=ref(''),relatedDocumentId=ref(''),manual=ref({metric:'AI使用费',amount:undefined,currency:'CNY',note:''}),selection=ref(null);
 const year=computed({get:()=>month.value.slice(0,4),set:value=>{if(/^20\d{2}$/.test(String(value)))month.value=`${value}-${month.value.slice(5)}`;}});
 const expandedGroups=['income','platform'];
@@ -22,6 +24,10 @@ const money=n=>n==null?'待补':Number(n).toLocaleString('zh-CN',{minimumFractio
 const shops=computed(()=>allShops.value.filter(s=>assignments.value.some(a=>Number(a.company_id)===Number(companyId.value)&&Number(a.shop_id)===Number(s.id)&&a.effective_from<=`${uploadMonth.value}-31`&&(!a.effective_to||a.effective_to>=`${uploadMonth.value}-01`))));
 const windowRange=computed(()=>({from:`${year.value}-01`,to:`${year.value}-12`}));
 const query=computed(()=>new URLSearchParams({company_id:companyId.value,...windowRange.value,period_mode:period.value}).toString());
+const categorizedDocuments=computed(()=>(report.value?.documents||[]).map(d=>({...d,categories:d.categories||financeDocumentCategories(d)})));
+const filteredDocuments=computed(()=>categorizedDocuments.value.filter(d=>fileCategory.value==='all'||d.categories.includes(fileCategory.value)));
+const fileCategoryCounts=computed(()=>Object.fromEntries(FINANCE_FILE_CATEGORIES.map(c=>[c.id,categorizedDocuments.value.filter(d=>d.categories.includes(c.id)).length])));
+const categoryName=id=>FINANCE_FILE_CATEGORIES.find(c=>c.id===id)?.name||id;
 const matrix=computed(()=>financeMatrix(report.value?.lines||[],year.value,period.value));
 const netSales=computed(()=>report.value?.metrics?.['已确认商品销售额']==null?null:report.value.metrics['已确认商品销售额']-(report.value.metrics['销售退回冲减额']||0));
 const platformFees=computed(()=>{const names=FINANCE_GROUPS.find(g=>g.id==='platform').metrics,lines=(report.value?.lines||[]).filter(l=>names.includes(l.metric));return lines.length?lines.reduce((s,l)=>s+l.amount,0):null;});
@@ -43,7 +49,7 @@ async function load(){
 async function setup(){
  const scope=currentApiCacheScope(),token=++generation;controller?.abort();report.value=null;companies.value=[];allShops.value=[];assignments.value=[];companyId.value='';uploads.value=[];review.value=null;error.value='';
  if(!allowed.value)return;
- try{const data=await apiClient.get('/api/finance-center/companies',{noCache:true});if(!current(token,scope))return;companies.value=data.companies;assignments.value=data.assignments;allShops.value=data.shops;companyId.value=String(data.companies[0]?.id||'');}
+ try{const data=await apiClient.get('/api/finance-center/companies',{noCache:true});if(!current(token,scope))return;companies.value=data.companies;assignments.value=data.assignments;allShops.value=data.shops;companyId.value=String(data.companies.find(c=>String(c.id)===String(route.query.company_id||''))?.id||data.companies[0]?.id||'');}
  catch(e){if(current(token,scope))error.value=e.message;}
 }
 async function upload(event){
@@ -131,6 +137,9 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
      <p>公司所属店铺：{{ report.shops.map(s=>s.name).join('、') || '尚未配置' }}。无对应资料的店铺继续列为缺件。</p>
     </el-tab-pane>
     <el-tab-pane label="上传、解析与归档" name="documents">
+     <div class="toolbar"><el-button @click="guideOpen=!guideOpen">{{guideOpen?'收起文件分类说明':'查看有哪些文件类别'}}</el-button><span>原件 {{categorizedDocuments.length}} 份；综合原件可对应多类，金额按明细只计一次。</span></div>
+     <el-table v-if="guideOpen" :data="FINANCE_FILE_CATEGORIES" border class="category-guide"><el-table-column prop="name" label="文件类别" min-width="160"/><el-table-column prop="examples" label="上传什么文件" min-width="260"/><el-table-column prop="effect" label="如何入账 / 避免重复" min-width="300"/></el-table>
+     <div class="toolbar"><el-select v-model="fileCategory" aria-label="文件类别筛选"><el-option value="all" :label="`全部类别（${categorizedDocuments.length}份）`"/><el-option v-for="c in FINANCE_FILE_CATEGORIES" :key="c.id" :value="c.id" :label="`${c.name}（${fileCategoryCounts[c.id]||0}份）`"/></el-select><span>待解析的原件已经收到，不等于缺文件；会计审核与金额确认分开。</span></div>
      <div class="upload-context"><strong>1. 确认业务归属与月份</strong><div class="toolbar"><el-date-picker v-model="uploadMonth" type="month" value-format="YYYY-MM" format="YYYY年MM月" :clearable="false" aria-label="上传业务月份" :disabled="busy"/><el-select v-model="shopId" aria-label="上传归属" :disabled="busy||selectedType?.shared"><el-option :value="0" label="公司共用（连连、场地、AI等）"/><el-option v-for="s in shops" :key="s.id" :label="s.name" :value="Number(s.id)"/></el-select></div>
       <strong>2. 选择报告用途</strong><el-select v-model="uploadType" aria-label="上传类型" :disabled="busy"><el-option v-for="t in UPLOAD_TYPES" :key="t.value" :value="t.value" :label="t.label"/></el-select><p>{{selectedType?.hint}}</p>
       <el-input v-model="displayName" :disabled="busy" maxlength="180" placeholder="中文显示名称（选填）；俄文原始文件名完整保留" aria-label="中文显示名称"/>
@@ -140,7 +149,7 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
      </div>
      <p>单文件不超过20MB。平台文件选择店铺；共用费用只录一次。按正文业务月份上传，跨月退货按本次账单月份汇总，原订单信息见原始报告；确认归档后才纳入金额。手工业务至少附一份账单或付款依据，后补发票用“仅归档”关联原业务。</p>
      <el-table v-if="uploads.length" :data="uploads"><el-table-column prop="name" label="本批文件"/><el-table-column prop="status" label="结果"/><el-table-column prop="note" label="提示" min-width="240"/></el-table>
-     <el-table :data="report.documents"><el-table-column prop="month_key" label="归档月份" width="110"/><el-table-column label="显示名称 / 原始文件名" min-width="300"><template #default="{row}"><span>{{row.payload_json.display_name||row.original_name}}</span><small v-if="row.payload_json.display_name">{{row.original_name}}</small></template></el-table-column><el-table-column label="用途" min-width="150"><template #default="{row}">{{UPLOAD_TYPES.find(t=>t.value===row.payload_json.upload_type)?.label||'平台自动识别'}}<small v-if="row.payload_json.related_document_id">关联业务 #{{row.payload_json.related_document_id}}</small></template></el-table-column><el-table-column label="解析状态" width="140"><template #default="{row}">{{ statuses[row.parse_status] }}</template></el-table-column><el-table-column label="操作" width="240"><template #default="{row}"><el-button link :aria-label="`预览 ${row.original_name}`" @click="openPreview(row)">预览</el-button><el-button link @click="openFile(row.attachment_url)">原件</el-button><el-button v-if="row.parse_status==='preview'" link type="primary" :disabled="busy" :aria-label="`确认归档 ${row.original_name}`" @click="confirm(row)">确认归档</el-button></template></el-table-column></el-table>
+     <el-table :data="filteredDocuments"><el-table-column prop="month_key" label="归档月份" width="110"/><el-table-column label="显示名称 / 原始文件名" min-width="300"><template #default="{row}"><span>{{row.payload_json.display_name||row.original_name}}</span><small v-if="row.payload_json.display_name">{{row.original_name}}</small></template></el-table-column><el-table-column label="文件分类" min-width="190"><template #default="{row}"><el-tag v-for="c in row.categories" :key="c" size="small" class="category-tag">{{categoryName(c)}}</el-tag></template></el-table-column><el-table-column label="用途" min-width="150"><template #default="{row}">{{UPLOAD_TYPES.find(t=>t.value===row.payload_json.upload_type)?.label||'平台自动识别'}}<small v-if="row.payload_json.related_document_id">关联业务 #{{row.payload_json.related_document_id}}</small></template></el-table-column><el-table-column label="解析状态" width="140"><template #default="{row}">{{ statuses[row.parse_status] }}</template></el-table-column><el-table-column label="操作" width="240"><template #default="{row}"><el-button link :aria-label="`预览 ${row.original_name}`" @click="openPreview(row)">预览</el-button><el-button link @click="openFile(row.attachment_url)">原件</el-button><el-button v-if="row.parse_status==='preview'" link type="primary" :disabled="busy" :aria-label="`确认归档 ${row.original_name}`" @click="confirm(row)">确认归档</el-button></template></el-table-column></el-table>
     </el-tab-pane>
     <el-tab-pane label="结算与回款" name="cash">
      <el-table :data="report.cash_reconciliation.currencies"><el-table-column prop="currency" label="原币"/><el-table-column label="收款入账"><template #default="{row}">{{money(row.entries)}}</template></el-table-column><el-table-column label="提现本金"><template #default="{row}">{{money(row.withdrawals)}}</template></el-table-column><el-table-column label="提现手续费"><template #default="{row}">{{money(row.fees)}}</template></el-table-column></el-table>
@@ -160,7 +169,7 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
 </template>
 
 <style scoped>
-.upload-context{display:grid;gap:12px;padding:18px;border:1px solid var(--el-border-color);border-radius:8px}.upload-context>.el-select{width:min(100%,520px)}.missing,small{color:var(--el-text-color-secondary)}small{display:block;overflow-wrap:anywhere;margin-top:5px}.source-lines{padding:10px 20px}.source-detail{border:1px solid var(--el-border-color);padding:16px;border-radius:8px}.period-matrix{width:100%}.period-matrix :deep(.finance-group-row td){font-weight:600;background:var(--el-fill-color-light)}
+.category-guide{margin:12px 0}.category-tag{margin:3px}.upload-context{display:grid;gap:12px;padding:18px;border:1px solid var(--el-border-color);border-radius:8px}.upload-context>.el-select{width:min(100%,520px)}.missing,small{color:var(--el-text-color-secondary)}small{display:block;overflow-wrap:anywhere;margin-top:5px}.source-lines{padding:10px 20px}.source-detail{border:1px solid var(--el-border-color);padding:16px;border-radius:8px}.period-matrix{width:100%}.period-matrix :deep(.finance-group-row td){font-weight:600;background:var(--el-fill-color-light)}
 .company-statements,.company-statements>*{min-width:0;max-width:100%}
 .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:12px 0 20px}.totals>div{display:grid;gap:8px;padding:16px;border:1px solid var(--el-border-color);border-radius:8px}.totals span{color:var(--el-text-color-secondary)}.totals strong{font-size:22px;font-weight:500}
 .company-statements{display:grid;gap:18px}.company-statements header,.toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.company-statements header{justify-content:space-between}.company-statements h1{font-size:24px;margin:0}.company-statements h2{font-size:18px;margin:18px 0 10px}.company-statements p{color:var(--el-text-color-secondary);overflow-wrap:anywhere}.toolbar .el-select{width:290px}.company-statements :deep(.el-button span){white-space:normal;overflow-wrap:anywhere}.company-statements :deep(.el-dialog__body){display:grid;gap:14px}@media(max-width:700px){.toolbar{align-items:stretch}.toolbar .el-select{width:100%}.company-statements h1{font-size:21px}}
