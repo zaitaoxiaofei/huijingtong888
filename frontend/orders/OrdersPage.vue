@@ -682,6 +682,7 @@ async function saveStatusPreference() {
 
 function rowStateLabel(row) {
   if (row.platform === 'wb') return wbOrderState(row.wb_supplier_status, row.wb_status).label;
+  if (row.aftersale && !["closed_without_return", "request_cancelled"].includes(row.aftersale.status)) return row.aftersale.status === "refunded" && String(row.status).includes("delivered") ? "已签收后退款" : row.aftersale.label;
   const key = rowDisplayStateKey(row);
   if (key === "ogl_dispatched") return row?.ogl_dispatch?.dispatched === true ? "已实际交运" : "已申请";
   if (key === "returned") return "已退货";
@@ -695,6 +696,7 @@ function rowDisplayStateKey(row) {
 }
 
 function rowStateColor(row) {
+  if (row.aftersale && !["closed_without_return", "request_cancelled"].includes(row.aftersale.status)) return row.aftersale.needs_review ? "red" : "amber";
   const key = rowDisplayStateKey(row);
   return STATE_META[key]?.color || "slate";
 }
@@ -1336,7 +1338,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: row.platform === 'wb' ? `${row.sale_currency || '币种待核对'} ${formatMoney(row.wb_amount)}` : `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
-    statusHint: orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : row?.ogl_dispatch?.stage === "bound" ? "已打印并绑定发运单，尚未实际交运；订单继续保留在等待发运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
+    statusHint: row.aftersale ? `Ozon售后：${row.aftersale.official_states.join("、")}；退货编号：${row.aftersale.return_ids.join("、")}；原履约状态：${row.status}。金额以官方账单为准。` : orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : row?.ogl_dispatch?.stage === "bound" ? "已打印并绑定发运单，尚未实际交运；订单继续保留在等待发运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: usesOglTransportDeadline(row) ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     statusDeadlineDanger: usesOglTransportDeadline(row) && oglTransportDeadlineUrgent(row, orderClock.value),

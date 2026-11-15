@@ -1,3 +1,7 @@
+import { enrichOrdersWithOzonReturns } from "../../src/services/ozon-return-reader.js";
+import { OZON_RETURN_SCHEMA } from "../../src/services/ozon-return-schema.js";
+import { ozonReturnFilterSql } from "../../src/services/ozon-return-state.js";
+import { officialReturnReportRow } from "../../src/services/ozon-return-report.js";
 import { enrichWbOrders } from "../../src/services/wb-order-dispatch.js";
 import { ORDER_BINDING_IGNORE_SCHEMA } from "../../src/services/order-binding-ignore.js";
 import { memoRequestRead } from '../../src/services/request-read-cache.js';
@@ -67,7 +71,7 @@ export async function createOrderFixtureSchema(connection) {
   const schema = readFileSync(new URL('../../scripts/init-mysql-schema.mjs', import.meta.url),'utf8');
   const tables = schema.match(/CREATE TABLE IF NOT EXISTS [\s\S]*?ENGINE=InnoDB[^;]+;/g) || [];
   if (!tables.length) throw new Error('Missing checked-in fixture schema');
-  for (const statement of [ORDER_SPLIT_SCHEMA, ...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables, ...INVENTORY_NUMBERING_V2_SCHEMA_STATEMENTS]) await connection.query(statement.replaceAll("\\`", "`"));
+  for (const statement of [...OZON_RETURN_SCHEMA.split(";").filter(x=>x.trim()), ORDER_SPLIT_SCHEMA, ...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables, ...INVENTORY_NUMBERING_V2_SCHEMA_STATEMENTS]) await connection.query(statement.replaceAll("\\`", "`"));
   const exceptionSnapshot = source.match(/CREATE TABLE IF NOT EXISTS exception_workbench_snapshots[\s\S]*?ENGINE=InnoDB[^\r\n]*/)?.[0];
   if (!exceptionSnapshot) throw new Error('Missing exception snapshot schema');
   await connection.query(exceptionSnapshot);
@@ -122,7 +126,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], readSnap
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({enrichWbOrders,recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,orderReportOutcomeCtesSql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({ozonReturnFilterSql,officialReturnReportRow,enrichOrdersWithOzonReturns:(rows,scope)=>enrichOrdersWithOzonReturns(rows,scope,query),enrichWbOrders,recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,orderReportOutcomeCtesSql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,inventoryAliasSearch,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

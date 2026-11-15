@@ -1,3 +1,5 @@
+import { syncTenantOzonReturns } from "./services/ozon-return-sync.js";
+import { invalidateOrderReadCache as invalidateReturnOrderReadCache } from "./services/order-read-cache.js";
 import {startWbPublishWorker} from './services/wb-publish-worker.js';
 import { createDashboardHandler } from './server/routes/dashboard.js';
 import { dispatchPrepare, dispatchLabels } from "./services/wb-order-dispatch.js";
@@ -639,6 +641,7 @@ const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
   "ogl_official_monitor",
   "customer_message_dispatch",
   "order_status_sync",
+  "ozon_return_sync",
   "cancelled_order_sync",
   "posting_detail_sync",
   "ozon_action_cleanup",
@@ -754,6 +757,16 @@ const scheduledJobDefinitions = [
     priority: "high",
     intervalMinutes: 1,
     initialDelaySeconds: 30,
+    catchupEnabled: true,
+    maxCatchupRuns: 1
+  },
+  {
+    key: "ozon_return_sync",
+    name: "Ozon 退货跟踪（含签收后）",
+    category: "orders",
+    priority: "high",
+    intervalMinutes: 60,
+    initialDelaySeconds: 180,
     catchupEnabled: true,
     maxCatchupRuns: 1
   },
@@ -1141,6 +1154,15 @@ const scheduledJobHandlers = {
   operational_notifications: withForegroundApiDeferral("operational_notifications", () => runTenantScheduledWork(tenantId => services.generateOperationalNotifications(tenantId))),
   order_status_sync: withForegroundApiDeferral("order_status_sync", runBackgroundOrderStatusSync),
   customer_message_dispatch: withForegroundApiDeferral("customer_message_dispatch", runBackgroundCustomerMessageDispatch),
+  ozon_return_sync: withForegroundApiDeferral("ozon_return_sync", async () => {
+    const laneBusy = claimBackgroundModuleLane("orders", "ozon_return_sync");
+    if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
+    try { return await runTenantScheduledWork(async tenantId => {
+      const result = await syncTenantOzonReturns(tenantId);
+      if (result.changed) invalidateReturnOrderReadCache();
+      return result;
+    }); } finally { releaseBackgroundModuleLane("orders", "ozon_return_sync"); }
+  }),
   cancelled_order_sync: withForegroundApiDeferral("cancelled_order_sync", runBackgroundCancelledOrderSync),
   posting_detail_sync: withForegroundApiDeferral("posting_detail_sync", runBackgroundPostingDetailSync),
   posting_detail_deep_sync: withForegroundApiDeferral("posting_detail_deep_sync", runBackgroundPostingDetailDeepSync),

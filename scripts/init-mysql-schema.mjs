@@ -1,3 +1,4 @@
+import { OZON_RETURN_SCHEMA } from "../src/services/ozon-return-schema.js";
 import { WB_SCHEMA } from "../src/services/wb-schema.js";
 import { ORDER_BINDING_IGNORE_SCHEMA } from "../src/services/order-binding-ignore.js";
 import {SKU_TRAFFIC_DAILY_SCHEMA} from '../src/services/sku-traffic-daily-schema.js';
@@ -24,6 +25,7 @@ import { TENANT_LOGIN_DELIVERY_SCHEMA } from "../src/services/tenant-login-deliv
 import { FINANCE_SUBMISSIONS_SCHEMA } from "../src/services/finance-submissions-schema.js";
 
 const mysqlSchemaSql = `
+${OZON_RETURN_SCHEMA};
 ${TENANT_LOGIN_DELIVERY_SCHEMA};
 ${TENANT_PURGE_SCHEMA.join(";\n")};
 ${SKU_TRAFFIC_DAILY_SCHEMA.join(";\n")};

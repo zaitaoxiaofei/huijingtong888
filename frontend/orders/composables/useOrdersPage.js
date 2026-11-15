@@ -104,6 +104,8 @@ const STATUS_TABS = [
   { value: "ogl_dispatched", label: "已交运待上网", title: "仓库已确认实际交运，尚未收到平台运输状态；同时保留在等待发运中" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
+  { value: "aftersale", label: "退货／售后" },
+  { value: "possible_return", label: "可能退货待确认" },
   { value: "cancelled", label: "已取消" },
   { value: "unbound", label: "待绑定库存" },
   { value: "pending_purchase", label: "待采购" },

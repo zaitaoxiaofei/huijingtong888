@@ -7,7 +7,7 @@ import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
-import { formatInteger, formatMoney, formatShortDate } from "./profit-utils.js";
+import { formatInteger as baseFormatInteger, formatMoney as baseFormatMoney, formatShortDate } from "./profit-utils.js";
 import { shanghaiDateKey, shanghaiMonthStart, shanghaiDateText } from "../../utils/shanghai-date";
 
 const route = useRoute();
@@ -104,7 +104,10 @@ const rankedSkus = computed(() => [...(state.skuOverview || [])].sort((a, b) => 
   return Number(b.return_rate || 0) - Number(a.return_rate || 0);
 }));
 
+const formatMoney = value => value == null ? "待核实" : baseFormatMoney(value);
+const formatInteger = value => value == null ? "待核实" : baseFormatInteger(value);
 function formatPercent(value, digits = 1) {
+  if (value == null) return "待核实";
   return `${(Number(value || 0) * 100).toFixed(digits)}%`;
 }
 
@@ -548,7 +551,7 @@ onMounted(async () => {
         <div class="aftersales-summary__item">
           <span>退货率</span>
           <strong>{{ formatPercent(state.operationalTotals?.return_rate) }}</strong>
-          <small>退货件数 / 最终履约销售件数</small>
+          <small>按原订单归属月统计；退货件数 / 最终履约销售件数</small>
         </div>
         <div class="aftersales-summary__item">
           <span>退货订单</span>
