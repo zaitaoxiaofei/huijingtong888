@@ -212,12 +212,12 @@ export async function submissionExport(batches) {
 export async function payrollLedgerExport(rows) {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("工资明细");
-  const headers = ["公司", "工资月份", "序号", "部门", "姓名", "基本工资", "单位养老", "单位医疗", "单位附加医疗", "单位失业", "单位工伤", "单位公积金", "单位小计", "个人养老", "个人医疗", "个人失业", "个人公积金", "个人小计", "个税", "实发工资（表内）", "确认签字", "已发金额", "未发差额"];
+  const headers = ["公司", "工资月份", "序号", "部门", "姓名", "基本工资", "单位养老", "单位医疗", "单位附加医疗", "单位失业", "单位工伤", "单位公积金", "单位小计", "个人养老", "个人医疗", "个人失业", "个人公积金", "个人小计", "个税", "实发工资（表内）", "确认签字", "已发金额", "未发差额", "公司人工总支出"];
   sheet.columns = headers.map(header => ({ header, width: header === "公司" ? 36 : 18 }));
   rows.forEach((row, index) => sheet.addRow([row.company_name, row.month, index + 1, row.department, row.person_name, row.base,
     ...["pension", "medical", "supplementary_medical", "unemployment", "injury", "housing_fund"].map(key => row.employer_items?.[key] ?? null), row.employer,
-    ...["pension", "medical", "unemployment", "housing_fund"].map(key => row.employee_items?.[key] ?? null), row.employee, row.tax, row.net, row.confirmation || "", row.paid_amount, row.remaining_amount]));
+    ...["pension", "medical", "unemployment", "housing_fund"].map(key => row.employee_items?.[key] ?? null), row.employee, row.tax, row.net, row.confirmation || "", row.paid_amount, row.remaining_amount, money(Number(row.base) + Number(row.employer))]));
   sheet.getRow(1).font = { bold: true }; sheet.views = [{ state: "frozen", ySplit: 1, xSplit: 5 }];
-  for (const column of [...Array.from({ length: 15 }, (_, index) => index + 6), 22, 23]) sheet.getColumn(column).numFmt = "#,##0.00";
+  for (const column of [...Array.from({ length: 15 }, (_, index) => index + 6), 22, 23, 24]) sheet.getColumn(column).numFmt = "#,##0.00";
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }

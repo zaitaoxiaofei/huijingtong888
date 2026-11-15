@@ -1,13 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import ExcelJS from "exceljs";
-import { reimbursementTemplate, parseReimbursements, parsePayroll, payrollTemplate, submissionExport, readWorkbook } from "../src/services/finance-workbooks.js";
+import { reimbursementTemplate, parseReimbursements, parsePayroll, payrollTemplate, submissionExport, readWorkbook, payrollLedgerExport } from "../src/services/finance-workbooks.js";
 import { authorizeApiRequest } from "../src/server/authorization.js";
 import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 import { canAccessPage } from "../src/shared/permissions.js";
 
 export const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF0cAAAAASUVORK5CYII=", "base64");
 export const options = { companies: [{id: 20, name: "测试甲公司"}, {id: 21, name: "测试乙公司"}], name: "测试员工" };
+
+test("payroll export includes employer cost without counting employee deductions twice", async () => {
+  const rows = [{ company_name:"上海公司", month:"2026-09", person_name:"员工甲", base:7000, employer:1932.14, employee:783.3, tax:0, net:6216.7, paid_amount:2000, remaining_amount:4216.7 },
+    { company_name:"合肥公司", month:"2026-09", person_name:"员工乙", base:4500, employer:0, employee:0, tax:0, net:4500, paid_amount:4500, remaining_amount:0 }];
+  const sheet = (await readWorkbook(await payrollLedgerExport(rows))).getWorksheet("工资明细");
+  assert.equal(sheet.getCell("X1").value, "公司人工总支出");
+  assert.equal(sheet.getCell("X2").value, 8932.14);
+  assert.equal(sheet.getCell("X3").value, 4500);
+  assert.equal(sheet.getCell("T2").value, 6216.7);
+  assert.equal(sheet.getCell("V2").value, 2000);
+  assert.equal(sheet.getCell("W2").value, 4216.7);
+});
 export async function claimWorkbook(change = () => {}) {
   const book = await readWorkbook(await reimbursementTemplate(options));
   const sheet = book.getWorksheet("报销申请");
