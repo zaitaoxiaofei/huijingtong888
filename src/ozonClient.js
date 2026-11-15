@@ -1,3 +1,4 @@
+import { fetchOzonReturns } from "./services/ozon-return-client.js";
 import { readOzonCategoryIdentity, ozonCategoryIdentityError, ozonCategoryProductRefs, findOzonCategoryProduct } from "./services/ozon-category-identity.js";
 import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js";
 import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
@@ -21,6 +22,11 @@ const FBS_LIST_INTERVAL_MS = 1200;
 let fbsListNextRequestAt = 0;
 let fbsListCooldownUntil = 0;
 let fbsListQueue = Promise.resolve();
+
+export async function fetchOzonReturnObservations(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) throw new Error("店铺缺少 Ozon API 凭据，无法核查退货");
+  return fetchOzonReturns(shop, { ...options, request: (path, payload, opts) => ozonRequest(opts.shop, path, payload, opts) });
+}
 
 export async function fetchOzonPostings(shop, options = {}) {
   const legacySince = typeof options === "string" ? options : "";

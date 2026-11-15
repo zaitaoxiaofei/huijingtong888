@@ -658,6 +658,7 @@ function canEditCollaborationNote(row) {
             >
               {{ row.profitSummary.alertLevel === "loss" ? "亏损" : "低利润" }}
             </el-tag>
+            <el-tag v-if="row.aftersale && !['closed_without_return', 'request_cancelled'].includes(row.aftersale.status)" size="small" type="warning" title="新增退款或补偿需与官方账单核对；历史预估不能作为最终收益">售后损益需核对</el-tag>
             <div v-if="Number(row.productDisplayRows?.length || 0) > 1" class="orders-profit-merge-hint">
               已按 {{ Number(row.productDisplayRows?.length || 0) }} 个商品分别计算后汇总
             </div>

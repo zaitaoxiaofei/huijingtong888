@@ -1,3 +1,6 @@
+import { officialReturnReportRow } from "./ozon-return-report.js";
+import { ozonReturnFilterSql } from "./ozon-return-state.js";
+import { enrichOrdersWithOzonReturns } from "./ozon-return-reader.js";
 import { settleLegacyDailyOrder, legacyDailyBatchDecision } from "./legacy-daily-accrual-settlement.js";
 import { assertInventoryPackage, defaultInventoryPackagingFee } from "../shared/inventory-package-defaults.js";
 import { productProfitParameterChanges } from "../shared/product-profit-parameters.js";
@@ -27129,6 +27132,9 @@ async function buildProfitSummaryOverviewFromOrdersMysql(from = "", to = "") {
 }
 
 const AFTERSALE_BUCKETS_MYSQL = [
+  { key: "official_after_delivery_return", label: "官方签收后退款／退货", hint: "独立退货接口已确认；货物去向与退款分开记录，损失按账本核对。" },
+  { key: "official_partial_compensation", label: "官方部分补偿", hint: "仅调整补偿对应金额，不作为整单退货计入退货率。" },
+  { key: "official_possible_return", label: "可能退货，待人工确认", hint: "官方申请待澄清或新状态待确认，不自动清零销售额。" },
   { key: "cargo_loss", label: "配送货损/理赔待核", hint: "配送途中丢失，计商品成本与收单费，不计佣金及运费；不计入退货率，赔付另核销。" },
   { key: "pre_fulfillment_cancel", label: "取消订单", hint: "未发生实质履约损失，销售额不计入有效销售，损失默认为 0。" },
   { key: "rejected_unclaimed", label: "拒收/未取", hint: "买家拒签、未取、配送失败或清关失败，至少核对商品成本、国际运费和收单费。" },
@@ -27223,6 +27229,7 @@ function normalizeAftersaleRowMysql(row = {}, qualityPrefixes = []) {
 }
 
 function aftersaleRelevantMysql(row = {}) {
+  if (row.official_return_record) return !Number(row.is_quality_order || 0);
   if (String(row.bucket || "") === "platform_document_issue") return true;
   if (Number(row.is_quality_order || 0) > 0) return false;
   return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(row.outcome_type || ""))
@@ -27254,7 +27261,8 @@ async function aftersaleBaseRowsMysql(query = {}, tenantId = "admin") {
     params.push(Number(shopId));
   }
   where.push(`(
-    LOWER(COALESCE(o.status, '')) LIKE '%cancel%'
+    ${ozonReturnFilterSql(scope)}
+    OR LOWER(COALESCE(o.status, '')) LIKE '%cancel%'
     OR LOWER(COALESCE(o.status, '')) LIKE '%return%'
     OR LOWER(COALESCE(o.status, '')) LIKE '%reject%'
     OR LOWER(COALESCE(o.status, '')) LIKE '%not_accepted%'
@@ -27290,6 +27298,9 @@ async function aftersaleBaseRowsMysql(query = {}, tenantId = "admin") {
       o.cancel_type,
       o.cancelled_after_ship,
       COALESCE((SELECT mark_type FROM order_marks WHERE order_id = o.id), '') AS mark_type,
+      CASE WHEN oi.settlement_state IN ('accrued','reviewed_provisional') THEN oi.actual_profit ELSE NULL END AS official_actual_profit_cny,
+      oi.estimated_profit AS official_estimated_profit_cny,
+      aftersale_proof.inputs_json AS official_actual_inputs_json,
       oi.id AS order_item_id,
       oi.ozon_sku,
       oi.quantity,
@@ -27323,13 +27334,15 @@ async function aftersaleBaseRowsMysql(query = {}, tenantId = "admin") {
     JOIN order_items oi ON oi.order_id = o.id
     LEFT JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+    LEFT JOIN order_profit_calc_state aftersale_state ON aftersale_state.order_item_id=oi.id AND aftersale_state.tenant_key=CAST(${scope.id} AS CHAR) COLLATE utf8mb4_0900_ai_ci
+    LEFT JOIN order_profit_calc_revisions aftersale_proof ON aftersale_proof.id=aftersale_state.current_actual_revision_id AND aftersale_proof.tenant_key=aftersale_state.tenant_key AND aftersale_proof.order_item_id=oi.id AND aftersale_proof.layer='actual'
     LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", scope)}
     LEFT JOIN products p ON p.id = sm.product_id AND ${orderTenantPredicateMysql("p", scope)}
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
     LEFT JOIN online_products op_by_product ON op_by_product.shop_id = o.shop_id AND op_by_product.ozon_product_id = oi.ozon_product_id
     WHERE ${where.join(" AND ")}
   `, params);
-  return { rows, from, to, shopId };
+  return { rows: await enrichOrdersWithOzonReturns(rows, { id: scope.id, isDefault: scope.defaultTenant }, mysqlQuery), from, to, shopId };
 }
 
 async function aftersaleSalesBaseRowsMysql({ from = "", to = "", shopId = "all" } = {}, tenantId = "admin") {
@@ -27367,7 +27380,7 @@ async function aftersaleSalesBaseRowsMysql({ from = "", to = "", shopId = "all" 
 }
 
 function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = []) {
-  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss"].includes(String(row.bucket || "")));
+  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss", "official_partial_compensation", "official_possible_return"].includes(String(row.bucket || "")));
   const shops = new Map();
   const skus = new Map();
   const ensureShop = (row) => {
@@ -27379,6 +27392,8 @@ function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = 
       sales_amount_cny: 0,
       returnOrderIds: new Set(),
       return_quantity: 0,
+      return_quantity_unknown: false,
+      return_loss_unknown: false,
       return_loss_cny: 0,
       risky_sku_count: 0
     });
@@ -27397,6 +27412,8 @@ function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = 
       sales_amount_cny: 0,
       returnOrderIds: new Set(),
       return_quantity: 0,
+      return_quantity_unknown: false,
+      return_loss_unknown: false,
       return_loss_cny: 0,
       reasons: new Map()
     });
@@ -27417,6 +27434,8 @@ function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = 
     shop.return_quantity += Number(row.quantity || 0);
     shop.return_loss_cny += Number(row.estimated_loss_cny || 0);
     const sku = ensureSku(normalizedRow);
+    if (row.return_quantity_unknown) { shop.return_quantity_unknown = true; sku.return_quantity_unknown = true; }
+    if (row.official_return_record && row.actual_loss_cny == null) { shop.return_loss_unknown = true; sku.return_loss_unknown = true; }
     sku.returnOrderIds.add(Number(row.order_id));
     sku.return_quantity += Number(row.quantity || 0);
     sku.return_loss_cny += Number(row.estimated_loss_cny || 0);
@@ -27436,16 +27455,16 @@ function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = 
       image_url: row.image_url,
       sales_quantity: row.sales_quantity,
       return_orders: row.returnOrderIds.size,
-      return_quantity: row.return_quantity,
-      return_rate: Number(returnRate.toFixed(6)),
-      return_loss_cny: roundMoneyMysql(row.return_loss_cny),
+      return_quantity: row.return_quantity_unknown ? null : row.return_quantity,
+      return_rate: row.return_quantity_unknown ? null : Number(returnRate.toFixed(6)),
+      return_loss_cny: row.return_loss_unknown ? null : roundMoneyMysql(row.return_loss_cny),
       primary_reason: topReason?.[0] || "-",
       primary_reason_share: row.return_quantity > 0 ? Number(((topReason?.[1] || 0) / row.return_quantity).toFixed(6)) : 0,
       sample_sufficient: row.sales_quantity >= 10 || row.return_quantity >= 3,
       risk_level: (row.sales_quantity >= 10 || row.return_quantity >= 3) && returnRate >= 0.15 ? "high"
         : (row.sales_quantity >= 10 || row.return_quantity >= 3) && returnRate >= 0.08 ? "medium" : "normal"
     };
-  }).filter((row) => row.return_quantity > 0)
+  }).filter((row) => row.return_orders > 0)
     .sort((a, b) => Number(b.return_rate) - Number(a.return_rate) || Number(b.return_loss_cny) - Number(a.return_loss_cny));
   const riskyByShop = new Map();
   for (const row of skuRows) {
@@ -27458,9 +27477,9 @@ function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = 
     shop_name: row.shop_name,
     sales_quantity: row.sales_quantity,
     return_orders: row.returnOrderIds.size,
-    return_quantity: row.return_quantity,
-    return_rate: row.sales_quantity > 0 ? Number((row.return_quantity / row.sales_quantity).toFixed(6)) : 0,
-    return_loss_cny: roundMoneyMysql(row.return_loss_cny),
+    return_quantity: row.return_quantity_unknown ? null : row.return_quantity,
+    return_rate: row.return_quantity_unknown ? null : row.sales_quantity > 0 ? Number((row.return_quantity / row.sales_quantity).toFixed(6)) : 0,
+    return_loss_cny: row.return_loss_unknown ? null : roundMoneyMysql(row.return_loss_cny),
     loss_rate: row.sales_amount_cny > 0 ? Number((row.return_loss_cny / row.sales_amount_cny).toFixed(6)) : 0,
     risky_sku_count: Number(riskyByShop.get(String(row.shop_id ?? "")) || 0)
   })).sort((a, b) => Number(b.return_loss_cny) - Number(a.return_loss_cny));
@@ -27472,7 +27491,7 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
   const { rows, from, to, shopId } = await aftersaleBaseRowsMysql(query, tenantId);
   const salesRows = await aftersaleSalesBaseRowsMysql({ from, to, shopId }, tenantId);
   const qualityPrefixes = await orderQualityPrefixesMysql();
-  const normalized = rows.map((row) => normalizeAftersaleRowMysql(row, qualityPrefixes)).filter(aftersaleRelevantMysql);
+  const normalized = rows.map((row) => officialReturnReportRow(row, normalizeAftersaleRowMysql(row, qualityPrefixes))).filter(aftersaleRelevantMysql);
   const buckets = new Map(AFTERSALE_BUCKETS_MYSQL.map((bucket) => [bucket.key, {
     key: bucket.key,
     label: bucket.label,
@@ -27483,6 +27502,7 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
     sale_amount_cny: 0,
     estimated_loss_cny: 0,
     actual_loss_cny: 0,
+    actual_loss_unknown: false,
     missing_cost_count: 0,
     missing_shipping_count: 0,
     needs_review_count: 0,
@@ -27496,6 +27516,7 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
     target.sale_amount_cny += Number(row.sale_amount_cny || 0);
     target.estimated_loss_cny += Number(row.estimated_loss_cny || 0);
     target.actual_loss_cny += Number(row.actual_loss_cny || 0);
+    if (row.official_return_record && row.actual_loss_cny == null) target.actual_loss_unknown = true;
     target.missing_cost_count += Number(row.missing_cost || 0);
     target.missing_shipping_count += Number(row.missing_shipping || 0);
     target.needs_review_count += Number(row.needs_review || 0);
@@ -27509,8 +27530,8 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
     order_count: row.orderIds.size,
     item_quantity: row.item_quantity,
     sale_amount_cny: roundMoneyMysql(row.sale_amount_cny),
-    estimated_loss_cny: roundMoneyMysql(row.estimated_loss_cny),
-    actual_loss_cny: roundMoneyMysql(row.actual_loss_cny),
+    estimated_loss_cny: row.actual_loss_unknown ? null : roundMoneyMysql(row.estimated_loss_cny),
+    actual_loss_cny: row.actual_loss_unknown ? null : roundMoneyMysql(row.actual_loss_cny),
     missing_cost_count: row.missing_cost_count,
     missing_shipping_count: row.missing_shipping_count,
     needs_review_count: row.needs_review_count,
@@ -27527,11 +27548,13 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
     acc.needs_review_count += Number(row.needs_review_count || 0);
     return acc;
   }, { order_count: 0, item_quantity: 0, sale_amount_cny: 0, estimated_loss_cny: 0, actual_loss_cny: 0, missing_cost_count: 0, missing_shipping_count: 0, needs_review_count: 0 });
+  const unknownLossOrders = new Set(normalized.filter(row => row.official_return_record && row.actual_loss_cny == null).map(row => row.order_id)).size;
+  const unknownQuantityOrders = new Set(normalized.filter(row => row.bucket === "official_after_delivery_return" && row.return_quantity_unknown).map(row => row.order_id)).size;
   const operational = buildAftersaleOperationalOverviewMysql(salesRows, normalized);
   const returnQuantity = operational.shops.reduce((sum, row) => sum + Number(row.return_quantity || 0), 0);
   const salesQuantity = operational.shops.reduce((sum, row) => sum + Number(row.sales_quantity || 0), 0);
   const returnOrders = new Set(normalized
-    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss"].includes(String(row.bucket || "")))
+    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss", "official_partial_compensation", "official_possible_return"].includes(String(row.bucket || "")))
     .map((row) => Number(row.order_id))).size;
   return {
     from,
@@ -27541,16 +27564,18 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
     totals: {
       ...totals,
       sale_amount_cny: roundMoneyMysql(totals.sale_amount_cny),
-      estimated_loss_cny: roundMoneyMysql(totals.estimated_loss_cny),
-      actual_loss_cny: roundMoneyMysql(totals.actual_loss_cny)
+      estimated_loss_cny: unknownLossOrders ? null : roundMoneyMysql(totals.estimated_loss_cny),
+      actual_loss_cny: unknownLossOrders ? null : roundMoneyMysql(totals.actual_loss_cny)
     },
     operational_totals: {
       sales_quantity: salesQuantity,
       return_orders: returnOrders,
-      return_quantity: returnQuantity,
-      return_rate: salesQuantity > 0 ? Number((returnQuantity / salesQuantity).toFixed(6)) : 0,
-      return_loss_cny: roundMoneyMysql(operational.shops.reduce((sum, row) => sum + Number(row.return_loss_cny || 0), 0)),
-      average_return_loss_cny: returnOrders > 0
+      return_quantity: unknownQuantityOrders ? null : returnQuantity,
+      unknown_quantity_orders: unknownQuantityOrders,
+      unknown_loss_orders: unknownLossOrders,
+      return_rate: unknownQuantityOrders ? null : salesQuantity > 0 ? Number((returnQuantity / salesQuantity).toFixed(6)) : 0,
+      return_loss_cny: unknownLossOrders ? null : roundMoneyMysql(operational.shops.reduce((sum, row) => sum + Number(row.return_loss_cny || 0), 0)),
+      average_return_loss_cny: unknownLossOrders ? null : returnOrders > 0
         ? roundMoneyMysql(operational.shops.reduce((sum, row) => sum + Number(row.return_loss_cny || 0), 0) / returnOrders)
         : 0,
       risky_sku_count: operational.skus.filter((row) => row.risk_level !== "normal").length
@@ -27561,9 +27586,7 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
       count: totals.missing_cost_count + totals.missing_shipping_count,
       cost_count: totals.missing_cost_count,
       shipping_count: totals.missing_shipping_count,
-      message: totals.missing_cost_count || totals.missing_shipping_count
-        ? `售后订单存在 ${totals.missing_cost_count} 个成本缺失项、${totals.missing_shipping_count} 个国际运费缺失项，需要补齐后重算。`
-        : ""
+      message: [totals.missing_cost_count || totals.missing_shipping_count ? `售后订单存在 ${totals.missing_cost_count} 个成本缺失项、${totals.missing_shipping_count} 个国际运费缺失项，需要补齐后重算。` : "", unknownLossOrders ? `${unknownLossOrders} 笔官方售后订单损益尚待核算，不能当作零损失。` : "", unknownQuantityOrders ? `${unknownQuantityOrders} 笔多件商品订单的退货数量待核实，退货件数及比例暂不确定。` : ""].filter(Boolean).join(" ")
     }
   };
 }
@@ -27577,7 +27600,7 @@ export async function profitAftersalesDetailsMysql(query = {}, tenantId = "admin
   const pageSize = exportMode ? Math.min(requestedPageSize || 10000, 10000) : Math.min(requestedPageSize, 200);
   const { rows, from, to, shopId } = await aftersaleBaseRowsMysql(query, tenantId);
   const qualityPrefixes = await orderQualityPrefixesMysql();
-  const normalized = rows.map((row) => normalizeAftersaleRowMysql(row, qualityPrefixes)).filter(aftersaleRelevantMysql).filter((row) => bucketFilter === "all" || !bucketFilter || row.bucket === bucketFilter);
+  const normalized = rows.map((row) => officialReturnReportRow(row, normalizeAftersaleRowMysql(row, qualityPrefixes))).filter(aftersaleRelevantMysql).filter((row) => bucketFilter === "all" || !bucketFilter || row.bucket === bucketFilter);
   const byOrder = new Map();
   for (const row of normalized) {
     const key = Number(row.order_id);
@@ -27622,6 +27645,8 @@ export async function profitAftersalesDetailsMysql(query = {}, tenantId = "admin
       item_names: [],
       skus: []
     };
+    if (row.official_return_record && row.actual_loss_cny == null) current.actual_loss_unknown = true;
+    if (row.return_quantity_unknown) current.return_quantity_unknown = true;
     current.sale_amount_cny += Number(row.sale_amount_cny || 0);
     current.estimated_loss_cny += Number(row.estimated_loss_cny || 0);
     current.actual_loss_cny += Number(row.actual_loss_cny || 0);
@@ -27652,9 +27677,9 @@ export async function profitAftersalesDetailsMysql(query = {}, tenantId = "admin
   const detailRows = pageRows.map((row) => ({
     ...row,
     sale_amount_cny: roundMoneyMysql(row.sale_amount_cny),
-    estimated_loss_cny: roundMoneyMysql(row.estimated_loss_cny),
-    actual_loss_cny: roundMoneyMysql(row.actual_loss_cny),
-    total_loss_cny: roundMoneyMysql(row.total_loss_cny),
+    estimated_loss_cny: row.actual_loss_unknown ? null : roundMoneyMysql(row.estimated_loss_cny),
+    actual_loss_cny: row.actual_loss_unknown ? null : roundMoneyMysql(row.actual_loss_cny),
+    total_loss_cny: row.actual_loss_unknown ? null : roundMoneyMysql(row.total_loss_cny),
     component_loss_cny: roundMoneyMysql(row.component_loss_cny),
     purchase_cost_cny: roundMoneyMysql(row.purchase_cost_cny),
     domestic_shipping_cny: roundMoneyMysql(row.domestic_shipping_cny),
@@ -30935,7 +30960,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     for (const row of rows) row.raw_json = byOrder.get(Number(row.id)) ?? null;
   }
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
-  return enrichWbOrders((await measure("enrich", () => enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId, diagnostics))).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0)));
+  return enrichWbOrders((await enrichOrdersWithOzonReturns(await measure("enrich", () => enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId, diagnostics)), { id: tenantScope.id, isDefault: tenantScope.defaultTenant }, mysqlQuery)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0)));
 }
 
 async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
@@ -31823,6 +31848,8 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
   const row = await mysqlQueryOne(`
     SELECT
       COUNT(*) AS all_count,
+      SUM(CASE WHEN ${statusSql("aftersale")} THEN 1 ELSE 0 END) AS aftersale,
+      SUM(CASE WHEN ${statusSql("possible_return")} THEN 1 ELSE 0 END) AS possible_return,
       SUM(CASE WHEN ${statusSql("awaiting_packaging")} THEN 1 ELSE 0 END) AS awaiting_packaging,
       SUM(CASE WHEN ${statusSql("awaiting_deliver")} THEN 1 ELSE 0 END) AS awaiting_deliver,
       SUM(CASE WHEN ${statusSql("ogl_bound")} THEN 1 ELSE 0 END) AS ogl_bound,
@@ -31842,6 +31869,8 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
   `, base.params);
   return {
     all: Number(row?.all_count || 0),
+    aftersale: Number(row?.aftersale || 0),
+    possible_return: Number(row?.possible_return || 0),
     awaiting_packaging: Number(row?.awaiting_packaging || 0),
     awaiting_deliver: Number(row?.awaiting_deliver || 0),
     ogl_bound: Number(row?.ogl_bound || 0),
@@ -32109,6 +32138,7 @@ async function addOrderLogisticsMethodSqlMysql(where, params, query, tenantId = 
 function orderStatusSqlMysql(status, coverage = null, tenantScope = null, evidenceAlias = null) {
   if (coverage && ["pending_purchase", "purchase_in_transit", "purchase_records_missing"].includes(status)) return procurementQueueSql(coverage, status);
   if (status === "all") return "1 = 1";
+  if (["aftersale", "possible_return"].includes(status)) return ozonReturnFilterSql(tenantScope, status);
   if (status === "pending_purchase") {
     return `(
       (${orderStatusSqlMysql("awaiting_packaging", null, tenantScope, evidenceAlias)} OR ${orderStatusSqlMysql("awaiting_deliver", null, tenantScope, evidenceAlias)})
@@ -32413,6 +32443,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
     tenantScoped ? [Number(id), normalizedTenantId] : [Number(id)]
   );
   if (!order) return null;
+  [order] = await enrichOrdersWithOzonReturns([order], { id: scope.id, isDefault: scope.defaultTenant }, mysqlQuery);
   order = await enrichOrderLogisticsMysql(order, tenantScoped ? String(normalizedTenantId) : "admin");
   order = withOglDispatch(order, (await loadOglDispatchMembersMysql([Number(order.id)], scope)).get(Number(order.id)));
 
