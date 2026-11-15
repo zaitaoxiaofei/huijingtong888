@@ -1,12 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mysqlQuery, mysqlExecute, withMysqlTransaction } from "../mysql-pool.js";
 import { ensureFinanceCenterSchema } from "./finance-center.js";
+import { normalizePayrollEntry } from "../shared/payroll-entry.js";
 import { canReviewFinance } from "../shared/finance-submissions.js";
 import { parsePayroll, parseReimbursements, money, WORKBOOK_LIMIT } from "./finance-workbooks.js";
 
 export { FINANCE_SUBMISSIONS_SCHEMA } from "./finance-submissions-schema.js";
 import { FINANCE_SUBMISSIONS_SCHEMA } from "./finance-submissions-schema.js";
 
+const payrollRevision = text => createHash("sha256").update(text).digest("hex");
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 
 export function submissionActor(session, reviewer = false) {
@@ -92,7 +94,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
         return { ok: true, id, status: "pending" };
       });
     } catch (error) {
-      if (error.code === "ER_DUP_ENTRY") fail(parsed.kind === "payroll" ? "该公司月份已有工资导入记录，请先核对原申请，避免重复计入工资" : "这份报销内容已经提交，请在报销记录中查看审批进度", 409);
+      if (error.code === "ER_DUP_ENTRY") fail(parsed.kind === "payroll" ? "该公司月份已有工资记录，请在工资明细中新增或编辑，避免重复计入工资" : "这份报销内容已经提交，请在报销记录中查看审批进度", 409);
       throw error;
     }
   }
@@ -155,7 +157,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
         AND s.status IN ('pending','approved') ORDER BY i.expense_date, i.company_id, i.id`, [actor.tenantId, ...companyIds, `${year}-01-01`, `${Number(year) + 1}-01-01`]);
     return { year, companies: companyList, rows: records.map(record => {
       const row = JSON.parse(record.detail_json), paid = money(record.paid_amount || 0);
-      return { ...row, id: record.id, approval_status: record.approval_status, paid_amount: paid,
+      return { ...row, id: record.id, revision: payrollRevision(record.detail_json), approval_status: record.approval_status, paid_amount: paid,
         remaining_amount: money(row.net - paid), paid_updated_at: record.paid_updated_at };
     }) };
   }
@@ -168,7 +170,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
     await ensure();
     return transaction(async connection => {
       const run = async (sql, params = []) => (await connection.execute(sql, params))[0];
-      const [item] = await run("SELECT id, submission_id FROM finance_submission_items WHERE id=? AND tenant_id=?", [itemId, actor.tenantId]);
+      const [item] = await run("SELECT id, submission_id, detail_json FROM finance_submission_items WHERE id=? AND tenant_id=?", [itemId, actor.tenantId]);
       if (!item) fail("工资明细不存在、不属于当前企业或已退回", 404);
       // Match review's lock order so payment and rejection serialize on the parent.
       const [batch] = await run("SELECT id FROM finance_submissions WHERE id=? AND tenant_id=? AND kind='payroll' AND status IN ('pending','approved') FOR UPDATE", [item.submission_id, actor.tenantId]);
@@ -176,12 +178,116 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
       const [last] = await run("SELECT paid_amount FROM finance_payroll_payment_updates WHERE tenant_id=? AND item_id=? ORDER BY id DESC LIMIT 1 FOR UPDATE", [actor.tenantId, itemId]);
       const current = money(last?.paid_amount || 0), next = money(amount);
       if (next === current) return { ok: true, paid_amount: current };
+      if (body.expected_revision) {
+        const [fresh] = await run("SELECT detail_json FROM finance_submission_items WHERE id=? AND tenant_id=? FOR UPDATE",[itemId,actor.tenantId]);
+        if (body.expected_revision !== payrollRevision(fresh.detail_json)) fail("工资明细已被修改，请刷新后核对",409);
+      }
       if (money(expected) !== current) fail("已发金额已被其他管理员修改，请刷新后核对", 409);
       await run("INSERT INTO finance_payroll_payment_updates (tenant_id, item_id, paid_amount, recorded_by) VALUES (?, ?, ?, ?)", [actor.tenantId, itemId, next, actor.personId]);
       return { ok: true, paid_amount: next };
     });
   }
-  return { companies, identity, list, detail, submit, review, payrollLedger, recordPayrollPaid, preview: async (body, session) => {
+  async function recordPayrollPaidBatch(body, session) {
+    const actor = submissionActor(session, true);
+    const entries = body.items;
+    if (!Array.isArray(entries) || !entries.length || entries.length > 500) fail("请选择1至500条待登记工资明细");
+    const ids = entries.map(row => Number(row.item_id));
+    if (ids.some(id => !Number.isSafeInteger(id) || id <= 0) || new Set(ids).size !== ids.length) fail("工资明细编号无效或重复");
+    if (entries.some(row => row.expected_paid_amount == null || !Number.isFinite(Number(row.expected_paid_amount)) || !/^[a-f0-9]{64}$/.test(String(row.expected_revision || "")))) fail("请刷新工资明细后再批量登记");
+    const owned = new Set((await companies(session)).map(row => Number(row.id)));
+    return transaction(async connection => {
+      const run = async (sql, params = []) => (await connection.execute(sql, params))[0];
+      const items = await run(`SELECT * FROM finance_submission_items WHERE tenant_id=? AND id IN (${ids.map(() => "?").join(",")}) ORDER BY id`, [actor.tenantId, ...ids]);
+      if (items.length !== ids.length || items.some(item => !owned.has(Number(item.company_id)))) fail("部分工资明细不存在或不属于当前企业", 404);
+      const companyIds = [...new Set(items.map(item=>Number(item.company_id)))].sort((a,b)=>a-b);
+      const freshCompanies = await run(`SELECT id FROM finance_companies WHERE status='active' AND (tenant_id=?${actor.legacy ? " OR tenant_id IS NULL OR tenant_id=0" : ""}) AND id IN (${companyIds.map(()=>"?").join(",")}) ORDER BY id LOCK IN SHARE MODE`,[actor.tenantId,...companyIds]);
+      if(freshCompanies.length!==companyIds.length) fail("部分公司已停用或不属于当前企业，请刷新",404);
+      const parents = [...new Set(items.map(item => Number(item.submission_id)))].sort((a,b)=>a-b);
+      const batches = await run(`SELECT id FROM finance_submissions WHERE tenant_id=? AND kind='payroll' AND status IN ('pending','approved') AND id IN (${parents.map(()=>"?").join(",")}) ORDER BY id FOR UPDATE`, [actor.tenantId, ...parents]);
+      if (batches.length !== parents.length) fail("工资表已退回或状态已变化，请刷新", 409);
+      let changed = 0;
+      for (const item of items) {
+        const row = entries.find(row => Number(row.item_id) === Number(item.id));
+        // Parent locks serialize approval, edits and both single/batch payment writers.
+        const [fresh] = await run("SELECT detail_json FROM finance_submission_items WHERE id=? AND tenant_id=? FOR UPDATE", [item.id, actor.tenantId]);
+        if (payrollRevision(fresh.detail_json) !== row.expected_revision) fail("工资明细已被修改，请刷新后重新选择", 409);
+        const [last] = await run("SELECT paid_amount FROM finance_payroll_payment_updates WHERE tenant_id=? AND item_id=? ORDER BY id DESC LIMIT 1 FOR UPDATE", [actor.tenantId, item.id]);
+        const current = money(last?.paid_amount || 0), net = Number(JSON.parse(fresh.detail_json).net);
+        if (!Number.isFinite(net) || net < 0) fail("工资实发金额无效，请先编辑核对明细", 409);
+        if (current >= money(net)) continue;
+        if (money(row.expected_paid_amount) !== current) fail("已发金额已被其他管理员修改，未保存本次批量登记，请刷新", 409);
+        await run("INSERT INTO finance_payroll_payment_updates (tenant_id,item_id,paid_amount,recorded_by) VALUES (?,?,?,?)", [actor.tenantId,item.id,money(net),actor.personId]);
+        changed++;
+      }
+      return { ok: true, changed, skipped: items.length - changed };
+    });
+  }
+  async function savePayrollItem(body, session) {
+    const actor = submissionActor(session, true);
+    const itemId = body.item_id == null ? null : Number(body.item_id), companyId = Number(body.company_id);
+    if (itemId != null && (!Number.isSafeInteger(itemId) || itemId <= 0)) fail("工资明细编号无效");
+    const owned = await companies(session), company = owned.find(row => Number(row.id) === companyId);
+    if (!company) fail("公司不存在或不属于当前企业", 404);
+    const normalized = normalizePayrollEntry(body);
+    if (itemId && !/^[a-f0-9]{64}$/.test(String(body.expected_revision || ""))) fail("请刷新工资明细后再编辑");
+    return transaction(async connection => {
+      const run = async (sql, params = []) => (await connection.execute(sql, params))[0];
+      // Serialize first-time company/month creation before reserving its submission.
+      const [freshCompany] = await run(`SELECT id,name FROM finance_companies WHERE id=? AND status='active' AND (tenant_id=?${actor.legacy ? " OR tenant_id IS NULL OR tenant_id=0" : ""}) FOR UPDATE`,[companyId,actor.tenantId]);
+      if(!freshCompany) fail("公司已停用或不属于当前企业",404);
+      let item, batch;
+      if (itemId) {
+        [item] = await run("SELECT * FROM finance_submission_items WHERE id=? AND tenant_id=?", [itemId,actor.tenantId]);
+        if (!item) fail("工资明细不存在或不属于当前企业",404);
+        const old = JSON.parse(item.detail_json);
+        if (Number(item.company_id) !== companyId || old.month !== normalized.month) fail("已有记录的公司和月份不能直接变更，可使用复制新增");
+        [batch] = await run("SELECT * FROM finance_submissions WHERE id=? AND tenant_id=? AND kind='payroll' AND status IN ('pending','approved') FOR UPDATE",[item.submission_id,actor.tenantId]);
+        if (!batch) fail("工资表已退回，请刷新后再操作",409);
+        [item] = await run("SELECT * FROM finance_submission_items WHERE id=? AND tenant_id=? FOR UPDATE",[itemId,actor.tenantId]);
+        if (payrollRevision(item.detail_json) !== body.expected_revision) fail("工资明细已被其他管理员修改，请刷新后再保存",409);
+      } else {
+        const [period] = await run("SELECT submission_id FROM finance_imported_payroll_periods WHERE tenant_id=? AND company_id=? AND month_key=?",[actor.tenantId,companyId,normalized.month]);
+        if (period) [batch] = await run("SELECT * FROM finance_submissions WHERE id=? AND tenant_id=? AND kind='payroll' AND status IN ('pending','approved') FOR UPDATE",[period.submission_id,actor.tenantId]);
+        if (period && !batch) fail("该月份工资状态异常，请先核对原申请",409);
+      }
+      await run("INSERT IGNORE INTO finance_periods (tenant_id,company_id,month_key) VALUES (?,?,?)",[actor.legacy?null:actor.tenantId,companyId,normalized.month]);
+      const [closed] = await run("SELECT status FROM finance_periods WHERE company_id=? AND month_key=? FOR UPDATE",[companyId,normalized.month]);
+      if (closed?.status === 'closed') fail(`${company.name} ${normalized.month}已关账，不能新增或修改工资` ,409);
+      if (!batch) {
+        const result = await run("INSERT INTO finance_submissions (tenant_id,applicant_id,applicant_name,kind,source_hash,file_name,total_amount,item_count) VALUES (?,?,?,'payroll',?,'手工工资明细',0,0)",[actor.tenantId,actor.personId,String(session.name || session.username || '管理员').slice(0,128),payrollRevision(randomUUID())]);
+        batch={id:Number(result.insertId),status:'pending'};
+        await run("INSERT INTO finance_imported_payroll_periods (tenant_id,company_id,month_key,submission_id) VALUES (?,?,?,?)",[actor.tenantId,companyId,normalized.month,batch.id]);
+      }
+      const siblings = await run("SELECT id,detail_json FROM finance_submission_items WHERE tenant_id=? AND submission_id=? AND company_id=? AND expense_date>=? AND expense_date<=LAST_DAY(?) ORDER BY id",[actor.tenantId,batch.id,companyId,normalized.month+'-01',normalized.month+'-01']);
+      const duplicate=siblings.find(row=>Number(row.id)!==itemId && String(JSON.parse(row.detail_json).person_name||'').trim()===normalized.person_name);
+      if (duplicate) {
+        const original=JSON.parse(duplicate.detail_json);
+        if (!itemId && JSON.stringify(normalizePayrollEntry(original))===JSON.stringify(normalized)) return {ok:true,id:Number(duplicate.id),status:batch.status,unchanged:true};
+        fail("该公司月份已有同名员工工资，请编辑原明细，避免重复计入",409);
+      }
+      const next={...(item?JSON.parse(item.detail_json):{images:[]}),...normalized,company_id:companyId,company_name:freshCompany.name,entry_source:item?'manual_edit':'manual'};
+      const json=JSON.stringify(next);
+      let id=itemId;
+      if (item) await run("UPDATE finance_submission_items SET amount=?,detail_json=? WHERE id=? AND tenant_id=?",[next.amount,json,id,actor.tenantId]);
+      else { const result=await run("INSERT INTO finance_submission_items (tenant_id,submission_id,company_id,expense_date,amount,detail_json) VALUES (?,?,?,?,?,?)",[actor.tenantId,batch.id,companyId,next.expense_date,next.amount,json]);id=Number(result.insertId); }
+      if (batch.status==='approved') {
+        const scope=actor.legacy?'(tenant_id IS NULL OR tenant_id=0 OR tenant_id=?)':'tenant_id=?';
+        if(item){
+          const expenses=await run(`SELECT id FROM finance_expenses WHERE source_type='finance_submission' AND source_id=? AND company_id=? AND ${scope} FOR UPDATE`,[id,companyId,actor.tenantId]);
+          if(expenses.length!==1) fail("已审批工资对应的费用记录缺失或重复，请先核对账单",409);
+          await run(`UPDATE finance_expenses SET description=?,original_amount=?,amount_cny=? WHERE id=? AND ${scope}`,[next.description,next.amount,next.amount,expenses[0].id,actor.tenantId]);
+        } else {
+          const old=await run("SELECT id FROM finance_expenses WHERE company_id=? AND category='salary' AND source_type IN ('payroll','payroll_period') AND expense_date>=? AND expense_date<=LAST_DAY(?) LIMIT 1",[companyId,next.month+'-01',next.month+'-01']);
+          if(old.length) fail("该月已有旧工资模块入账记录，请先核对，避免重复计入成本",409);
+          await run("INSERT INTO finance_expenses (tenant_id,company_id,expense_date,category,description,currency_code,original_amount,exchange_rate,amount_cny,voucher_status,source_type,source_id,created_by) VALUES (?,?,?,'salary',?,'CNY',?,1,?,'missing','finance_submission',?,?)",[actor.legacy?null:actor.tenantId,companyId,next.expense_date,next.description,next.amount,next.amount,id,actor.personId]);
+        }
+      }
+      await run("INSERT INTO finance_payroll_item_revisions (tenant_id,item_id,operation,before_json,after_json,recorded_by) VALUES (?,?,?,?,?,?)",[actor.tenantId,id,item?'edit':'create',item?.detail_json||null,json,actor.personId]);
+      await run("UPDATE finance_submissions SET total_amount=(SELECT COALESCE(SUM(amount),0) FROM finance_submission_items WHERE submission_id=? AND tenant_id=?),item_count=(SELECT COUNT(*) FROM finance_submission_items WHERE submission_id=? AND tenant_id=?) WHERE id=? AND tenant_id=?",[batch.id,actor.tenantId,batch.id,actor.tenantId,batch.id,actor.tenantId]);
+      return {ok:true,id,status:batch.status,revision:payrollRevision(json)};
+    }).catch(error => { if(error.code==='ER_DUP_ENTRY') fail("该公司月份刚新增了工资记录，请刷新后在原明细中继续添加",409);throw error; });
+  }
+  return { companies, identity, list, detail, submit, review, payrollLedger, recordPayrollPaid, recordPayrollPaidBatch, savePayrollItem, preview: async (body, session) => {
     const { rows, total } = await parse(body, session);
     return { items: rows, total_amount: total, item_count: rows.length };
   } };

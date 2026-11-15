@@ -108,5 +108,81 @@ test("reimbursement and payroll approvals are transactional, idempotent and isol
       const [expense]=await q("SELECT tenant_id,amount_cny FROM finance_expenses WHERE company_id=40");assert.equal(expense.tenant_id,null);assert.equal(Number(expense.amount_cny),5);
       await assert.rejects(service.detail(claim.id,owner),{statusCode:404});
     });
+    const manual=(person,extra={})=>({company_id:20,month:'2026-10',person_name:person,department:'运营',base:2000,employer:300,employee:100,tax:0,employer_items:null,employee_items:null,...extra});
+    const ledger=()=>service.payrollLedger({year:2026,company_id:20},owner);
+    let manualId, thirdId, fourthId;
+    await t.test("manual rows append to an approved imported month, preserve idempotency and reject foreign ownership",async()=>{
+      await assert.rejects(service.savePayrollItem(manual('无权'),member),{statusCode:403});
+      await assert.rejects(service.savePayrollItem(manual('外公司',{company_id:30}),owner),{statusCode:404});
+      const before=(await q("SELECT COUNT(*) n FROM finance_expenses"))[0].n;
+      const added=await service.savePayrollItem(manual('员工乙'),owner);manualId=added.id;
+      assert.equal(added.status,'approved');
+      const repeated=await service.savePayrollItem(manual('员工乙'),owner);assert.equal(repeated.id,manualId);assert.equal(repeated.unchanged,true);
+      await assert.rejects(service.savePayrollItem(manual('员工乙',{base:2100}),owner),{statusCode:409});
+      assert.equal((await q("SELECT COUNT(*) n FROM finance_expenses"))[0].n,before+1);
+      assert.equal(Number((await q("SELECT amount_cny FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[manualId]))[0].amount_cny),2300);
+      const third=await service.savePayrollItem(manual('员工丙',{base:3000,employee:150}),owner);thirdId=third.id;
+      assert.equal((await q("SELECT COUNT(*) n FROM finance_payroll_item_revisions WHERE item_id=?",[manualId]))[0].n,1);
+      await assert.rejects(service.savePayrollItem(manual('跨企业编辑',{company_id:30,item_id:manualId,expected_revision:(await ledger()).rows.find(r=>Number(r.id)===manualId).revision}),foreign),{statusCode:404});
+    });
+    await t.test("bulk registration fills remaining wages once without changing expense accounting",async()=>{
+      await service.recordPayrollPaid({item_id:manualId,paid_amount:400,expected_paid_amount:0},owner);
+      const rows=(await ledger()).rows.filter(r=>[manualId,thirdId].includes(Number(r.id)));
+      const body={items:rows.map(row=>({item_id:row.id,expected_paid_amount:row.paid_amount,expected_revision:row.revision}))};
+      const expenses=await q("SELECT COUNT(*) n,SUM(amount_cny) amount FROM finance_expenses");
+      await assert.rejects(service.recordPayrollPaidBatch(body,member),{statusCode:403});
+      await assert.rejects(service.recordPayrollPaidBatch(body,foreign),{statusCode:404});
+      const result=await service.recordPayrollPaidBatch(body,owner);assert.equal(result.changed,2);
+      assert.equal((await service.recordPayrollPaidBatch(body,owner)).skipped,2);
+      assert.ok((await ledger()).rows.filter(r=>[manualId,thirdId].includes(Number(r.id))).every(r=>r.remaining_amount===0));
+      assert.deepEqual(await q("SELECT COUNT(*) n,SUM(amount_cny) amount FROM finance_expenses"),expenses);
+    });
+    await t.test("editing a paid row updates its original expense, keeps payment history and rejects stale writes",async()=>{
+      const old=(await ledger()).rows.find(r=>Number(r.id)===manualId);
+      const [expense]=await q("SELECT id FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[manualId]);
+      const history=await q("SELECT * FROM finance_payroll_payment_updates WHERE item_id=? ORDER BY id",[manualId]);
+      await service.savePayrollItem(manual('员工乙',{item_id:manualId,expected_revision:old.revision,base:2200}),owner);
+      const changed=(await ledger()).rows.find(r=>Number(r.id)===manualId);assert.equal(changed.net,2100);assert.equal(changed.paid_amount,1900);assert.equal(changed.remaining_amount,200);
+      const [current]=await q("SELECT id,amount_cny FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[manualId]);assert.equal(current.id,expense.id);assert.equal(Number(current.amount_cny),2500);
+      assert.deepEqual(await q("SELECT * FROM finance_payroll_payment_updates WHERE item_id=? ORDER BY id",[manualId]),history);
+      const audit=await q("SELECT operation,before_json,after_json FROM finance_payroll_item_revisions WHERE item_id=? ORDER BY id",[manualId]);assert.equal(audit.length,2);assert.equal(JSON.parse(audit[1].before_json).base,2000);assert.equal(JSON.parse(audit[1].after_json).base,2200);
+      await assert.rejects(service.savePayrollItem(manual('员工乙',{item_id:manualId,expected_revision:old.revision,base:2300}),owner),{statusCode:409});
+      await assert.rejects(service.recordPayrollPaid({item_id:manualId,expected_revision:old.revision,expected_paid_amount:1900,paid_amount:2100},owner),{statusCode:409});
+    });
+    await t.test("one stale or foreign row rolls back an entire bulk registration",async()=>{
+      fourthId=(await service.savePayrollItem(manual('员工丁',{base:1000,employer:0,employee:0}),owner)).id;
+      const rows=(await ledger()).rows, first=rows.find(r=>Number(r.id)===manualId), last=rows.find(r=>Number(r.id)===fourthId);
+      const before=await q("SELECT COUNT(*) n FROM finance_payroll_payment_updates");
+      await assert.rejects(service.recordPayrollPaidBatch({items:[{item_id:first.id,expected_paid_amount:first.paid_amount,expected_revision:first.revision},{item_id:last.id,expected_paid_amount:999,expected_revision:last.revision}]},owner),{statusCode:409});
+      assert.deepEqual(await q("SELECT COUNT(*) n FROM finance_payroll_payment_updates"),before);
+      assert.equal((await ledger()).rows.find(r=>Number(r.id)===manualId).paid_amount,1900);
+      const foreignId=(await service.savePayrollItem(manual('其他企业',{company_id:30}),foreign)).id;
+      await assert.rejects(service.recordPayrollPaidBatch({items:[{item_id:first.id,expected_paid_amount:first.paid_amount,expected_revision:first.revision},{item_id:foreignId,expected_paid_amount:0,expected_revision:last.revision}]},owner),{statusCode:404});
+      assert.deepEqual(await q("SELECT COUNT(*) n FROM finance_payroll_payment_updates"),before);
+    });
+    await t.test("new manual months await approval and closed months stay immutable",async()=>{
+      const before=await q("SELECT COUNT(*) n FROM finance_expenses");
+      const added=await service.savePayrollItem(manual('十二月员工',{month:'2026-12'}),owner);assert.equal(added.status,'pending');
+      assert.deepEqual(await q("SELECT COUNT(*) n FROM finance_expenses"),before);
+      const [record]=await q("SELECT submission_id FROM finance_submission_items WHERE id=?",[added.id]);
+      await service.review({id:record.submission_id,status:'approved'},owner);
+      assert.equal((await q("SELECT COUNT(*) n FROM finance_expenses"))[0].n,Number(before[0].n)+1);
+      await assert.rejects(service.savePayrollItem(manual('已关账',{month:'2026-11'}),owner),{statusCode:409});
+      await q("UPDATE finance_periods SET status='closed' WHERE company_id=20 AND month_key='2026-12'");
+      const row=(await ledger()).rows.find(r=>Number(r.id)===added.id);
+      await assert.rejects(service.savePayrollItem(manual('十二月员工',{month:'2026-12',item_id:added.id,expected_revision:row.revision,base:2100}),owner),{statusCode:409});
+      assert.equal((await ledger()).rows.find(r=>Number(r.id)===added.id).base,2000);
+    });
+    await t.test("concurrent creation cannot duplicate a worker and default-company costs retain legacy ownership",async()=>{
+      const results=await Promise.all([service.savePayrollItem(manual('重复点击'),owner),service.savePayrollItem(manual('重复点击'),owner)]);
+      assert.equal(results[0].id,results[1].id);
+      assert.equal((await ledger()).rows.filter(r=>r.person_name==='重复点击').length,1);
+      const legacy={...owner,tenant:{id:1,slug:'default',role:'owner'}};
+      const added=await service.savePayrollItem(manual('默认员工',{company_id:40,month:'2026-09'}),legacy);
+      const [record]=await q("SELECT submission_id FROM finance_submission_items WHERE id=?",[added.id]);
+      await service.review({id:record.submission_id,status:'approved'},legacy);
+      const [expense]=await q("SELECT tenant_id,amount_cny FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[added.id]);assert.equal(expense.tenant_id,null);assert.equal(Number(expense.amount_cny),2300);
+      await assert.rejects(service.recordPayrollPaid({item_id:added.id,paid_amount:1,expected_paid_amount:0},owner),{statusCode:404});
+    });
   }finally{await pool.end();await closeMysqlPool?.();await fixture.cleanup();}
 });
