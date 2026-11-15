@@ -4,6 +4,8 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import BillingMetricLabel from "./BillingMetricLabel.vue";
+import { billingMetrics } from "./billing-metrics.js";
 import { formatInteger, formatMoney } from "./profit-utils.js";
 import { shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 
@@ -332,48 +334,48 @@ onBeforeUnmount(() => {
           <el-table-column prop="item_quantity" label="件数" width="76" align="right">
             <template #default="{ row }">{{ formatInteger(row.item_quantity) }}</template>
           </el-table-column>
-          <el-table-column prop="order_amount" label="订单金额" min-width="104" align="right">
+          <el-table-column prop="order_amount" :label="billingMetrics.order_amount.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="order_amount" /></template>
             <template #default="{ row }">{{ formatMoney(row.order_amount) }}</template>
           </el-table-column>
-          <el-table-column prop="revenue" label="账单收益" min-width="104" align="right">
+          <el-table-column prop="revenue" :label="billingMetrics.revenue.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="revenue" /></template>
             <template #default="{ row }">{{ formatMoney(row.revenue) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="purchase_cost" label="采购成本" min-width="104" align="right">
+          <el-table-column v-if="false" prop="purchase_cost" :label="billingMetrics.purchase_cost.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="purchase_cost" /></template>
             <template #default="{ row }">{{ formatMoney(row.purchase_cost) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="domestic_shipping_cost" label="国内物流" min-width="104" align="right">
+          <el-table-column v-if="false" prop="domestic_shipping_cost" :label="billingMetrics.domestic_shipping_cost.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="domestic_shipping_cost" /></template>
             <template #default="{ row }">{{ formatMoney(row.domestic_shipping_cost) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="international_shipping_cost" label="国际运费" min-width="104" align="right">
+          <el-table-column v-if="false" prop="international_shipping_cost" :label="billingMetrics.international_shipping_cost.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="international_shipping_cost" /></template>
             <template #default="{ row }">{{ formatMoney(row.international_shipping_cost) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="packaging_cost" label="包装/处理" min-width="104" align="right">
+          <el-table-column v-if="false" prop="packaging_cost" :label="billingMetrics.packaging_cost.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="packaging_cost" /></template>
             <template #default="{ row }">{{ formatMoney(row.packaging_cost) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="commission_fee" label="Ozon佣金" min-width="104" align="right">
+          <el-table-column v-if="false" prop="commission_fee" :label="billingMetrics.commission_fee.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="commission_fee" /></template>
             <template #default="{ row }">{{ formatMoney(row.commission_fee) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="ozon_service_fee" label="Ozon服务费" min-width="112" align="right">
+          <el-table-column v-if="false" prop="ozon_service_fee" :label="billingMetrics.ozon_service_fee.label" min-width="112" align="right"><template #header><BillingMetricLabel metric="ozon_service_fee" /></template>
             <template #default="{ row }">{{ formatMoney(row.ozon_service_fee) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="other_fee" label="其他费用" min-width="104" align="right">
+          <el-table-column v-if="false" prop="other_fee" :label="billingMetrics.other_fee.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="other_fee" /></template>
             <template #default="{ row }">{{ formatMoney(row.other_fee) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="advertising_cost" label="广告费" min-width="104" align="right">
+          <el-table-column v-if="false" prop="advertising_cost" :label="billingMetrics.advertising_cost.label" min-width="104" align="right"><template #header><BillingMetricLabel metric="advertising_cost" /></template>
             <template #default="{ row }">{{ formatMoney(row.advertising_cost) }}</template>
           </el-table-column>
-          <el-table-column v-if="false" prop="return_loss" label="退货/拒收损失" min-width="128" align="right">
+          <el-table-column v-if="false" prop="return_loss" :label="billingMetrics.return_loss.label" min-width="128" align="right"><template #header><BillingMetricLabel metric="return_loss" /></template>
             <template #default="{ row }">{{ formatMoney(row.return_loss) }}</template>
           </el-table-column>
-          <el-table-column prop="total_cost" label="成本合计" min-width="112" align="right">
+          <el-table-column prop="total_cost" :label="billingMetrics.order_total_cost.label" min-width="112" align="right"><template #header><BillingMetricLabel metric="order_total_cost" /></template>
             <template #default="{ row }">{{ formatMoney(row.total_cost) }}</template>
           </el-table-column>
-          <el-table-column prop="profit" label="利润" min-width="112" align="right" fixed="right">
+          <el-table-column prop="profit" :label="billingMetrics.profit.label" min-width="112" align="right" fixed="right"><template #header><BillingMetricLabel metric="profit" /></template>
             <template #default="{ row }">
               <strong :class="profitClass(row.profit)">{{ formatMoney(row.profit) }}</strong>
             </template>
           </el-table-column>
-          <el-table-column prop="profit_margin" label="利润率" width="92" align="right" fixed="right">
+          <el-table-column prop="profit_margin" :label="billingMetrics.profit_margin.label" width="92" align="right" fixed="right"><template #header><BillingMetricLabel metric="profit_margin" /></template>
             <template #default="{ row }">{{ row.revenue ? formatRatio(row.profit_margin) : "-" }}</template>
           </el-table-column>
           <el-table-column label="费用明细" width="92" align="center" fixed="right">
@@ -428,20 +430,20 @@ onBeforeUnmount(() => {
           <el-descriptions-item label="订单号" :span="2">{{ detailRow.posting_number || detailRow.order_number || "-" }}</el-descriptions-item>
           <el-descriptions-item label="店铺">{{ detailRow.shop_name || "-" }}</el-descriptions-item>
           <el-descriptions-item label="下单时间">{{ formatDateTime(detailRow.ordered_at) }}</el-descriptions-item>
-          <el-descriptions-item label="订单金额">{{ formatMoney(detailRow.order_amount) }}</el-descriptions-item>
-          <el-descriptions-item label="账单收益">{{ formatMoney(detailRow.revenue) }}</el-descriptions-item>
-          <el-descriptions-item label="采购成本">{{ formatMoney(detailRow.purchase_cost) }}</el-descriptions-item>
-          <el-descriptions-item label="国内物流">{{ formatMoney(detailRow.domestic_shipping_cost) }}</el-descriptions-item>
-          <el-descriptions-item label="国际运费">{{ formatMoney(detailRow.international_shipping_cost) }}</el-descriptions-item>
-          <el-descriptions-item label="包装/处理">{{ formatMoney(detailRow.packaging_cost) }}</el-descriptions-item>
-          <el-descriptions-item label="Ozon 佣金">{{ formatMoney(detailRow.commission_fee) }}</el-descriptions-item>
-          <el-descriptions-item label="Ozon 服务费">{{ formatMoney(detailRow.ozon_service_fee) }}</el-descriptions-item>
-          <el-descriptions-item label="广告费">{{ formatMoney(detailRow.advertising_cost) }}</el-descriptions-item>
-          <el-descriptions-item label="退货/拒收损失">{{ formatMoney(detailRow.return_loss) }}</el-descriptions-item>
-          <el-descriptions-item label="其他费用">{{ formatMoney(detailRow.other_fee) }}</el-descriptions-item>
-          <el-descriptions-item label="成本合计">{{ formatMoney(detailRow.total_cost) }}</el-descriptions-item>
-          <el-descriptions-item label="利润"><strong :class="profitClass(detailRow.profit)">{{ formatMoney(detailRow.profit) }}</strong></el-descriptions-item>
-          <el-descriptions-item label="利润率">{{ detailRow.revenue ? formatRatio(detailRow.profit_margin) : "-" }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.order_amount.label"><template #label><BillingMetricLabel metric="order_amount" /></template>{{ formatMoney(detailRow.order_amount) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.revenue.label"><template #label><BillingMetricLabel metric="revenue" /></template>{{ formatMoney(detailRow.revenue) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.purchase_cost.label"><template #label><BillingMetricLabel metric="purchase_cost" /></template>{{ formatMoney(detailRow.purchase_cost) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.domestic_shipping_cost.label"><template #label><BillingMetricLabel metric="domestic_shipping_cost" /></template>{{ formatMoney(detailRow.domestic_shipping_cost) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.international_shipping_cost.label"><template #label><BillingMetricLabel metric="international_shipping_cost" /></template>{{ formatMoney(detailRow.international_shipping_cost) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.packaging_cost.label"><template #label><BillingMetricLabel metric="packaging_cost" /></template>{{ formatMoney(detailRow.packaging_cost) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.commission_fee.label"><template #label><BillingMetricLabel metric="commission_fee" /></template>{{ formatMoney(detailRow.commission_fee) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.ozon_service_fee.label"><template #label><BillingMetricLabel metric="ozon_service_fee" /></template>{{ formatMoney(detailRow.ozon_service_fee) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.advertising_cost.label"><template #label><BillingMetricLabel metric="advertising_cost" /></template>{{ formatMoney(detailRow.advertising_cost) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.return_loss.label"><template #label><BillingMetricLabel metric="return_loss" /></template>{{ formatMoney(detailRow.return_loss) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.other_fee.label"><template #label><BillingMetricLabel metric="other_fee" /></template>{{ formatMoney(detailRow.other_fee) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.order_total_cost.label"><template #label><BillingMetricLabel metric="order_total_cost" /></template>{{ formatMoney(detailRow.total_cost) }}</el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.profit.label"><template #label><BillingMetricLabel metric="profit" /></template><strong :class="profitClass(detailRow.profit)">{{ formatMoney(detailRow.profit) }}</strong></el-descriptions-item>
+          <el-descriptions-item :label="billingMetrics.profit_margin.label"><template #label><BillingMetricLabel metric="profit_margin" /></template>{{ detailRow.revenue ? formatRatio(detailRow.profit_margin) : "-" }}</el-descriptions-item>
           <el-descriptions-item label="结果">{{ outcomeLabel(detailRow.outcome_type) }}</el-descriptions-item>
           <el-descriptions-item label="结算口径">{{ settlementLabel(detailRow.settlement_state) }}</el-descriptions-item>
         </el-descriptions>

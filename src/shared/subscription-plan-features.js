@@ -11,7 +11,7 @@ export function planFeatures(tenant = {}) {
 export function planFeatureMessage(feature) {
   return ({ ai: '当前套餐不含 AI 技能库，请在会员中心联系升级团队版；升级后仍按 AI 积分规则使用', tasks: '任务系统仅团队版开放，请在会员中心联系升级', finance: '体验套餐不含财务中心，请在会员中心联系开通正式套餐' })[feature];
 }
-const financeResources = new Set(['finance-center', 'finance-submissions', 'payroll', 'profits', 'monthly-billing-details', 'monthly-billing-orders', 'ozon-finance', 'profit-reconciliation', 'profit-snapshots', 'pending-settlement-costs', 'profit-aftersales', 'inventory-capital']);
+const financeResources = new Set(['finance-center', 'finance-submissions', 'payroll', 'profits', 'monthly-billing-details', 'monthly-billing-orders', 'monthly-billing-source-records', 'ozon-finance', 'profit-reconciliation', 'profit-snapshots', 'pending-settlement-costs', 'profit-aftersales', 'inventory-capital']);
 export function subscriptionApiFeature(parts = []) {
   if (parts[1] === 'team') return 'tasks';
   if (financeResources.has(parts[1])) return 'finance';

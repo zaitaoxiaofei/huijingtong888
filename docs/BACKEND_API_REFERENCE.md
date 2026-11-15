@@ -2526,6 +2526,26 @@ Read the current enterprise's operating overview or monthly statement with exist
   - `403` `application/json` -> `ErrorResponse`
   - `404` `application/json` -> `ErrorResponse`
 
+#### `GET /api/monthly-billing-source-records`
+
+Read current-enterprise Ozon ledger or advertising records for billing drilldowns. Read-only, with per-project totals and paginated original records. Company assignments apply on each record's Beijing date. Original signed ledger amounts are evidence, not extra costs or income added to order profit; unavailable currency conversion remains null.
+
+- Auth: `authenticated; same finance authority and subscription gate as monthly billing`
+- Query parameters:
+  - `from` (`string`, required): Required inclusive Beijing date YYYY-MM-DD.
+  - `to` (`string`, required): Required inclusive Beijing date YYYY-MM-DD.
+  - `shopId` (`string`, optional): Owned ID or all.
+  - `companyId` (`string`, optional): Owned ID or all.
+  - `source` (`string`, optional): platform or advertising; default platform.
+  - `itemName` (`string`, optional): Exact original project name to filter records.
+  - `page` (`integer`, optional): One-based page.
+  - `pageSize` (`integer`, optional): Page size, at most 100.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 #### `GET /api/profit-reconciliation`
 
 Compare estimated and finance-accrued profit and identify inventory-data risks.

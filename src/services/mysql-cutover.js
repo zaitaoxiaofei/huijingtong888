@@ -28499,6 +28499,51 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
   };
 }
 
+// Read-only evidence for billing drilldowns. Original ledgers are never added to order profit again.
+export async function monthlyBillingSourceRecordsMysql(query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  const scope = await orderListTenantScopeMysql(tenantId);
+  const companyId = await billingCompanyIdMysql(query, scope);
+  const range = billingDateRangeMysql(query);
+  if (!range) throw Object.assign(new Error("请选择明细的开始和结束日期"), { statusCode: 400 });
+  const source = String(query.source || "platform");
+  if (!["platform", "advertising"].includes(source)) throw Object.assign(new Error("不支持的账单来源"), { statusCode: 400 });
+  const page = Math.max(1, Math.floor(Number(query.page) || 1));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(query.pageSize) || 30)));
+  const ad = source === "advertising";
+  const table = ad ? "ozon_ad_sku_daily" : "ozon_finance_items";
+  const day = ad ? "f.date_key" : "DATE(CONVERT_TZ(f.operation_date,'+00:00','+08:00'))";
+  const name = ad ? "COALESCE(NULLIF(f.campaign_name,''), NULLIF(f.product_name,''), f.ozon_sku)" : "COALESCE(NULLIF(f.service_name,''), f.service_type)";
+  const dateFilter = ad ? { whereSql: " AND f.date_key>=? AND f.date_key<=?", params: [range.from, range.to] }
+    : profitTimestampUtcRangeMysql("f.operation_date", range.from, range.to);
+  const where = [orderTenantPredicateMysql("s", scope)];
+  const params = [...dateFilter.params];
+  const shopId = Number(query.shopId || query.shop_id);
+  if (Number.isSafeInteger(shopId) && shopId > 0) { where.push("f.shop_id=?"); params.push(shopId); }
+  if (companyId) {
+    where.push(`EXISTS (SELECT 1 FROM finance_shop_company_assignments ca WHERE ca.shop_id=f.shop_id AND ca.company_id=?
+      AND ${monthlyFinanceTenantPredicateMysql("ca", scope)} AND ca.effective_from<=${day} AND (ca.effective_to IS NULL OR ca.effective_to>=${day}))`);
+    params.push(companyId);
+  }
+  const base = `FROM ${table} f JOIN shops s ON s.id=f.shop_id WHERE 1=1 ${dateFilter.whereSql} AND ${where.join(" AND ")}`;
+  const amount = ad ? "f.spend_cny" : "CASE WHEN f.currency_code='CNY' THEN f.amount WHEN f.exchange_rate>0 THEN f.amount_cny ELSE NULL END";
+  const groups = await mysqlQuery(`SELECT ${name} AS item_name, COUNT(*) AS record_count,
+    CASE WHEN COUNT(${amount})=COUNT(*) THEN SUM(${amount}) ELSE NULL END AS amount_cny
+    ${base} GROUP BY ${name} ORDER BY item_name`, params);
+  const itemName = String(query.itemName || "");
+  const filter = itemName ? ` AND ${name}=?` : "";
+  const scopedParams = itemName ? [...params, itemName] : params;
+  const [totalRow, rows] = await Promise.all([
+    mysqlQueryOne(`SELECT COUNT(*) AS total ${base}${filter}`, scopedParams),
+    mysqlQuery(`SELECT ${ad ? "f.ozon_sku, f.campaign_id, f.date_key AS record_date, CASE WHEN f.spend_rub!=0 OR f.spend_cny=0 THEN f.spend_rub ELSE NULL END AS original_amount, 'RUB' AS currency_code, '' AS posting_number, '' AS operation_id" : "f.id, f.operation_date AS record_date, f.amount AS original_amount, f.currency_code, f.posting_number, f.operation_id, f.service_type"},
+      f.shop_id, s.name AS shop_name, ${name} AS item_name, ${amount} AS amount_cny
+      ${base}${filter} ORDER BY ${ad ? "f.date_key DESC, f.shop_id, f.ozon_sku, f.campaign_id, f.ad_type" : "f.operation_date DESC, f.id DESC"} LIMIT ? OFFSET ?`, [...scopedParams, pageSize, (page - 1) * pageSize])
+  ]);
+  return { source, groups: groups.map(row => ({ ...row, amount_cny: row.amount_cny == null ? null : roundMoneyMysql(row.amount_cny) })),
+    rows: rows.map(row => ({ ...row, record_date: ad ? row.record_date : mysqlDateTimeIso(row.record_date), amount_cny: row.amount_cny == null ? null : roundMoneyMysql(row.amount_cny) })),
+    total: Number(totalRow?.total || 0), page, pageSize };
+}
+
 export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);

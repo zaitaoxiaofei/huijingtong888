@@ -5,7 +5,7 @@ const routes = new Set([
   'GET inventory-workflow/receipts/context','POST inventory-workflow/receipts/preview',
   'GET inventory-workflow/details', 'POST inventory-workflow/node-action',
   'POST inventory-workflow/feedback', 'GET inventory-workflow/alerts', 'POST inventory-workflow/fbp', 'GET inventory-workflow', 'POST inventory-workflow/requests', 'GET inventory-workflow/receipts', 'POST inventory-workflow/receipts',
-  'GET monthly-billing-details', 'GET monthly-billing-orders',
+  'GET monthly-billing-details', 'GET monthly-billing-orders', 'GET monthly-billing-source-records',
   'GET dashboard', 'GET orders', 'GET orders/status-history/summary', 'GET order-quality-rules',
   'POST orders/package-label', 'POST orders/package-label-printed', 'POST orders/package-label-print-failed',
   'POST orders/ship', 'POST orders/split', 'POST orders/repair-outbound', 'POST orders/recalculate-profits',
