@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import {encodeFrozenContentStorage,decodeFrozenContentStorage} from "./listing-frozen-codec.js";
 
 export const LISTING_FROZEN_CONTENT_SCHEMA = `CREATE TABLE IF NOT EXISTS listing_frozen_content (
   tenant_id VARCHAR(80) NOT NULL,
@@ -99,7 +100,7 @@ async function readVersion(query, tenantId, kind, reference) {
   const pending=(async()=>{
     const [row] = await query("SELECT payload_json FROM listing_frozen_content WHERE tenant_id = ? AND content_kind = ? AND content_hash = ?", [tenantId, kind, reference]);
     if (!row) throw missingContent();
-    const payload = typeof row.payload_json === "string" ? JSON.parse(row.payload_json) : row.payload_json;
+    const payload = decodeFrozenContentStorage(typeof row.payload_json === "string" ? JSON.parse(row.payload_json) : row.payload_json);
     if (hash(payload) !== reference) throw new Error("Frozen listing content checksum mismatch");
     return payload;
   })();
@@ -107,10 +108,11 @@ async function readVersion(query, tenantId, kind, reference) {
   try { return await pending; } catch(error) { cache?.delete(key);throw error; }
 }
 
-async function insertVersion(query, tenantId, kind, payload) {
+async function insertVersion(query, tenantId, kind, payload, compressed = false) {
   const text = canonical(payload), reference = hash(payload);
   // Existing immutable content is never overwritten, even on a hash/key clash.
-  await query("INSERT IGNORE INTO listing_frozen_content (tenant_id,content_kind,content_hash,payload_json) VALUES (?,?,?,?)", [tenantId,kind,reference,text]);
+  const storageText=compressed?JSON.stringify(encodeFrozenContentStorage(JSON.parse(text))):text;
+  await query("INSERT IGNORE INTO listing_frozen_content (tenant_id,content_kind,content_hash,payload_json) VALUES (?,?,?,?)", [tenantId,kind,reference,storageText]);
   if (canonical(await readVersion(query,tenantId,kind,reference)) !== text) throw new Error("Frozen listing content collision");
   return reference;
 }
@@ -132,13 +134,13 @@ export async function freezeListingCategoryDefinition(query, { descriptionCatego
 
 // This is an internal storage boundary. The calling business service must
 // authorize its actor, source products and media before persisting a master.
-export async function freezeEnterpriseListingMaster(query, { tenantId, categoryHash, payload } = {}) {
+export async function freezeEnterpriseListingMaster(query, { tenantId, categoryHash, payload, compressed = false } = {}) {
   const owner = ownedTenant(tenantId);
   const category = await readVersion(query,"public","category_definition",categoryHash);
   if (!payload || Array.isArray(payload) || typeof payload !== "object" || Object.hasOwn(payload,MARKER)) throw new Error("A complete private listing master payload is required");
   assertCategory(payload,category);
   const content = { category_hash: categoryHash, payload: jsonValue(payload) };
-  return { kind: "product_master", hash: await insertVersion(query,owner,"product_master",content), category_hash: categoryHash };
+  return { kind: "product_master", hash: await insertVersion(query,owner,"product_master",content,compressed), category_hash: categoryHash };
 }
 
 function equal(a,b) { return canonical(a) === canonical(b); }

@@ -20,6 +20,7 @@ import { getTaskFile as getCropperTaskFile } from "../server/services/tools/imag
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
 import { archiveRemoteMediaObjectUrl, isManagedOssObjectUrl, putContentAddressedObject } from "./object-storage.js";
+import { archiveMediaCacheFile, restoreMediaCacheFile, MEDIA_CACHE_ROOTS, MEDIA_CACHE_EXTENSIONS } from "./media-cache-files.js";
 import {
   ensureListingAutomationSchema,
   generateUniqueListingOfferId,
@@ -774,6 +775,7 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
       await fs.mkdir(imageDir, { recursive: true });
       sourcePath = path.join(imageDir, "video-source.jpg");
       await fs.writeFile(sourcePath, materializedSourceBuffer);
+      await archiveMediaCacheFile(sourcePath);
       sourceName = "video-source.jpg";
     }
     const variant = {
@@ -2170,6 +2172,7 @@ export async function resolveAssetVariantFile(batchId, filename, session = null)
     return output.startsWith(`${batchDir}${path.sep}`) && filePath.startsWith(`${output}${path.sep}`);
   })) return null;
   try {
+    if (MEDIA_CACHE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) await restoreMediaCacheFile(filePath);
     const buffer = await fs.readFile(filePath);
     await assertAssetExecutionAccess(session, { shopIds: owned.map(row => row.shop_id) });
     return { buffer, mime: mimeForPath(filePath) };
@@ -2631,11 +2634,7 @@ async function storeTailTemplateImage(source, name) {
       contentType: ext === "jpg" ? "image/jpeg" : `image/${ext}`
     });
     if (stored) return stored.url;
-    await fs.mkdir(TAIL_TEMPLATE_ROOT, { recursive: true });
-    const filename = `${Date.now().toString(36)}-${sanitizeFilename(name).slice(0, 40)}.${ext}`;
-    const filePath = path.join(TAIL_TEMPLATE_ROOT, filename);
-    await fs.writeFile(filePath, buffer);
-    return `/uploads/asset-tail-templates/${filename}`;
+    throw Object.assign(new Error("OSS 未启用，尾图模板未保存；请先配置 OSS"), { statusCode: 503 });
   }
   return text;
 }
@@ -3102,6 +3101,7 @@ async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {},
     await fs.mkdir(sourceDir, { recursive: true });
     sourcePath = path.join(sourceDir, "video-source.jpg");
     await fs.writeFile(sourcePath, await readImageBuffer(sourceUrl));
+    await archiveMediaCacheFile(sourcePath);
   } else if (!context.sourceAlreadyAuthorized) {
     await assertAssetLocalSourceTenant(sourcePath, sourceImage.url || sourceImage.outputPath || "");
   }
@@ -4549,6 +4549,7 @@ async function readImageBuffer(source) {
   if (isLocalFileApiSource(text)) {
     const localPath = resolveLocalAssetPath(text);
     await assertAssetLocalSourceTenant(localPath, text);
+    await restoreManagedAssetCache(localPath);
     if (!fsSync.existsSync(localPath)) {
       const error = new Error(`本地图片文件不存在：${text}`);
       error.code = "LOCAL_ASSET_MISSING";
@@ -4566,6 +4567,7 @@ async function readImageBuffer(source) {
   }
   const localPath = resolveLocalAssetPath(text);
   await assertAssetLocalSourceTenant(localPath, text);
+  await restoreManagedAssetCache(localPath);
   if (!fsSync.existsSync(localPath)) {
     const error = new Error(`本地图片文件不存在：${text}`);
     error.code = "LOCAL_ASSET_MISSING";
@@ -4582,6 +4584,11 @@ async function assertAssetSourceProductTenant(productId) {
   const scope = assetVariantTenantScope(currentAiTenantSession());
   const rows = await mysqlQuery(`SELECT p.id FROM products p WHERE p.id = ? AND ${assetVariantTenantPredicate(scope, "p")} LIMIT 1`, [id, scope.id]);
   if (!rows[0]) throw Object.assign(new Error("来源商品不存在或不属于当前企业"), { statusCode: 404 });
+}
+
+async function restoreManagedAssetCache(localPath) {
+  const relative=path.relative(path.resolve(ROOT_DIR,"uploads"),localPath||"").split(path.sep);
+  if(MEDIA_CACHE_ROOTS.includes(relative[0])&&(relative[0]!=="temp"||relative[1]==="image-cropper")&&MEDIA_CACHE_EXTENSIONS.has(path.extname(localPath).toLowerCase()))await restoreMediaCacheFile(localPath);
 }
 
 async function assertAssetLocalSourceTenant(filePath, source = "") {
@@ -4755,7 +4762,8 @@ function resolveLocalAssetPath(value = "") {
     candidates.push(path.isAbsolute(normalized) ? normalized : path.resolve(root, withoutLeadingSlash));
   }
   const uniqueCandidates = uniqueValues(candidates);
-  return uniqueCandidates.find((candidate) => fsSync.existsSync(candidate)) || uniqueCandidates[0] || text;
+  const managed=/^\/?uploads\/(ai-generated|ai-cropped|shop-variants|shop-watermarks|asset-tail-templates|temp\/image-cropper)\//.test(normalized);
+  return uniqueCandidates.find((candidate) => fsSync.existsSync(candidate)) || (managed?path.resolve(ROOT_DIR,withoutLeadingSlash):uniqueCandidates[0]) || text;
 }
 
 function isLocalFileApiSource(value = "") {

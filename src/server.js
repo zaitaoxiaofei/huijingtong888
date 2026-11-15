@@ -82,7 +82,7 @@ import { createAiVariantLabRoutes, handleAiVariantLabRestRoute } from "./server/
 import { createProductWorkflowRoutes } from "./server/routes/productWorkflows.js";
 import { startProductWorkflowRunner } from './services/product-workflow-runner.js';
 import { handleAiCreditRoute } from "./server/routes/aiCredits.js";
-import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
+import { getAiTaskFile,cleanupAiSourceImageCache } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
 import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
@@ -1201,7 +1201,7 @@ const scheduledJobHandlers = {
     return { ...result, files };
   }),
   scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
-  ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
+  ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", async (job) => ({...await cleanupAiGenerationTaskHistory(job?.config || {}),sourceImageCache:await cleanupAiSourceImageCache()})),
   ai_media_retention_cleanup: withForegroundApiDeferral("ai_media_retention_cleanup", runAiMediaRetentionCleanup),
   transported_order_label_cleanup: withForegroundApiDeferral("transported_order_label_cleanup", (job) => cleanupTransportedOrderLabelCache(job?.config || {})),
   collector_history_cleanup: withForegroundApiDeferral("collector_history_cleanup", (job) => cleanupCollectorHistory({ ...job?.config, apply: true })),

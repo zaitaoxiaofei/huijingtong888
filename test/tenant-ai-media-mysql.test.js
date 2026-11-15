@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import OSS from "ali-oss";
+import {Readable} from "node:stream";
 import { createTenantMysqlFixture } from "./helpers/tenant-mysql-fixture.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
@@ -14,6 +16,13 @@ test("real AI and cropper services guard enterprise media before filesystem read
 }, async t => {
   const fixture = await createTenantMysqlFixture("ai_media");
   const cleanupPaths = [];
+  const oldStorage=Object.fromEntries(["OSS_ENABLED","OSS_REGION","OSS_BUCKET","OSS_ACCESS_KEY_ID","OSS_ACCESS_KEY_SECRET"].map(key=>[key,process.env[key]]));
+  const objects=new Map();
+  Object.assign(process.env,{OSS_ENABLED:"true",OSS_REGION:"oss-cn-test",OSS_BUCKET:"fixture-media",OSS_ACCESS_KEY_ID:"fixture-id",OSS_ACCESS_KEY_SECRET:"fixture-secret"});
+  t.mock.method(OSS.prototype,"head",async key=>{if(!objects.has(key))throw Object.assign(new Error("missing"),{status:404});return{res:{headers:{"content-length":String(objects.get(key).length)}}};});
+  t.mock.method(OSS.prototype,"putStream",async(key,stream)=>{const chunks=[];for await(const chunk of stream)chunks.push(chunk);objects.set(key,Buffer.concat(chunks));return{};});
+  t.mock.method(OSS.prototype,"getStream",async key=>({stream:Readable.from([objects.get(key)])}));
+  t.mock.method(OSS.prototype,"getACL",async()=>({acl:"private"}));
   let closeMysqlPool;
   try {
     fixture.useEnvironment();
@@ -37,6 +46,7 @@ test("real AI and cropper services guard enterprise media before filesystem read
     }
 
     await t.test("A/B/default file reads and every ZIP operation reject foreign task IDs", async () => {
+      const cachedSource=path.join(cropper.imageCropperPaths.tempRoot,uploaded[1].taskId,"source.png");await fs.unlink(cachedSource);
       assert.equal((await cropper.getTaskFile(uploaded[1].taskId, "source.png", session(2))).size, pixel.length);
       for (const viewer of [1, 2]) {
         const foreign = uploaded[2].taskId;
@@ -133,6 +143,7 @@ test("real AI and cropper services guard enterprise media before filesystem read
       await assert.rejects(ai.getAiTaskFile(tasks[1], "generated", "generated_001.png", session(2)), { statusCode: 403 });
     });
   } finally {
+    for(const [key,value]of Object.entries(oldStorage)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
     if (closeMysqlPool) await closeMysqlPool();
     for (const { root, target } of cleanupPaths) {
       const relative = path.relative(path.resolve(root), path.resolve(target));

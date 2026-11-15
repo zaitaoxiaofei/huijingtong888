@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import {archiveMediaCacheFile,restoreMediaCacheFile,restoreMediaCacheDirectory} from "../../../services/media-cache-files.js";
 import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
@@ -54,6 +55,7 @@ export async function saveUploadedImage({ filename, contentType, buffer }, sessi
   const imageName = `source${extension}`;
   const imagePath = path.join(taskDir, imageName);
   await fs.writeFile(imagePath, buffer);
+  await archiveMediaCacheFile(imagePath);
 
   return {
     taskId,
@@ -97,6 +99,7 @@ export async function saveShopWatermark({ shopId, filename, contentType, buffer 
   const storedName = `shop-${Number(shop.id)}-${crypto.randomUUID()}${extension}`;
   const filePath = path.join(SHOP_WATERMARK_ROOT, storedName);
   await fs.writeFile(filePath, buffer);
+  await archiveMediaCacheFile(filePath);
   await updateShopWatermark(shop.id, storedName, safeName, session);
 
   return {
@@ -131,6 +134,7 @@ export async function detectAndCropImage({
     error.status = 400;
     throw error;
   }
+  await restoreMediaCacheFile(sourcePath);
 
   const batch = createBatchName("split");
   const outputDir = path.join(taskDir, "crops", batch);
@@ -149,6 +153,7 @@ export async function detectAndCropImage({
     roundCornerTolerance,
     manualBoxes
   });
+  for(const crop of result.crops)await archiveMediaCacheFile(path.join(outputDir,crop.filename));
   const crops = result.crops.map((crop) => ({
     ...crop,
     filename: scopedFilename(batch, crop.filename),
@@ -177,6 +182,7 @@ export async function enhanceTaskCrops({ taskId, filenames = [] }, session = nul
   await fs.mkdir(enhancedDir, { recursive: true });
 
   const result = await runPythonEnhancer(input.dir, enhancedDir, taskId, input.filenames);
+  for(const image of result.images)await archiveMediaCacheFile(path.join(enhancedDir,image.filename));
   const images = result.images.map((image) => ({
     ...image,
     filename: scopedFilename(batch, image.filename),
@@ -210,6 +216,7 @@ export async function convertTaskCropsToRatio({ taskId, filenames = [] }, sessio
   await fs.mkdir(ratioDir, { recursive: true });
 
   const result = await runPythonRatioCanvas(input.dir, ratioDir, taskId, input.filenames);
+  for(const image of result.images)await archiveMediaCacheFile(path.join(ratioDir,image.filename));
   const images = result.images.map((image) => ({
     ...image,
     filename: scopedFilename(batch, image.filename),
@@ -247,6 +254,7 @@ export async function watermarkTaskCrops({ taskId, shopId, filenames = [], optio
 
   const watermarkOptions = normalizeWatermarkOptions({ ...shopWatermarkDefaults(shop), ...options });
   const result = await runPythonWatermarker(input.dir, watermarkedDir, watermark.filePath, taskId, input.filenames, watermarkOptions);
+  for(const image of result.images)await archiveMediaCacheFile(path.join(watermarkedDir,image.filename));
   const images = result.images.map((image) => ({
     ...image,
     filename: scopedFilename(batch, image.filename),
@@ -288,6 +296,7 @@ export async function getTaskFile(taskId, filename, session = null) {
     throw error;
   }
 
+  await restoreMediaCacheFile(filePath);
   const stat = await fs.stat(filePath).catch(() => null);
   if (!stat?.isFile()) {
     const error = new Error("文件不存在");
@@ -305,6 +314,7 @@ export async function getTaskFile(taskId, filename, session = null) {
 
 export async function createTaskZip(taskId, batch = "", session = null) {
   await assertImageCropperTaskOwner(taskId, session);
+  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   const taskDir = resolveTaskDir(taskId);
   const cropsDir = resolveScopedOutputDir(taskDir, "crops", batch);
   const imageEntries = await listImageFiles(cropsDir);
@@ -331,6 +341,7 @@ export async function createTaskZip(taskId, batch = "", session = null) {
 
 export async function createEnhancedTaskZip(taskId, batch = "", session = null) {
   await assertImageCropperTaskOwner(taskId, session);
+  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   if (batch) {
     return createScopedTaskZip({
       taskId,
@@ -369,6 +380,7 @@ export async function createEnhancedTaskZip(taskId, batch = "", session = null) 
 
 export async function createRatioTaskZip(taskId, batch = "", session = null) {
   await assertImageCropperTaskOwner(taskId, session);
+  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   return createScopedTaskZip({
     taskId,
     scope: "ratio-3x4",
@@ -380,6 +392,7 @@ export async function createRatioTaskZip(taskId, batch = "", session = null) {
 
 export async function createWatermarkedTaskZip(taskId, batch = "", session = null) {
   await assertImageCropperTaskOwner(taskId, session);
+  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   return createScopedTaskZip({
     taskId,
     scope: "watermarked",
@@ -546,6 +559,7 @@ export function runPythonWatermarker(inputDir, outputDir, watermarkPath, taskId,
 }
 
 async function chooseInputDir(taskDir, filenames) {
+  await restoreMediaCacheDirectory(taskDir);
   const names = normalizeCropFilenames(filenames);
   const candidates = ["watermarked", "enhanced", "ratio-3x4", "crops"];
 
@@ -700,6 +714,7 @@ async function getWatermarkFileForShop(shop) {
   let filePath = "";
   let stat = null;
   for (const candidate of candidates) {
+    if(candidate.startsWith(`${path.resolve(ROOT_DIR,"uploads","shop-watermarks")}${path.sep}`))await restoreMediaCacheFile(candidate);
     const candidateStat = await fs.stat(candidate).catch(() => null);
     if (candidateStat?.isFile()) {
       filePath = candidate;
