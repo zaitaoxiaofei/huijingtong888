@@ -15,7 +15,7 @@ test('company import persistence, duplicate keys, closing, review and tenant iso
   const b=new ExcelJS.Workbook(),sheet=b.addWorksheet('Statement');sheet.getCell('B2').value='Statement of services provided No. ЗВ - 123 dated 10/15/2026';sheet.getCell('B3').value='for the period from 10/1/2026 to 10/15/2026';sheet.getCell('B13').value='Star Products';sheet.getCell('F15').value='Amount including VAT (CNY)';sheet.getCell('B17').value='Total:';sheet.getCell('F17').value=249.02;
   const buffer=Buffer.from(await b.xlsx.writeBuffer());
   const a={personId:10,roles:['operations'],tenant:{id:2,slug:'a',role:'owner'}},foreign={...a,tenant:{id:3,slug:'b',role:'owner'}};
-  const files={owned:async(url,s)=>{assert.equal(s.tenant.id,2);},read:async()=>({buffer,row:{original_name:'test.xlsx'}})};
+  const files={owned:async(url,s)=>{assert.equal(s.tenant.id,2);},read:async url=>url.endsWith('manual.png')?{buffer:Buffer.from('manual receipt'),row:{original_name:'Оплата AI октябрь.png'}}:url.endsWith('invoice.pdf')?{buffer:Buffer.from('invoice evidence'),row:{original_name:'Счёт-фактура.pdf'}}:{buffer,row:{original_name:'test.xlsx'}}};
   const service=createCompanyFinanceDocuments({query:q,execute:q,files,authorize:async s=>s,transaction:async worker=>{await fixture.connection.beginTransaction();try{const result=await worker({query:q,execute:q});await fixture.connection.commit();return result;}catch(e){await fixture.connection.rollback();throw e;}}});
   const input={company_id:20,shop_id:200,month:'2026-10',attachment_url:'/uploads/team-attachments/test.xlsx'};
   const first=await service.preview(input,a);await service.confirm({company_id:20,document_id:first.document.id},a);
@@ -27,6 +27,16 @@ test('company import persistence, duplicate keys, closing, review and tenant iso
   const doc=(await q('SELECT * FROM finance_import_documents WHERE id=?',[first.document.id]))[0];assert.equal(doc.review_status,'needs_info');
   const p=typeof doc.payload_json==='string'?JSON.parse(doc.payload_json):doc.payload_json;assert.equal(p.review_history.length,1);
   const result=await service.export({company_id:20,month:'2026-10'},a);assert.ok(result.buffer.length>1000);
+  const manual=await service.preview({company_id:20,shop_id:0,month:'2026-10',upload_type:'manual-expense',attachment_url:'/uploads/team-attachments/manual.png',display_name:'AI实际使用',manual:{metric:'AI使用费',amount:88.20,currency:'CNY',note:'本地测试：10月服务账单'}},a);
+  assert.equal(manual.document.parse_status,'preview');
+  await service.preview({company_id:20,shop_id:0,month:'2026-10',upload_type:'manual-expense',attachment_url:'/uploads/team-attachments/manual.png',display_name:'AI实际使用',expected_revision:0,manual:{metric:'AI使用费',amount:99,currency:'CNY',note:'修改后实际账单'}},a);
+  await assert.rejects(service.preview({company_id:20,shop_id:0,month:'2026-10',upload_type:'manual-expense',attachment_url:'/uploads/team-attachments/manual.png',expected_revision:0,manual:{metric:'AI使用费',amount:100,currency:'CNY',note:'过期草稿'}},a),/草稿已存在/);
+  await service.confirm({company_id:20,document_id:manual.document.id,expected_revision:1},a);
+  const invoice=await service.preview({company_id:20,shop_id:0,month:'2026-10',upload_type:'support',attachment_url:'/uploads/team-attachments/invoice.pdf',related_document_id:manual.document.id},a);await service.confirm({company_id:20,document_id:invoice.document.id},a);
+  const annual=await service.report({company_id:20,from:'2026-01',to:'2026-12',period_mode:'year'},a);
+  assert.equal(annual.matrix.periods.length,1);assert.equal(annual.metrics['AI使用费'],99);assert.equal(annual.lines.find(l=>l.metric==='AI使用费').linked_evidence[0].original_name,'Счёт-фактура.pdf');
+  assert.equal((await service.report({company_id:20,month:'2026-11'},a)).documents.length,0);
+  await assert.rejects(service.preview({company_id:30,shop_id:0,month:'2026-10',upload_type:'support',attachment_url:'/uploads/team-attachments/invoice.pdf',related_document_id:manual.document.id},foreign));
   await q("UPDATE finance_periods SET status='closed' WHERE company_id=20 AND tenant_id=2 AND month_key='2026-10'");
   await assert.rejects(service.confirm({company_id:20,document_id:first.document.id},a),/已关账/);
   await assert.rejects(service.preview(input,a),/已关账/);

@@ -11,6 +11,8 @@ import { createCompanyFinanceDocuments } from '../src/services/company-finance-d
 
 const manifest=JSON.parse(await fs.readFile(process.argv[2],'utf8'));
 const fixture=await createTenantMysqlFixture('finance_preview');
+// Match the application's UTC mysql2 decoder; the fixture's SQL session already uses UTC.
+fixture.connection.connection.config.timezone='Z';
 const q=fixture.query,privateFiles=new Map(),token=crypto.randomUUID();
 const session={id:10,personId:10,name:'本地验收',roles:['operations'],tenant:{id:2,slug:'finance-preview',role:'owner',access_allowed:true}};
 await q("INSERT INTO tenants(id,slug,name,status) VALUES(2,'finance-preview','Finance Preview','active')");
@@ -36,10 +38,16 @@ const expectedFees=Math.round(manifest.reviews.reduce((s,r)=>s+r[2],0)*100)/100;
 const expectedMetric=metric=>Math.round(manifest.raw.filter(r=>r[1]===metric).reduce((s,r)=>s+r[2],0)*100)/100;
 if(platformFees!==expectedFees||report.metrics['已确认商品销售额']!==expectedMetric('已确认商品销售额')||report.metrics['销售退回冲减额']!==expectedMetric('销售退回冲减额'))throw new Error('Z店10月验收金额与独立整理结果不一致');
 if(report.cash_reconciliation.matches.length!==2||report.cash_reconciliation.matches.some(m=>m.status!=='amount_date_candidate'))throw new Error('10月两笔收款候选匹配不一致');
+const periodColumns={};
+for(const [mode,count]of [['month',12],['quarter',4],['year',1]]){
+ const r=await service.report({company_id:20,from:'2026-01',to:'2026-12',period_mode:mode},session);
+ if(r.matrix.periods.length!==count||JSON.stringify(r.metrics)!==JSON.stringify(report.metrics))throw new Error(`${mode}期间列数或跨期间汇总不一致`);
+ periodColumns[mode]=r.matrix.periods.map(p=>p.label);
+}
 const exported=await service.export({company_id:20,month:'2026-10'},session);
 const output=path.resolve(process.argv[3]||'/private/tmp/finance-preview');await fs.mkdir(output,{recursive:true});
 await fs.writeFile(path.join(output,'Z店10月_系统导出验收.zip'),exported.buffer);
-await fs.writeFile(path.join(output,'验收结果.json'),JSON.stringify({files:manifest.files.length,metrics:report.metrics,platform_fees:platformFees,cash_matches:report.cash_reconciliation.matches.length,coverage:report.coverage,database:fixture.database},null,2));
+await fs.writeFile(path.join(output,'验收结果.json'),JSON.stringify({files:manifest.files.length,metrics:report.metrics,platform_fees:platformFees,cash_matches:report.cash_reconciliation.matches.length,coverage:report.coverage,period_columns:periodColumns,database:fixture.database},null,2));
 const previewEntry=`import {createApp,h} from 'vue';import {createPinia}from 'pinia';import{createRouter,createWebHashHistory,RouterView}from 'vue-router';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Page from '/frontend/admin/views/finance/CompanyStatementsView.vue';import{useAuthStore}from '/frontend/admin/stores/auth.js';const app=createApp({render:()=>h(RouterView)}),pinia=createPinia(),router=createRouter({history:createWebHashHistory(),routes:[{path:'/:pathMatch(.*)*',component:Page}]});app.use(pinia);app.use(router);app.use(ElementPlus);const auth=useAuthStore();auth.user=${JSON.stringify(session)};auth.bootstrapped=true;app.mount('#app');`;
 const vite=await createServer({configFile:false,plugins:[vue(),{name:'finance-preview-entry',resolveId(id){if(id==='/finance-preview-entry.js')return '\0finance-preview-entry';},load(id){if(id==='\0finance-preview-entry')return previewEntry;}}],optimizeDeps:{include:['vue','pinia','vue-router','element-plus']},server:{middlewareMode:true,hmr:false},appType:'custom',publicDir:false});
 const json=(res,value,status=200)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
@@ -72,5 +80,5 @@ const server=http.createServer(async(req,res)=>{
   vite.middlewares(req,res,()=>{res.writeHead(404);res.end();});
  }catch(e){json(res,{error:e.message},e.statusCode||500);}
 });
-server.listen(8788,'127.0.0.1',()=>console.log(`本地验收：http://localhost:8788/admin.html#/finance/company-statements\n27份原件、平台费用${platformFees} CNY、两笔收款候选、ZIP导出已通过；数据库${fixture.database}`));
+server.listen(8788,'127.0.0.1',()=>console.log(`本地验收：http://127.0.0.1:8788/admin.html#/finance/company-statements\n27份原件、平台费用${platformFees} CNY、两笔收款候选、ZIP导出已通过；数据库${fixture.database}`));
 for(const signal of ['SIGINT','SIGTERM'])process.once(signal,async()=>{await vite.close();server.close();await fixture.cleanup();process.exit(0);});
