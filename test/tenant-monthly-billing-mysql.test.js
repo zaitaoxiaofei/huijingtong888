@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
+import {noteBillingSourceMutation} from '../src/services/billing-overview-cache.js';
 import { createProfitRoutes } from '../src/server/routes/profit.js';
 
 test('monthly billing reads only the current enterprise, including every financial appendix', {
@@ -15,7 +16,7 @@ test('monthly billing reads only the current enterprise, including every financi
     ({ closeMysqlPool } = await import('../src/mysql-pool.js'));
     const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, monthlyBillingSourceRecordsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql, prepareInventoryFlowMysql } = await import('../src/services/mysql-cutover.js');
     const { ensureFinanceCenterSchema } = await import('../src/services/finance-center.js');
-    const q = fixture.query;
+    const q = async(sql,params=[])=>{const result=await fixture.query(sql,params);noteBillingSourceMutation(sql,result);return result;};
     // Match the runtime component migration required by scoped reads.
     await prepareInventoryFlowMysql();
     await q("INSERT INTO tenants(id,slug,name,status) VALUES(1,'default','Default','active'),(2,'a','A','active'),(3,'b','B','active')");
@@ -385,7 +386,7 @@ test('monthly billing reads only the current enterprise, including every financi
     });
     await t.test('unavailable annual AI remains unknown rather than a recorded zero',async()=>{
       await q('RENAME TABLE ai_image_usage_events TO ai_image_usage_events_unavailable');
-      try{const r=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1',includeOverviewAi:'1'},'2');assert.equal(r.selected.ai_usage.available,false);assert.equal(r.selected.ai_usage.cost,null);}
+      try{const r=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1',includeOverviewAi:'1',refresh:'1'},'2');assert.equal(r.selected.ai_usage.available,false);assert.equal(r.selected.ai_usage.cost,null);}
       finally{await q('RENAME TABLE ai_image_usage_events_unavailable TO ai_image_usage_events');}
     });
     await t.test('request tenant selectors cannot replace authenticated enterprise',async()=>{
@@ -470,7 +471,19 @@ test('monthly billing reads only the current enterprise, including every financi
       for(const endpoint of ['/v2/returns/rfbs/list','/v1/returns/list'])await q("INSERT INTO ozon_return_observations(tenant_id,shop_id,order_id,source_endpoint,return_id,posting_number,official_state,state_json,observed_at) VALUES(2,20,920,?,'9201','PARTIAL-RETURN','MoneyReturned',?,NOW())",[endpoint,JSON.stringify({...record,source_endpoint:endpoint})]);
       const filters={from:'2026-02-01',to:'2026-02-28',companyId:2,includeAppendices:'0'};
       const detail=await monthlyBillingOrderDetailsMysql({...filters,outcomeType:'returns',groupBy:'inventory',sortBy:'quantity'},'2');assert.equal(detail.total,1);assert.equal(detail.rows[0].quantity,1);assert.equal(detail.rows[0].base_quantity,2);assert.equal(detail.rows[0].rate,.5);assert.equal(detail.rows[0].order_count,1);assert.equal(detail.rows[0].inventory_name,'Product 20');
-      const statement=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;assert.equal(statement.income_pending_count,1);assert.equal(statement.net_profit,null);
+      const statement=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;assert.equal(statement.income_pending_count,1);assert.equal(statement.net_profit,null);assert.equal(typeof statement.estimated_net_profit,'number');
+      const overview=await monthlyBillingDetailsMysql({year:2026,fromMonth:2,toMonth:2,companyId:2,overviewOnly:'1'},'2');
+      assert.equal(overview.selected.summary.estimated_net_profit,statement.estimated_net_profit);assert.equal(overview.selected.completion_status,'pending');
+      const cached=await monthlyBillingDetailsMysql({year:2026,fromMonth:2,toMonth:2,companyId:2,overviewOnly:'1'},'2');assert.equal(cached.overview_cache.hit,true);
+      const {mysqlExecute,withMysqlTransaction}=await import('../src/mysql-pool.js');
+      const expense=await mysqlExecute("INSERT INTO finance_expenses(tenant_id,company_id,expense_date,category,description,amount_cny) VALUES(2,2,'2026-02-15','rent','cache invalidation test',7)");
+      const args={year:2026,fromMonth:2,toMonth:2,companyId:2,overviewOnly:'1'};
+      const changed=await monthlyBillingDetailsMysql(args,'2');assert.equal(changed.overview_cache.hit,false);assert.equal(changed.selected.summary.estimated_net_profit,Math.round((statement.estimated_net_profit-7)*100)/100);
+      await withMysqlTransaction(async connection=>{await connection.execute('UPDATE finance_expenses SET amount_cny=9 WHERE id=?',[expense.insertId]);});
+      const committed=await monthlyBillingDetailsMysql(args,'2');assert.equal(committed.overview_cache.hit,false);assert.equal(committed.selected.summary.estimated_net_profit,Math.round((statement.estimated_net_profit-9)*100)/100);
+      await assert.rejects(withMysqlTransaction(async connection=>{await connection.execute('UPDATE finance_expenses SET amount_cny=11 WHERE id=?',[expense.insertId]);throw Error('rollback cache test');}));
+      const rolledBack=await monthlyBillingDetailsMysql(args,'2');assert.equal(rolledBack.overview_cache.hit,true);assert.equal(rolledBack.selected.summary.estimated_net_profit,committed.selected.summary.estimated_net_profit);
+      await mysqlExecute('DELETE FROM finance_expenses WHERE id=?',[expense.insertId]);
       await q('DELETE FROM ozon_return_observations WHERE order_id=920');await q('DELETE FROM order_profit_items WHERE order_item_id IN (920,921)');await q('DELETE FROM order_items WHERE order_id=920');await q('DELETE FROM orders WHERE id=920');await q('DELETE FROM sku_mappings WHERE id=921');await q('DELETE FROM products WHERE id=921');await q('UPDATE sku_mappings SET product_id=30 WHERE id=20');
     });
     await t.test('disposed returns zero revenue in monthly, annual and inventory views without dropping goods costs',async()=>{
