@@ -1,5 +1,6 @@
 // Valuation consumes the same free/physical projection as the inventory page.
-// Do not infer virtual bundle stock here: these rows own actual stock movements.
+// The SQL source excludes virtual parents with saved components. Physical leaf
+// records retain their own units, including real multipacks; never infer by name.
 const numeric = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 export function availableLocalCapitalRows(rows, states) {
   const byId = new Map(states.map(row => [Number(row.product_id), row]));
