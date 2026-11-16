@@ -214,13 +214,26 @@ test('monthly billing reads only the current enterprise, including every financi
       await assert.rejects(monthlyBillingDetailsMysql({year:2026,companyId:3,overviewOnly:'1'},'2'),{statusCode:404});
       await assert.rejects(monthlyBillingOrderDetailsMysql({...range,companyId:3},'2'),{statusCode:404});
     });
+    await t.test('annual expense categories and grouped AI match monthly statements without extra deductions',async()=>{
+      const query={year:2026,fromMonth:8,toMonth:10,overviewOnly:'1',includeOverviewAi:'1'};
+      const annual=await monthlyBillingDetailsMysql(query,'2');
+      for(const m of annual.months){const bill=(await monthlyBillingDetailsMysql({from:m.from,to:m.to},'2')).selected;
+        for(const key of ['revenue','order_profit','net_profit','purchase_cost','international_shipping_cost','commission_fee','return_loss'])assert.equal(m.summary[key],bill.summary[key],m.month_key+'/'+key);
+        assert.equal(m.ai_usage.available,true);assert.equal(m.ai_usage.cost,bill.ai_usage.cost);
+        const a=new Map(m.expense_totals.map(e=>[e.category,Math.round(e.amount_cny*100)])),b=new Map();for(const e of bill.expenses)b.set(e.category,(b.get(e.category)||0)+Math.round(e.amount_cny*100));assert.deepEqual(a,b);
+      }
+      const company=await monthlyBillingDetailsMysql({...query,companyId:2},'2');assert.equal(company.selected.ai_usage.scope,'enterprise');
+      await q("INSERT INTO ai_image_usage_events(tenant_id,person_id,requested_count,status,job_no,item_no,operation,started_at) VALUES('2',2,3,'failed','boundary-ai','boundary-ai','submit','2026-08-31 16:00:00')");
+      const boundary=await monthlyBillingDetailsMysql(query,'2');assert.equal(boundary.months[0].ai_usage.request_count,0);assert.equal(boundary.months[1].ai_usage.request_count,3);assert.equal(boundary.months[1].ai_usage.cost,.114);
+      await q("DELETE FROM ai_image_usage_events WHERE job_no='boundary-ai'");
+    });
     await t.test('annual overview query count stays bounded instead of growing per month',async()=>{
       const {getMysqlPoolMetrics}=await import('../src/mysql-pool.js');
       let before=getMysqlPoolMetrics().acquisitions;
-      await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1'},'2');
+      await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1',includeOverviewAi:'1'},'2');
       const single=getMysqlPoolMetrics().acquisitions-before;
       before=getMysqlPoolMetrics().acquisitions;
-      const start=performance.now();await monthlyBillingDetailsMysql({year:2026,fromMonth:1,toMonth:12,overviewOnly:'1'},'2');
+      const start=performance.now();await monthlyBillingDetailsMysql({year:2026,fromMonth:1,toMonth:12,overviewOnly:'1',includeOverviewAi:'1'},'2');
       const annual=getMysqlPoolMetrics().acquisitions-before;
       assert.ok(annual<=single+2,`one month ${single}, full year ${annual}`);
       t.diagnostic(`overview SQL acquisitions: one month=${single}, full year=${annual}; fixture full year=${Math.round(performance.now()-start)}ms`);
@@ -278,6 +291,11 @@ test('monthly billing reads only the current enterprise, including every financi
       const ad=await monthlyBillingSourceRecordsMysql({...range,source:'advertising'},'2');
       assert.equal(ad.total,1);assert.equal(ad.groups[0].amount_cny,9);assert.equal(ad.rows[0].original_amount,null);assert.ok(!JSON.stringify(ad).includes('B secret'));
       await assert.rejects(monthlyBillingSourceRecordsMysql({...range,source:'other'},'2'),{statusCode:400});
+    });
+    await t.test('unavailable annual AI remains unknown rather than a recorded zero',async()=>{
+      await q('RENAME TABLE ai_image_usage_events TO ai_image_usage_events_unavailable');
+      try{const r=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1',includeOverviewAi:'1'},'2');assert.equal(r.selected.ai_usage.available,false);assert.equal(r.selected.ai_usage.cost,null);}
+      finally{await q('RENAME TABLE ai_image_usage_events_unavailable TO ai_image_usage_events');}
     });
     await t.test('request tenant selectors cannot replace authenticated enterprise',async()=>{
       const seen=[];const routes=createProfitRoutes({services:{monthlyBillingDetails:async(...args)=>seen.push(args),monthlyBillingOrders:async(...args)=>seen.push(args),monthlyBillingSourceRecords:async(...args)=>seen.push(args)}});
