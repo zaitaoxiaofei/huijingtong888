@@ -2506,11 +2506,25 @@ async function claimMysqlCollectRequests(tenantId, take, requestedStoreIds) {
       SET status='pending', claimed_at=NULL
       WHERE tenant_id=? AND status='running' AND claimed_at < ?
     `, [tenantId, staleBefore])
+    // A shop's daily reports run one date at a time, even with multiple browsers polling.
+    const [dailyRuns] = await executeSellerAnalyticsSql(connection, `
+      SELECT d.shop_id,d.run_id FROM seller_sku_traffic_days d
+      JOIN seller_analytics_collect_runs r ON r.tenant_id=d.tenant_id AND r.id=d.run_id
+      WHERE d.tenant_id=? AND d.status='pending' AND r.status IN ('pending','running')
+      ORDER BY (r.status='running') DESC,d.date_key DESC,d.run_id
+    `, [tenantId])
+    const seenDailyShops=new Set(),blockedDailyRuns=[]
+    for(const run of dailyRuns){
+      if(seenDailyShops.has(String(run.shop_id)))blockedDailyRuns.push(run.run_id)
+      else seenDailyShops.add(String(run.shop_id))
+    }
+    const dailyClause=blockedDailyRuns.length?`AND run_id NOT IN (${blockedDailyRuns.map(()=>'?').join(',')})`:''
+    params.push(...blockedDailyRuns)
     const [rows] = await executeSellerAnalyticsSql(connection, `
       SELECT id, run_id, store_id, source_key, source_label, endpoint_type, page_index,
         request_url, request_method, request_headers_json, request_body_json
       FROM seller_analytics_collect_requests
-      WHERE tenant_id=? AND status='pending' ${storeClause}
+      WHERE tenant_id=? AND status='pending' ${storeClause} ${dailyClause}
       ORDER BY created_at, id
       LIMIT ${take}
       FOR UPDATE

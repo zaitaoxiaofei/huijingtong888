@@ -126,13 +126,15 @@ test("seller analytics wakes the plugin and hides server-side login controls on 
   assert.doesNotMatch(source, /await wait\(1500\);\s*await Promise\.all\(\[loadPluginStatus\(\), loadPluginValidation\(\)\]\)/);
 });
 
-test("seller analytics cancels active old-shop runs before a confirmed switch", () => {
+test("seller analytics preserves other browser runs on shop switch and keeps explicit cancellation", () => {
   const source = fs.readFileSync("frontend/admin/views/analytics/SellerAnalyticsView.vue", "utf8");
   const api = fs.readFileSync("frontend/admin/api/sellerAnalytics.js", "utf8");
   assert.match(api, /export function cancelSellerAnalyticsCollectRun\(id\)/);
   assert.match(api, /collect-runs\/\$\{encodeURIComponent\(id\)\}\/cancel/);
   assert.match(source, /@change="handleShopChange"/);
-  assert.match(source, /async function handleShopChange\([\s\S]*?getSellerAnalyticsCollectRuns\(\{ store_id: previousStoreId[\s\S]*?ElMessageBox\.confirm[\s\S]*?cancelCollectRunAndNotify\(run\.id\)/);
+  const changeShop = source.match(/async function handleShopChange\([\s\S]*?\n\}/)[0];
+  assert.doesNotMatch(changeShop, /cancelCollectRunAndNotify|cancelSellerAnalyticsCollectRun/);
+  assert.match(changeShop, /wakeAnalyticsPlugin\(\)/);
   assert.match(source, /window\.postMessage\(\{ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId, pluginInstanceId: pluginInstanceId\.value \}, window\.location\.origin\)/);
   assert.match(source, /@click="cancelCurrentRun"/);
   assert.match(source, /window\.postMessage\(\{ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId\.value, pluginInstanceId: pluginInstanceId\.value \}, window\.location\.origin\)/);

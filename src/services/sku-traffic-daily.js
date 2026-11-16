@@ -1,3 +1,4 @@
+import {normalizeTrafficTags,FOCUSED_TRAFFIC_TAG} from '../shared/sku-traffic-tags.js';
 import {randomUUID} from 'node:crypto';
 import {mysqlQuery, mysqlExecute, withMysqlTransaction} from '../mysql-pool.js';
 import {normalizeTrafficMonitorQuery} from '../shared/sku-traffic-monitor-query.js';
@@ -88,8 +89,13 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     const key=tenant(tenantId), owned=await shops(key,body.shop_id), days=trafficDays(clock()), today=trafficToday(clock());
     if(body.range_days!==undefined&&![1,7,15,30].includes(Number(body.range_days)))throw error('补采范围请选择1天、7天、15天或30天');
     if(body.date&&body.range_days!==undefined)throw error('请选择补采单日或补齐区间');
-    const target=body.date?[dayInWindow(body.date)]:body.range_days?[...days.slice(-Number(body.range_days))].reverse():[...days].reverse();
+    const end=body.end_date?dayInWindow(body.end_date):days.at(-1);
+    if(body.end_date&&(!body.range_days||body.date))throw error('区间补采需要范围天数，不能同时指定单日');
+    const interval=days.filter(day=>day<=end&&day>=shiftTrafficDate(end,1-Number(body.range_days||30)));
+    const target=body.date?[dayInWindow(body.date)]:body.range_days?[...interval].reverse():[...days].reverse();
     const missingOnly=body.missing_only===true||String(body.missing_only)==='1';
+    // Explicit operator intervals queue all selected dates; scheduled backfills keep their small backlog.
+    const maxPendingDays=body.end_date?days.length:3;
     const result={queued:[],waiting:[],completed:[],skipped:0};
     for(const shop of owned) {
       if(!String(shop.store_id||'').trim()) continue;
@@ -98,7 +104,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
       for(const state of states.filter(s=>s.status==='pending')) {
         if(state.run_id?.startsWith('reserve:')) {if(clock().getTime()-new Date(state.requested_at).getTime()<300000)pending++;continue;}
         const run=state.run_id?await loadRun(state.run_id,key):null;
-        if(run&&['pending','running'].includes(run.status)){pending++;result.waiting.push({shop_id:shop.id,day:state.date_key,run_id:run.id});}
+        if(run&&['pending','running'].includes(run.status)){pending++;if(target.includes(state.date_key))result.waiting.push({shop_id:shop.id,day:state.date_key,run_id:run.id});}
         else if(run?.status==='success'&&publishRun){await publishRun(run,key);pending++;}
         else {await execute("UPDATE seller_sku_traffic_days SET status='failed',message=? WHERE tenant_id=? AND shop_id=? AND date_key=? AND run_id=?",['采集失败或任务已失效，等待补采',key,shop.id,state.date_key,state.run_id]);state.status='failed';}
       }
@@ -106,7 +112,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
         const state=byDay.get(day), recent=days.slice(-3).includes(day);
         if(state?.status==='pending'&&(clock().getTime()-new Date(state.requested_at).getTime()<300000||!state.run_id?.startsWith('reserve:')))continue;
         if(missingOnly&&state?.status==='complete'){result.skipped++;result.completed.push({shop_id:shop.id,day,last_success_at:state.last_success_at});continue;}
-        if(pending+added>=3)break;
+        if(pending+added>=maxPendingDays)break;
         if(!missingOnly&&!body.date&&(state?.status==='complete'||state?.status==='partial'&&state.product_count!==null)&&(!recent||trafficToday(new Date(state.last_success_at||state.requested_at))===today)){result.skipped++;continue;}
         const reservation='reserve:'+randomUUID(), requested=sqlTime(clock());
         const reserved=await transaction(async connection=>{
@@ -149,7 +155,8 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     const ids=owned.map(s=>s.id);
     if(!ids.length)return{rows:[],total:0,shops:[],coverage:[],days,date:requestedDate||days.at(-1),latest_available_date:null,report_end_date:days.at(-1),selected_count:0,page,pageSize};
     const marks=ids.map(()=>'?').join(',');
-    if(String(body.metadata_only)==='1')return {shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),days,date:requestedDate||days.at(-1),report_end_date:days.at(-1),coverage:await readCoverage(key,ids,days,true)};
+    const tagOptions=await query(`SELECT DISTINCT tag FROM seller_sku_traffic_tags WHERE tenant_id=? AND shop_id IN(${marks}) UNION SELECT DISTINCT tag FROM seller_sku_traffic_watch WHERE tenant_id=? AND shop_id IN(${marks}) AND tag<>'' ORDER BY tag`,[key,...ids,key,...ids]);
+    if(String(body.metadata_only)==='1')return {tag_options:tagOptions.map(row=>row.tag),shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),days,date:requestedDate||days.at(-1),report_end_date:days.at(-1),coverage:await readCoverage(key,ids,days,true)};
     const dayCounts=await query(`SELECT DATE_FORMAT(date_key,'%Y-%m-%d') date_key,COUNT(*) sku_count FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? GROUP BY date_key ORDER BY date_key`,[key,...ids,days[0],days.at(-1)]);
     const latest=dayCounts.at(-1)?.date_key||null,date=requestedDate||(body.date_mode==='latest_report_day'?days.at(-1):latest)||days.at(-1),fromDate=[days[0],shiftTrafficDate(date,1-options.rangeDays)].sort().at(-1);
     const seriesDays=days.filter(day=>day>=fromDate&&day<=date);
@@ -168,7 +175,15 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     const where=['1=1'],params=[...ids,key,...ids,key,...ids,fromDate,date,...ids,key,fromDate,date,key];
     if(body.view==='focused')where.push('w.focused=1');
     else if(body.view&&!['all','bound','unbound'].includes(body.view))throw error('关注筛选无效');
-    if(body.tag){where.push('w.tag=?');params.push(String(body.tag).slice(0,80));}
+    let selectedTags=[];
+    try{selectedTags=normalizeTrafficTags(body.tags?(Array.isArray(body.tags)?body.tags:JSON.parse(body.tags)):body.tag?[String(body.tag)]:[]);}catch(e){throw error(e.message);}
+    if(selectedTags.length){
+      const clauses=[];
+      if(selectedTags.includes(FOCUSED_TRAFFIC_TAG))clauses.push('w.focused=1');
+      const labels=selectedTags.filter(tag=>tag!==FOCUSED_TRAFFIC_TAG);
+      if(labels.length){const tagMarks=labels.map(()=>'?').join(',');clauses.push(`(w.tag IN(${tagMarks}) OR EXISTS(SELECT 1 FROM seller_sku_traffic_tags st WHERE st.tenant_id=? AND st.shop_id=c.shop_id AND st.sku=c.sku COLLATE utf8mb4_unicode_ci AND st.tag IN(${tagMarks})))`);params.push(...labels,key,...labels);}
+      where.push('('+clauses.join(' OR ')+')');
+    }
     const inventoryMatch=`EXISTS(SELECT 1 ${inventoryFrom} AND sm.shop_id=c.shop_id AND sm.ozon_sku=c.sku COLLATE utf8mb4_0900_ai_ci)`;
     if(body.view==='bound')where.push(inventoryMatch);
     if(body.view==='unbound')where.push('NOT '+inventoryMatch);
@@ -202,9 +217,10 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
       products=groups.length?await query(`SELECT * FROM (${groupSource}) g WHERE inventory_group IN(${groups.map(()=>'?').join(',')}) ORDER BY inventory_group,shop_id,sku`,[...filteredParams,...groups.map(g=>g.inventory_group)]):[];
     }else products=await query(`SELECT q.* FROM (${grouped}) q WHERE ${conditions} ORDER BY (q.\`${options.sort}\` IS NULL),q.\`${options.sort}\` ${options.direction.toUpperCase()},q.shop_id,q.sku LIMIT ? OFFSET ?`,[...filteredParams,pageSize,(page-1)*pageSize]);
     products=products.map(p=>({...p,shop_id:Number(p.shop_id)}));
-    let history=[],metadata=[],inventory=[];
+    let history=[],metadata=[],inventory=[],labels=[];
     if(products.length){
       const pairs=products.flatMap(p=>[p.shop_id,p.sku]),filter=products.map(()=>'(shop_id=? AND sku=?)').join(' OR ');
+      labels=await query(`SELECT shop_id,sku,tag FROM seller_sku_traffic_tags WHERE tenant_id=? AND (${filter}) ORDER BY tag`,[key,...pairs]);
       if(includeSeries)history=await query(`SELECT shop_id,sku,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,${metricKeys.join(',')},updated_at FROM seller_sku_traffic_daily WHERE tenant_id=? AND date_key>=? AND date_key<=? AND (${filter}) ORDER BY date_key`,[key,matrix?fromDate:days[0],matrix?date:days.at(-1),...pairs]);
       const metadataFilter=products.map(()=>'(shop_id=? AND ozon_sku=? COLLATE utf8mb4_0900_ai_ci)').join(' OR ');
       metadata=await query(`SELECT shop_id,ozon_sku,MAX(name) product_name,MAX(image_url) image_url,MAX(offer_id) offer_id FROM online_products WHERE ${metadataFilter} GROUP BY shop_id,ozon_sku`,pairs);
@@ -216,24 +232,36 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     return {rows:products.map(p=>{
       const observed=history.filter(r=>r.shop_id===p.shop_id&&r.sku===p.sku),byDay=new Map(observed.map(r=>[r.date_key,r]));
       const series=includeSeries&&!matrix?dailyTrafficSeries(days,observed):[],info=details.get(`${p.shop_id}:${p.sku}`)||{};
-      return {shop_id:p.shop_id,sku:p.sku,latest_day:p.latest_day,focused:!!Number(p.focused),tag:p.tag||'',note:p.note||'',inventory_group:p.inventory_group||null,
+      return {shop_id:p.shop_id,sku:p.sku,latest_day:p.latest_day,focused:!!Number(p.focused),tags:[...new Set([...labels.filter(t=>Number(t.shop_id)===p.shop_id&&t.sku===p.sku).map(t=>t.tag),...(p.tag?[p.tag]:[])])],tag:p.tag||'',note:p.note||'',inventory_group:p.inventory_group||null,
         summary:Object.fromEntries([...counts,'conv_views_to_order','conv_total_views_to_cart','conv_hits_to_cart_to_order','detail_view_rate','search_share','pdp_order_rate','available_days'].map(k=>[k,p[k]??null])),
         inventory:inventory.filter(i=>i.shop_id===p.shop_id&&i.ozon_sku===p.sku).map(({id,name,code,inventory_number})=>({id,name,code,inventory_number})),
         product_name:info.product_name||null,image_url:info.image_url||null,offer_id:info.offer_id||null,shop_name:owned.find(s=>s.id===p.shop_id)?.name,
         series,...(matrix&&includeSeries?{trend_values:seriesDays.map(day=>{const row=byDay.get(day);return row?metricKeys.map(k=>row[k]===null||row[k]===undefined?null:Number(row[k])):null;})}:{}),
         selected:series.find(s=>s.date_key===date),previous:series.find(s=>s.date_key===shiftTrafficDate(date,-1))||null};
-    }),total:groupTotal??Number(count.total),sku_total:Number(count.total),shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),coverage,days,date,range_days:options.rangeDays,range_from:fromDate,latest_available_date:latest,report_end_date:days.at(-1),selected_count:Number(dayCounts.find(d=>d.date_key===date)?.sku_count||0),page,pageSize,
+    }),tag_options:tagOptions.map(row=>row.tag),total:groupTotal??Number(count.total),sku_total:Number(count.total),shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),coverage,days,date,range_days:options.rangeDays,range_from:fromDate,latest_available_date:latest,report_end_date:days.at(-1),selected_count:Number(dayCounts.find(d=>d.date_key===date)?.sku_count||0),page,pageSize,
       ...(matrix?{series_days:seriesDays,series_columns:metricKeys}:{})};
   }
   async function saveWatch(body,tenantId){
     await ensureSchema();const key=tenant(tenantId),owned=await shops(key,body.shop_id);
     if(owned.length!==1||body.shop_id==='all')throw error('请选择一家店铺的SKU');
     const sku=String(body.sku||'').trim();
-    if(!sku||sku.length>128||typeof body.focused!=='boolean'||typeof body.tag!=='string'||body.tag.length>80||typeof body.note!=='string'||body.note.length>512)throw error('关注信息无效：标签最多80字，备注最多512字');
+    if(!sku||sku.length>128||typeof body.focused!=='boolean'||(body.tags===undefined&&(typeof body.tag!=='string'||body.tag.length>80))||typeof body.note!=='string'||body.note.length>512)throw error('关注信息无效：标签最多80字，备注最多512字');
     const existing=await query('SELECT sku FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id=? AND sku=? UNION SELECT ozon_sku COLLATE utf8mb4_unicode_ci sku FROM online_products WHERE shop_id=? AND ozon_sku=? UNION SELECT sku FROM seller_sku_traffic_watch WHERE tenant_id=? AND shop_id=? AND sku=? LIMIT 1',[key,owned[0].id,sku,owned[0].id,sku,key,owned[0].id,sku]);
     if(!existing.length)throw error('该店铺SKU不存在，请刷新商品列表',404);
-    await execute(`INSERT INTO seller_sku_traffic_watch(tenant_id,shop_id,sku,focused,tag,note,updated_at) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE focused=VALUES(focused),tag=VALUES(tag),note=VALUES(note),updated_at=VALUES(updated_at)`,[key,owned[0].id,sku,body.focused?1:0,body.tag.trim(),body.note.trim(),sqlTime(clock())]);
-    return {shop_id:owned[0].id,sku,focused:body.focused,tag:body.tag.trim(),note:body.note.trim()};
+    let tags=null;
+    try{if(body.tags!==undefined)tags=normalizeTrafficTags(body.tags).filter(tag=>tag!==FOCUSED_TRAFFIC_TAG);}catch(e){throw error(e.message);}
+    if(tags!==null&&tags.length+(body.focused?1:0)>12)throw error('请选择最多12个标签（含重点关注）');
+    const legacyTag=tags===null?body.tag.trim():tags[0]||'';
+    await transaction(async connection=>{
+      const [owners]=await connection.query(shopSql+" AND s.id=? AND (CASE WHEN t.slug='default' THEN 'admin' ELSE CAST(t.id AS CHAR) END)=? FOR UPDATE",[owned[0].id,key]);
+      if(owners.length!==1)throw error('店铺归属已变化，请刷新后重新标记',409);
+      await connection.execute(`INSERT INTO seller_sku_traffic_watch(tenant_id,shop_id,sku,focused,tag,note,updated_at) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE focused=VALUES(focused),tag=VALUES(tag),note=VALUES(note),updated_at=VALUES(updated_at)`,[key,owned[0].id,sku,body.focused?1:0,legacyTag,body.note.trim(),sqlTime(clock())]);
+      if(tags!==null){
+        await connection.execute('DELETE FROM seller_sku_traffic_tags WHERE tenant_id=? AND shop_id=? AND sku=?',[key,owned[0].id,sku]);
+        for(const tag of tags)await connection.execute('INSERT INTO seller_sku_traffic_tags(tenant_id,shop_id,sku,tag) VALUES(?,?,?,?)',[key,owned[0].id,sku,tag]);
+      }
+    });
+    return {shop_id:owned[0].id,sku,focused:body.focused,tag:legacyTag,...(tags===null?{}:{tags}),note:body.note.trim()};
   }
   async function cleanup() {
     await ensureSchema();const oldest=trafficDays(clock())[0];
