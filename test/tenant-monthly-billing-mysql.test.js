@@ -113,13 +113,33 @@ test('monthly billing reads only the current enterprise, including every financi
       assert.equal(local.rows[0].quantity,21);assert.equal(local.rows[0].unit_cost,3.125);assert.equal(local.rows[0].inventory_value,65.625);
       assert.equal(local.rows[0].cost_basis,'purchase_version');assert.equal(local.rows[0].unclassified_movements,1);
       await q("INSERT INTO ozon_stock_snapshots(shop_id,ozon_sku,stock_type,present) VALUES(20,'unmapped-a','fbp_real',7)");
+      await q("INSERT INTO online_products(id,shop_id,ozon_sku,name,archived) VALUES(920,20,'unmapped-a','Bind source A',0),(930,30,'unmapped-a','Foreign source B',0)");
       const fbp=await financeInventoryCapitalDetailsMysql({kind:'fbp'},'2');
       const unknown=fbp.rows.find(r=>r.ozon_sku==='unmapped-a');
+      assert.equal(Number(unknown.online_product_id),920);assert.equal(Number(unknown.shop_id),20);
+      await q("UPDATE online_products SET archived=1 WHERE id=920");
+      const archived=await financeInventoryCapitalDetailsMysql({kind:'fbp',review:'binding'},'2');
+      assert.equal(archived.rows[0].online_product_id,null);
+      await q("UPDATE online_products SET archived=0 WHERE id=920");
+
       assert.equal(unknown.product_id,null);assert.equal(unknown.inventory_number,null);assert.equal(unknown.cost_missing,true);
+      for(const review of ['cost','binding']){
+        const filtered=await financeInventoryCapitalDetailsMysql({kind:'fbp',review,pageSize:1},'2');
+        assert.equal(filtered.total,1);assert.equal(filtered.rows[0].ozon_sku,'unmapped-a');
+        assert.equal(filtered.filtered_quantity,7);assert.equal(filtered.summary.categories.fbp.item_count,2);
+        assert.equal((await financeInventoryCapitalDetailsMysql({kind:'fbp',review,query:'STOCK-30'},'2')).total,0);
+      }
+      const historical=await financeInventoryCapitalDetailsMysql({kind:'local',review:'location'},'2');
+      assert.equal(historical.total,1);assert.equal(historical.rows[0].product_id,20);
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',review:'cost'},'2')).total,0);
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',review:'location',page:2,pageSize:1},'2')).rows.length,0);
+      await assert.rejects(financeInventoryCapitalDetailsMysql({kind:'local',review:'x OR 1=1'},'2'),{statusCode:400});
+      await assert.rejects(financeInventoryCapitalDetailsMysql({kind:'fbp',review:'availability'},'2'),{statusCode:400});
       assert.equal(fbp.summary.categories.fbp.unmapped_count,1);assert.equal(fbp.summary.categories.fbp.quantity,27);
       await q("DELETE FROM purchase_cost_versions WHERE source_key IN ('capital-test','foreign-cost')");
       await q("DELETE FROM inventory_movements WHERE source_type='legacy-test'");
       await q("DELETE FROM ozon_stock_snapshots WHERE ozon_sku='unmapped-a'");
+      await q("DELETE FROM online_products WHERE id IN(920,930)");
     });
     await t.test('local capital exactly follows free inventory after orders, FBP locks and safety',async()=>{
       await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(220,20,'capital-pending','awaiting_packaging','awaiting_packaging',UTC_TIMESTAMP())");
@@ -143,6 +163,23 @@ test('monthly billing reads only the current enterprise, including every financi
       await q("DELETE FROM inventory_movements WHERE related_order_item_id=220 OR source_type='capital-lock'");
       await q("DELETE FROM order_items WHERE id=220");await q("DELETE FROM orders WHERE id=220");
     });
+    await t.test('local review filters apply before pagination, intersect search and do not change stock',async()=>{
+      await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(23,2,'Missing cost A','REVIEW-A',0,'STOCK-23'),(24,2,'Missing cost B','REVIEW-B',0,'STOCK-24')");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,23,'review-fixture',5,'UNKNOWN','posted'),(2,24,'review-fixture',6,'LOCAL','posted')");
+      const before=await q("SELECT id,product_id,quantity_delta,status FROM inventory_movements ORDER BY id");
+      const first=await financeInventoryCapitalDetailsMysql({kind:'local',review:'cost',pageSize:1},'2');
+      const second=await financeInventoryCapitalDetailsMysql({kind:'local',review:'cost',pageSize:1,page:2},'2');
+      assert.equal(first.total,2);assert.equal(second.total,2);assert.notEqual(first.rows[0].product_id,second.rows[0].product_id);
+      assert.equal(first.filtered_quantity,11);assert.equal(first.filtered_value,0);
+      assert.equal(first.summary.categories.local.item_count,3);
+      const search=await financeInventoryCapitalDetailsMysql({kind:'local',review:'cost',query:'STOCK-24'},'2');
+      assert.equal(search.total,1);assert.equal(search.rows[0].product_id,24);
+      const overlap=await financeInventoryCapitalDetailsMysql({kind:'local',review:'location'},'2');
+      assert.ok(overlap.rows.some(r=>r.product_id===23));
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',review:'cost'},'3')).total,0);
+      assert.deepEqual(await q("SELECT id,product_id,quantity_delta,status FROM inventory_movements ORDER BY id"),before);
+      await q("DELETE FROM inventory_movements WHERE source_type='review-fixture'");await q("DELETE FROM products WHERE id IN(23,24)");
+    });
     await t.test('unknown available quantity is not capitalized as zero',async()=>{
       await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(25,2,'Unverified negative stock','P-25',2,'STOCK-25')");
       await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,25,'capital-unknown',-5,'LOCAL','posted')");
@@ -150,6 +187,9 @@ test('monthly billing reads only the current enterprise, including every financi
       assert.equal(summary.local_inventory_value,null);assert.equal(summary.inventory_total_value,null);
       assert.equal(summary.categories.local.availability_unknown_count,1);
       const detail=await financeInventoryCapitalDetailsMysql({kind:'local',query:'STOCK-25'},'2');
+      const todo=await financeInventoryCapitalDetailsMysql({kind:'local',review:'availability'},'2');
+      assert.equal(todo.total,1);assert.equal(todo.rows[0].product_id,25);assert.equal(todo.filtered_value,null);
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',review:'availability',query:'STOCK-20'},'2')).total,0);
       assert.equal(detail.rows[0].quantity,null);assert.equal(detail.rows[0].inventory_value,null);assert.equal(detail.filtered_value,null);
       assert.equal(detail.rows[0].physical_quantity,-5);
       await q("DELETE FROM inventory_movements WHERE source_type='capital-unknown'");await q("DELETE FROM products WHERE id=25");

@@ -1,4 +1,5 @@
 import { billingProfitTotals } from "../shared/billing-profit.js";
+import { INVENTORY_CAPITAL_REVIEWS, inventoryCapitalReviewMatches } from '../shared/inventory-capital-review.js';
 import {prepareInventoryInlineMedia} from "./database-inline-media.js";
 import { officialReturnReportRow } from "./ozon-return-report.js";
 import { ozonReturnFilterSql } from "./ozon-return-state.js";
@@ -31608,7 +31609,9 @@ function inventoryCapitalSourcesMysql(scope) {
         GROUP BY im.product_id) stock
       JOIN products p ON p.id=stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
       ${costJoin}`,
-    fbp: `SELECT oss.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+    fbp: `SELECT oss.id AS row_id,oss.shop_id,
+      (SELECT CASE WHEN COUNT(*)=1 THEN MIN(op.id) ELSE NULL END FROM online_products op WHERE op.shop_id=oss.shop_id AND op.ozon_sku=oss.ozon_sku AND op.archived=0) AS online_product_id,
+      p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
       GREATEST(COALESCE(oss.present,0),0) AS quantity,
       GREATEST(COALESCE(oss.present,0),0) * ${cost} AS inventory_value,${costFields},
       oss.synced_at AS updated_at,0 AS unclassified_movements,
@@ -31678,13 +31681,15 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
   await ensureStockLocationSchemaMysql();
   const kind = String(query.kind || 'local'), sources = inventoryCapitalSourcesMysql(scope);
   if (!Object.hasOwn(sources,kind)) throw Object.assign(new Error('请选择国内仓、FBP仓或采购在途'),{statusCode:400});
+  const review = String(query.review || 'all');
+  if (review !== 'all' && !INVENTORY_CAPITAL_REVIEWS.some(item=>item.key===review && (!item.local || kind==='local'))) throw Object.assign(new Error('请选择当前仓库支持的核实类型'),{statusCode:400});
   const page = Math.max(1,Math.min(100000,Math.floor(Number(query.page)||1)));
   const pageSize = Math.max(1,Math.min(100,Math.floor(Number(query.pageSize)||20)));
   if (kind === 'local') {
     const all = await availableLocalInventoryCapitalMysql(scope);
     const keyword = String(query.query || '').trim().slice(0,128).toLocaleLowerCase();
     const aliasIds = keyword ? new Set((await mysqlQuery(`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p', scope)} AND ${inventoryAliasSearch(keyword, 'p', { fuzzy: true }).sql}`, inventoryAliasSearch(keyword, 'p', { fuzzy: true }).params)).map(row=>Number(row.id))) : new Set();
-    const filtered = all.filter(row=>!keyword || aliasIds.has(Number(row.product_id)) || [row.product_name,row.inventory_number,row.code,row.row_id].filter(v=>v!=null).join(' ').toLocaleLowerCase().includes(keyword));
+    const filtered = all.filter(row=>inventoryCapitalReviewMatches(row,review) && (!keyword || aliasIds.has(Number(row.product_id)) || [row.product_name,row.inventory_number,row.code,row.row_id].filter(v=>v!=null).join(' ').toLocaleLowerCase().includes(keyword)));
     const compare = (a,b,key) => a[key]===b[key]?0:a[key]==null?1:b[key]==null?-1:Number(b[key])-Number(a[key]);
     filtered.sort((a,b)=>compare(a,b,'inventory_value')||compare(a,b,'quantity')||Number(a.row_id)-Number(b.row_id));
     const totals = localCapitalTotals(filtered);
@@ -31704,6 +31709,8 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
     params.push(`%${keyword.replace(/[=%_]/g,'=$&')}%`);
     params.push(...inventoryAliasSearch(keyword, 'alias_product', { fuzzy: true }).params);
   }
+  const reviewSql = {cost:'cost_missing=1',location:'unclassified_movements>0',binding:'product_id IS NULL'};
+  if (review !== 'all') where += `${where ? ' AND ' : ' WHERE '}${reviewSql[review]}`;
   const source = `FROM (${sources[kind]}) capital${where}`;
   const [rows, totals, summary] = await Promise.all([
     mysqlQuery(`SELECT * ${source} ORDER BY inventory_value DESC,quantity DESC,row_id LIMIT ? OFFSET ?`,[...params,pageSize,(page-1)*pageSize]),
