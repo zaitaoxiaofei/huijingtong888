@@ -120,13 +120,14 @@ function startRefresh(){window.clearInterval(refreshTimer);refreshTimer=window.s
 async function initialize(){
  const scope=sessionKey.value;
  try{
-  const [data,preference]=await Promise.all([getSkuTrafficDaily({metadata_only:1}),apiClient.get(`/api/user-preferences?key=${preferenceKey.value}`,{noCache:true}).catch(()=>null)]);
+  const [data,preference]=await Promise.all([getSkuTrafficDaily({metadata_only:1},{routeScoped:false}),apiClient.get(`/api/user-preferences?key=${preferenceKey.value}`,{noCache:true,routeScoped:false}).catch(()=>null)]);
   if(scope!==sessionKey.value||disposed)return;
   state.shops=data.shops||[];tagOptions.value=[...new Set([...DEFAULT_TRAFFIC_TAGS,...(data.tag_options||[])])];
   selectedShops.value=preferredMonitorShops(state.shops,selectedShops.value.length?selectedShops.value:preference?.value?.shops);
   initialized=true;await load();await restoreScroll();startRefresh();
  }catch(e){if(scope===sessionKey.value)error.value=e.message||'店铺读取失败';}
 }
+function refreshMonitor(){return initialized?load():initialize();}
 onMounted(initialize);
 watch(sessionKey,()=>{selectedRows.value=new Map();bulkEditor.value=false;watchEditor.value=null;initialized=false;revision++;state.shops=[];state.rows=[];restoreMonitorRoute(savedMonitor());if(route.name==='sku-traffic-monitor')void router.replace({name:'sku-traffic-monitor',query:{}});void initialize();});
 onActivated(()=>{if(initialized){void load().then(restoreScroll);startRefresh();}});
@@ -136,7 +137,7 @@ onBeforeUnmount(()=>{disposed=true;revision++;window.clearInterval(refreshTimer)
 </script>
 <template>
  <div ref="monitorRoot" class="sku-traffic-monitor">
-  <ErpPageHeader compact title="SKU 流量监控" description="按店铺与库存查看每日流量，标记重点SKU并补齐缺失日期"><template #actions><el-button :disabled="!selectedCount" @click="openBulkEditor">批量标签{{selectedCount?`（${selectedCount}）`:""}}</el-button><div class="coverage-compact"><el-button plain @click="syncDrawer=true">查看数据覆盖</el-button><span>完整 {{completeCount}} / {{coverageCells.length}} {{selectedShopRows.length===1?'天':'店铺日'}}</span><span v-if="partialCount">部分 {{partialCount}}</span><span v-if="coverageCells.length-completeCount-partialCount" class="coverage-missing">待补齐 {{coverageCells.length-completeCount-partialCount}}</span></div><el-button type="primary" @click="collectInterval" :disabled="loading||!state.date">补齐当前区间</el-button><el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button></template></ErpPageHeader>
+  <ErpPageHeader compact title="SKU 流量监控" description="按店铺与库存查看每日流量，标记重点SKU并补齐缺失日期"><template #actions><el-button :disabled="!selectedCount" @click="openBulkEditor">批量标签{{selectedCount?`（${selectedCount}）`:""}}</el-button><div class="coverage-compact"><el-button plain @click="syncDrawer=true">查看数据覆盖</el-button><span>完整 {{completeCount}} / {{coverageCells.length}} {{selectedShopRows.length===1?'天':'店铺日'}}</span><span v-if="partialCount">部分 {{partialCount}}</span><span v-if="coverageCells.length-completeCount-partialCount" class="coverage-missing">待补齐 {{coverageCells.length-completeCount-partialCount}}</span></div><el-button type="primary" @click="collectInterval" :disabled="loading||!state.date">补齐当前区间</el-button><el-button :icon="Refresh" :loading="loading" @click="refreshMonitor">刷新</el-button></template></ErpPageHeader>
   <section class="filters">
    <div class="main-toolbar">
     <el-select v-model="selectedShops" multiple collapse-tags collapse-tags-tooltip clearable placeholder="全部店铺" aria-label="店铺多选" class="shop-select" @change="changeShops"><el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)"/></el-select>
