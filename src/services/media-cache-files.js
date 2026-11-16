@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
+import {assertMediaCacheDiskSpace} from './media-cache-space.js';
 import OSS from "ali-oss";
 import { ossStorageConfig, putContentAddressedFile } from "./object-storage.js";
 
@@ -16,6 +17,12 @@ export const MEDIA_CACHE_ROOTS = ["ai-generated", "ai-cropped", "shop-variants",
 export const MEDIA_CACHE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".mp4", ".webm", ".mov"]);
 const MAX_BYTES = 100 * 1024 * 1024;
 const recovering = new Map();
+let activeRecoveries=0;
+const recoveryWaiters=[];
+async function boundedRecovery(work){
+  if(activeRecoveries>=2)await new Promise(resolve=>recoveryWaiters.push(resolve));else activeRecoveries++;
+  try{return await work();}finally{const next=recoveryWaiters.shift();if(next)next();else activeRecoveries--;}
+}
 
 export function mediaCacheSource(filePath, cwd = process.cwd()) {
   const relative = path.relative(path.resolve(cwd, "uploads"), path.resolve(filePath)).split(path.sep).join("/");
@@ -110,12 +117,13 @@ export async function restoreMediaCacheFile(filePath, { cwd = process.cwd(), env
   const existing = await fsp.lstat(filePath).catch(error => { if (error.code === "ENOENT") return null; throw error; });
   if (existing) { if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("Unsafe media cache file"); return true; }
   if (recovering.has(filePath)) return recovering.get(filePath);
-  const work = (async () => {
+  const work = boundedRecovery(async () => {
     const [row] = await query("SELECT content_hash_sha256, byte_size, oss_object_key, oss_bucket FROM media_migration_map WHERE source_fingerprint=? AND status='verified' LIMIT 1", [cacheSourceFingerprint(source)]).catch(error => { if (error.code === "ER_NO_SUCH_TABLE") return []; throw error; });
     if (!row) return false;
     const storage = ossStorageConfig(env);
     if (row.oss_bucket !== storage.bucket) throw new Error("Media cache OSS bucket differs from configured storage");
     const object = { hashSha256: row.content_hash_sha256, size: Number(row.byte_size), objectKey: row.oss_object_key };
+    await assertMediaCacheDiskSpace({directory:path.resolve(cwd,'uploads'),additionalBytes:object.size,env});
     await fsp.mkdir(path.dirname(filePath), { recursive: true });
     const temporary = `${filePath}.${crypto.randomUUID()}.partial`;
     try {
@@ -123,7 +131,7 @@ export async function restoreMediaCacheFile(filePath, { cwd = process.cwd(), env
       await fsp.rename(temporary, filePath);
       return true;
     } finally { await fsp.rm(temporary, { force: true }); }
-  })();
+  });
   recovering.set(filePath, work);
   try { return await work; } finally { recovering.delete(filePath); }
 }

@@ -1,3 +1,5 @@
+import {withMediaCacheLease} from "./media-cache-coordination.js";
+import {readCacheAwareFile} from "./media-cache-io.js";
 import {encodeListingJsonForWrite} from "./listing-json-sections.js";
 import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
 import fs from "node:fs/promises";
@@ -131,6 +133,7 @@ const assetVariantImportLocks = new Map();
 // Queue preparation without holding a database connection or business row lock.
 // The final transaction still rechecks persisted drafts for other processes.
 async function withAssetVariantImportLocks(ids, operation) {
+  return withMediaCacheLease(async () => {
   const releases = [];
   try {
     for (const id of [...ids].sort((a, b) => a - b)) {
@@ -149,6 +152,8 @@ async function withAssetVariantImportLocks(ids, operation) {
   } finally {
     for (const release of releases.reverse()) release();
   }
+
+  });
 }
 
 function assetTenantParams(params, index = 0) {
@@ -225,6 +230,7 @@ function vehicleSeed(brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom,
 }
 
 export async function assetVariantBootstrap(query = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
   const shops = await mysqlQuery(`
@@ -284,6 +290,8 @@ export async function assetVariantBootstrap(query = {}, session = null) {
     vehicleModelOptions: vehicleModels,
     tailTemplates
   };
+
+  });
 }
 
 export async function selectionPublishShops(query = {}, session = null) {
@@ -408,6 +416,7 @@ export async function saveShopVariantRule(body = {}, session = null) {
 }
 
 export async function generateAssetVariants(body = {}, session = null, context = {}) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariants(body, session, context));
   assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
@@ -483,6 +492,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
   });
 
   const variants = await mapWithConcurrency(textPlans, ASSET_VARIANT_IMAGE_CONCURRENCY, async (plan, planIndex) => {
+  return withMediaCacheLease(async () => {
     const { shop, shopIndex, mergedRule, titleCandidates, title, titleZh, priceIndex, internalPrice, ozonPrice, ozonOldPrice, shopTags, descriptionText, shopSlug } = plan;
     await context.markStage?.("generate_images", { current: planIndex + 1, total: textPlans.length, shopId: shop.id, step: "main_image" });
     await context.throwIfCancelled?.();
@@ -594,7 +604,9 @@ export async function generateAssetVariants(body = {}, session = null, context =
       productInfoXlsxUrl: fileUrl(batchId, `${shopSlug}/product-info/product-info.xlsx`),
       status: "generated"
     };
-  });
+
+  },{writes:true});
+});
 
   return {
     ok: true,
@@ -604,9 +616,12 @@ export async function generateAssetVariants(body = {}, session = null, context =
     localOutputDir: batchDir,
     variants
   };
+
+  },{writes:true});
 }
 
 export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => deleteAssetVariantMediaGroup(body, session));
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
@@ -701,9 +716,12 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
     deletedFiles,
     deletedDirs
   };
+
+  });
 }
 
 export async function generateAssetVariantTitlePreview(body = {}, session = null, guarded = false) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantTitlePreview(body, session, guarded));
   assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
@@ -737,9 +755,12 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
     titleZh: selected.zh,
     candidates
   };
+
+  });
 }
 
 export async function generateAssetVariantVideoFromImage(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantVideoFromImage(body, session));
   await ensureAssetVariantSchema();
   await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id], productId: body.productId || body.product_id });
@@ -808,9 +829,12 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
     }
     throw error;
   }
+
+  },{writes:true});
 }
 
 export async function generateListingVariantMediaFromImage(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateListingVariantMediaFromImage(body, session));
   await ensureAssetVariantSchema();
   await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id], productId: body.productId || body.product_id });
@@ -851,9 +875,12 @@ export async function generateListingVariantMediaFromImage(body = {}, session = 
     cover: video,
     video
   };
+
+  },{writes:true});
 }
 
 export async function ensureAssetVariantImagePublishUrl(source = "", context = {}) {
+  return withMediaCacheLease(async () => {
   await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [context.shopId || context.shop_id] });
   const sourceUrl = cleanText(source, 2000);
   if (!sourceUrl) return { url: "", publishUrl: "", previewUrl: "", status: "empty" };
@@ -884,10 +911,12 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
     return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "unchanged" };
   }
   const localPath = resolveLocalAssetPath(sourceUrl);
-  if (!localPath || !fsSync.existsSync(localPath)) {
+  if (!localPath) return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "local_missing" };
+  await assertAssetLocalSourceTenant(localPath, sourceUrl);
+  await restoreManagedAssetCache(localPath);
+  if (!fsSync.existsSync(localPath)) {
     return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "local_missing" };
   }
-  await assertAssetLocalSourceTenant(localPath, sourceUrl);
   const asset = await registerListingMediaAssetFromFile({
     filePath: localPath,
     source_module: context.sourceModule || context.source_module || "ai_variant_rich_text",
@@ -913,9 +942,12 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
     assetId: asset.id,
     status: publishUrl ? "public_ready" : "local_ready"
   };
+
+  });
 }
 
 export async function registerAssetVariantRichTextImage(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => registerAssetVariantRichTextImage(body, session));
   const source = body.source || body.url || body.imageUrl || body.image_url || "";
   const result = await ensureAssetVariantImagePublishUrl(source, {
@@ -933,9 +965,12 @@ export async function registerAssetVariantRichTextImage(body = {}, session = nul
     ok: true,
     ...result
   };
+
+  });
 }
 
 export async function importAssetVariantToListingAutomation(body = {}, session = null, guarded = false) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => importAssetVariantToListingAutomation(body, session, guarded));
   const scope = assetVariantTenantScope(session || currentAiTenantSession());
   await assertAssetExecutionAccess(session);
@@ -1006,6 +1041,8 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
     });
     return { ok: true, imported: drafts.length, drafts, note: `已导入 ${drafts.length} 个素材包到编辑上架` };
   });
+
+  });
 }
 
 function assetVariantImportFingerprint(variant) {
@@ -1014,6 +1051,7 @@ function assetVariantImportFingerprint(variant) {
 }
 
 async function findImportedAssetVariantDraft(connection, variant) {
+  return withMediaCacheLease(async () => {
   const sql = `SELECT d.id AS draft_id, d.template_id FROM listing_drafts d
     JOIN listing_shop_copies c ON c.draft_id = d.id AND c.shop_id = ? AND c.tenant_id = ?
     WHERE d.tenant_id = ? AND d.internal_code = ? AND d.status <> 'deleted'
@@ -1021,9 +1059,12 @@ async function findImportedAssetVariantDraft(connection, variant) {
     ORDER BY d.id ASC LIMIT 1${connection ? " FOR SHARE" : ""}`;
   const params = [Number(variant.shop_id), aiTenantId(), aiTenantId(), `AV-${variant.id}`, Number(variant.id)];
   return connection ? (await connection.execute(sql, params))[0] : mysqlQuery(sql, params);
+
+  });
 }
 
 export async function publishAssetVariantsToOzon(body = {}, session = null, context = {}) {
+  return withMediaCacheLease(async () => {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishAssetVariantsToOzon(body, session, context));
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
@@ -1152,9 +1193,12 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
       ? `Published ${published} item(s) to Ozon${results.length - published ? `, failed ${results.length - published}` : ""}`
       : "Create listing draft from asset variant"
   };
+
+  });
 }
 
 async function validateAssetVariantPublishPrecheck({ template, shopId = 0, variantId = 0, draftId = 0 } = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const validation = shopId
     ? await validateListingTemplatePublishForShop(template, shopId, session)
     : await validateListingTemplatePublish(template, session);
@@ -1208,6 +1252,8 @@ async function validateAssetVariantPublishPrecheck({ template, shopId = 0, varia
     qualityEstimate: validation.quality_estimate || null,
     checkedAt: new Date().toISOString()
   };
+
+  });
 }
 
 export function inspectAssetVariantListingContent({
@@ -1496,6 +1542,7 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
 }
 
 export async function enqueueGenerateAssetVariants(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   session = await assertAssetExecutionAccess(session);
   const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
@@ -1536,9 +1583,12 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
     status: "queued",
     note: `后台素材裂变任务已创建：${jobNo}`
   };
+
+  });
 }
 
 export async function assetVariantJobs(query = {}, session = null) {
+  return withMediaCacheLease(async () => {
   session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   const tenantId = businessTaskTenantKey(session);
@@ -1582,9 +1632,12 @@ export async function assetVariantJobs(query = {}, session = null) {
     LIMIT ?
   `, [...params, limit]);
   return rows.map(normalizeAssetVariantJobRow);
+
+  });
 }
 
 export async function assetVariantJobDetail(id, session = null) {
+  return withMediaCacheLease(async () => {
   session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   const tenantId = businessTaskTenantKey(session);
@@ -1599,9 +1652,12 @@ export async function assetVariantJobDetail(id, session = null) {
     LIMIT 1
   `, [scope.id, jobId, tenantId, personId(session)]);
   return rows[0] ? normalizeAssetVariantJobRow(rows[0]) : null;
+
+  });
 }
 
 export async function cancelAssetVariantJob(id, session = null) {
+  return withMediaCacheLease(async () => {
   session = await assertAssetExecutionAccess(session);
   const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
@@ -1641,9 +1697,12 @@ export async function cancelAssetVariantJob(id, session = null) {
     status: "cancelled",
     note: "Asset variant job cancelled"
   };
+
+  });
 }
 
 export async function retryAssetVariantJobFailures(id, session = null) {
+  return withMediaCacheLease(async () => {
   session = await assertAssetExecutionAccess(session);
   const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
@@ -1670,6 +1729,8 @@ export async function retryAssetVariantJobFailures(id, session = null) {
     sourceJobId: jobId,
     ...retryResult
   };
+
+  });
 }
 
 function enqueueAssetVariantJob(job) {
@@ -1679,6 +1740,7 @@ function enqueueAssetVariantJob(job) {
 }
 
 export async function recoverAssetVariantJobsOnStartup() {
+  return withMediaCacheLease(async () => {
   await ensureAssetVariantSchema();
   // Both image generation and publishing can have a paid/external side effect.
   // Interrupted attempts retain their original records for reconciliation;
@@ -1698,9 +1760,12 @@ export async function recoverAssetVariantJobsOnStartup() {
     enqueueAssetVariantJob({ id: Number(row.id), session: { personId: Number(row.created_by_person_id || 0) || null } });
   }
   return { ok: true, queued: rows.length };
+
+  });
 }
 
 async function processNextAssetVariantJob() {
+  return withMediaCacheLease(async () => {
   if (assetVariantJobRunning) return;
   const job = assetVariantJobQueue.shift();
   if (!job) return;
@@ -1711,9 +1776,12 @@ async function processNextAssetVariantJob() {
     assetVariantJobRunning = false;
     if (assetVariantJobQueue.length) setTimeout(processNextAssetVariantJob, 0);
   }
+
+  });
 }
 
 async function runAssetVariantJob(job) {
+  return withMediaCacheLease(async () => {
   const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(job.id)]);
   const row = rows[0];
   if (!row || row.status !== "queued") return;
@@ -1823,6 +1891,8 @@ async function runAssetVariantJob(job) {
       WHERE id = ? AND status = 'running'
     `, [JSON.stringify(errorPayload), JSON.stringify(finalProgress), row.id]);
   }
+
+  });
 }
 
 function createAssetVariantJobProgress(jobId) {
@@ -1861,6 +1931,7 @@ function createAssetVariantJobProgress(jobId) {
 }
 
 async function updateAssetVariantJobStage(jobId, progress, stage, detail = {}) {
+  return withMediaCacheLease(async () => {
   await throwIfAssetVariantJobCancelled(jobId);
   const snapshot = progress.snapshot(stage, detail);
   await mysqlExecute(`
@@ -1868,9 +1939,12 @@ async function updateAssetVariantJobStage(jobId, progress, stage, detail = {}) {
     SET current_stage = ?, progress_json = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND status = 'running'
   `, [stage, JSON.stringify(snapshot), Number(jobId)]);
+
+  });
 }
 
 async function throwIfAssetVariantJobCancelled(jobId, connection = null) {
+  return withMediaCacheLease(async () => {
   const query = connection ? async (sql, params) => (await connection.execute(sql, params))[0] : mysqlQuery;
   const rows = await query("SELECT status, tenant_id, created_by_person_id FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(jobId)]);
   if (!rows[0]) throw new AssetVariantJobCancelledError();
@@ -1881,6 +1955,8 @@ async function throwIfAssetVariantJobCancelled(jobId, connection = null) {
     throw Object.assign(new Error("后台任务归属发生变化，已停止执行"), { statusCode: 403 });
   }
   assertBusinessTaskPermission(await restoreBusinessTaskSession(rows[0].tenant_id, rows[0].created_by_person_id, query), "operations");
+
+  });
 }
 
 function normalizeAssetVariantJobRow(row = {}) {
@@ -1965,6 +2041,7 @@ function buildAssetVariantJobErrorPayload(error) {
 }
 
 async function requireAssetVariantShop(shopId, scope) {
+  return withMediaCacheLease(async () => {
   if (!Number.isSafeInteger(shopId) || shopId <= 0) throw new Error("请选择有效店铺");
   const rows = await mysqlQuery(`
     SELECT s.id, s.watermark_path
@@ -1974,9 +2051,12 @@ async function requireAssetVariantShop(shopId, scope) {
   `, [shopId, scope.id]);
   if (!rows[0]) throw Object.assign(new Error("店铺不存在或不属于当前企业，请在本企业重新选择店铺"), { statusCode: 404 });
   return rows[0];
+
+  });
 }
 
 async function requireAssetVariantWatermark(templateId, scope) {
+  return withMediaCacheLease(async () => {
   if (!templateId) return;
   const shopMatch = templateId.match(/^shop-(\d+)$/);
   if (shopMatch) {
@@ -1987,9 +2067,12 @@ async function requireAssetVariantWatermark(templateId, scope) {
     if (templates[0]) return;
   }
   throw Object.assign(new Error("水印模板不存在或不属于当前企业，请选择本企业店铺的水印"), { statusCode: 404 });
+
+  });
 }
 
 async function requireAssetTailTemplate(templateId, scope, shopId = null) {
+  return withMediaCacheLease(async () => {
   const rows = await mysqlQuery(`
     SELECT t.*
     FROM asset_tail_templates t
@@ -2002,9 +2085,12 @@ async function requireAssetTailTemplate(templateId, scope, shopId = null) {
   `, [templateId, scope.id, scope.id, ...(shopId ? [shopId] : [])]);
   if (!rows[0]) throw Object.assign(new Error("尾图模板不存在或不属于当前企业店铺，请重新选择尾图模板"), { statusCode: 404 });
   return rows[0];
+
+  });
 }
 
 export async function assetTailTemplates(query = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
   const shopId = Number(query.shopId || query.shop_id || 0);
@@ -2023,6 +2109,8 @@ export async function assetTailTemplates(query = {}, session = null) {
     ORDER BY t.is_default DESC, t.shop_id DESC, t.category ASC, t.vehicle_model ASC, t.sort_order ASC, t.id DESC
   `, params);
   return rows.map(normalizeTailTemplate);
+
+  });
 }
 
 export async function syncAssetOzonCategories(body = {}) {
@@ -2081,6 +2169,7 @@ export async function syncAssetOzonCategories(body = {}) {
 }
 
 export async function createAssetTailTemplate(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const scope = assetVariantTenantScope(session, { write: true });
   await ensureAssetVariantSchema();
   const shopId = Number(body.shopId || body.shop_id || 0) || null;
@@ -2127,9 +2216,12 @@ export async function createAssetTailTemplate(body = {}, session = null) {
     return inserted;
   });
   return (await assetTailTemplates({}, session)).find((item) => Number(item.id) === Number(result.insertId));
+
+  });
 }
 
 export async function resolveAssetTailTemplateFile(id, session = null) {
+  return withMediaCacheLease(async () => {
   const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
   let template;
@@ -2148,16 +2240,19 @@ export async function resolveAssetTailTemplateFile(id, session = null) {
   ].filter(Boolean);
   for (const filePath of uniqueValues(candidates)) {
     try {
-      const buffer = await fs.readFile(filePath);
+      const buffer = await readCacheAwareFile(filePath);
       return { buffer, mime: mimeForPath(filePath) };
     } catch {
       // Try the next storage location; older templates have moved between roots.
     }
   }
   return null;
+
+  });
 }
 
 export async function resolveAssetVariantFile(batchId, filename, session = null) {
+  return withMediaCacheLease(async () => {
   session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   const safeBatch = sanitizeFilename(batchId);
@@ -2174,16 +2269,19 @@ export async function resolveAssetVariantFile(batchId, filename, session = null)
   })) return null;
   try {
     if (MEDIA_CACHE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) await restoreMediaCacheFile(filePath);
-    const buffer = await fs.readFile(filePath);
+    const buffer = await readCacheAwareFile(filePath);
     await assertAssetExecutionAccess(session, { shopIds: owned.map(row => row.shop_id) });
     return { buffer, mime: mimeForPath(filePath) };
   } catch (error) {
     rethrowAssetAccessError(error);
     return null;
   }
+
+  });
 }
 
 async function ensureAssetVariantSchema() {
+  return withMediaCacheLease(async () => {
   if (config.dbClient !== "mysql") throw new Error("MySQL database is required");
   if (schemaReady) return;
   await ensureShopWatermarkDefaultColumns();
@@ -2402,9 +2500,12 @@ async function ensureAssetVariantSchema() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   schemaReady = true;
+
+  });
 }
 
 async function ensureShopWatermarkDefaultColumns() {
+  return withMediaCacheLease(async () => {
   for (const sql of [
     "ALTER TABLE shops ADD COLUMN watermark_position VARCHAR(32) NOT NULL DEFAULT 'bottom-right'",
     "ALTER TABLE shops ADD COLUMN watermark_x_percent DECIMAL(8,4) NOT NULL DEFAULT 75.0000",
@@ -2418,6 +2519,8 @@ async function ensureShopWatermarkDefaultColumns() {
       if (error?.code !== "ER_DUP_FIELDNAME") throw error;
     }
   }
+
+  });
 }
 
 async function ensureMysqlColumn(table, column, definition) {
@@ -2499,6 +2602,7 @@ async function ensureVehicleSeedData() {
 }
 
 async function generateVariantImages({ material, shopDir, watermark, tailImageUrl, mainImagePlan, batchId, shopId, sourceTitle = "", variantTitle = "", preparedImages = [], throwIfCancelled = null }) {
+  return withMediaCacheLease(async () => {
   await throwIfCancelled?.();
   const images = [];
   const warnings = [];
@@ -2572,6 +2676,8 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
     }
   }
   return { images, warnings: uniqueValues(warnings) };
+
+  },{writes:true});
 }
 
 function reusablePermanentMediaResult(source, type, sortOrder = 1) {
@@ -2602,6 +2708,7 @@ function tailImageSkipWarning(error, tailImageUrl = "") {
 }
 
 async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = "", variantTitle = "", idempotencyKey }) {
+  return withMediaCacheLease(async () => {
   const referencePng = await sharp(mainBuffer).rotate().png().toBuffer();
   const prompt = [
     "Use the uploaded image as a reference and create a similar but not identical e-commerce main image.",
@@ -2618,10 +2725,13 @@ async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = 
     finalPrompt: prompt, ratio: "3:4", imageCount: 1, autoCrop: false, idempotencyKey });
   const image = result.generatedImages[0];
   const file = await getAiTaskFile(result.taskId, "generated", image.filename);
-  return fs.readFile(file.filePath);
+  return readCacheAwareFile(file.filePath);
+
+  });
 }
 
 async function storeTailTemplateImage(source, name) {
+  return withMediaCacheLease(async () => {
   const text = String(source || "").trim();
   if (!text) return "";
   if (/^data:image\//i.test(text)) {
@@ -2638,9 +2748,12 @@ async function storeTailTemplateImage(source, name) {
     throw Object.assign(new Error("OSS 未启用，尾图模板未保存；请先配置 OSS"), { statusCode: 503 });
   }
   return text;
+
+  });
 }
 
 async function publishTailTemplateImageForOzon(source, { shopId = null, name = "tail-template", session = null } = {}) {
+  return withMediaCacheLease(async () => {
   const text = String(source || "").trim();
   if (!text) return "";
   if (isManagedOssObjectUrl(text)) return text;
@@ -2669,6 +2782,8 @@ async function publishTailTemplateImageForOzon(source, { shopId = null, name = "
   const publishUrl = String(asset.publishUrl || asset.publish_url || "").trim();
   if (/^https:\/\//i.test(publishUrl)) return publishUrl;
   throw new Error("尾图模板未获得 Ozon 可访问的公网地址，请先配置 LISTING_MEDIA_PUBLIC_BASE_URL 和公网素材同步后再上传尾图。");
+
+  });
 }
 
 function imageExtension(mimePart) {
@@ -2903,6 +3018,7 @@ async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", 
 }
 
 async function applyWatermark(sourceBuffer, watermark) {
+  return withMediaCacheLease(async () => {
   if (!watermark?.logoPath && !watermark?.logoUrl && !watermark?.logo_url) return sharp(sourceBuffer).rotate();
   const base = sharp(sourceBuffer).rotate();
   const metadata = await base.metadata();
@@ -2930,6 +3046,8 @@ async function applyWatermark(sourceBuffer, watermark) {
     Number(watermark.yPercent ?? watermark.y_percent ?? 75)
   );
   return base.composite([{ input: transparent, left: rect.left, top: rect.top }]);
+
+  });
 }
 
 function watermarkRect(baseWidth, baseHeight, width, height, position, margin, xPercent = 75, yPercent = 75) {
@@ -2959,6 +3077,7 @@ function watermarkRect(baseWidth, baseHeight, width, height, position, margin, x
 }
 
 async function loadAssetVariantMediaRows(connection, variant) {
+  return withMediaCacheLease(async () => {
   const sql = `
     SELECT *
     FROM listing_media_assets
@@ -2973,6 +3092,8 @@ async function loadAssetVariantMediaRows(connection, variant) {
     ? (await connection.execute(sql, params))[0]
     : await mysqlQuery(sql, params);
   return Array.isArray(rows) ? rows : [];
+
+  });
 }
 
 function assetMediaUrl(item = {}) {
@@ -3042,6 +3163,7 @@ function normalizeGeneratedVideoForResponse(video = {}) {
 }
 
 async function loadCachedAssetVariantVideo(sourceHash, recipe = serverVideoRecipe()) {
+  return withMediaCacheLease(async () => {
   if (!sourceHash) return null;
   const cachedRows = await mysqlQuery(`
     SELECT publish_url, preview_url, original_name, metadata_json
@@ -3059,6 +3181,8 @@ async function loadCachedAssetVariantVideo(sourceHash, recipe = serverVideoRecip
     sort_order: 1,
     cached: true
   };
+
+  });
 }
 
 function hashBuffer(buffer) {
@@ -3066,7 +3190,10 @@ function hashBuffer(buffer) {
 }
 
 async function ensureAssetVariantVideoFromImages(connection, variant = {}, images = [], context = {}) {
+  return withMediaCacheLease(async () => {
   return assetVideoLimiter(() => ensureAssetVariantVideoFromImagesUnsafe(connection, variant, images, context));
+
+  });
 }
 
 function withTimeout(promise, timeoutMs, message = "Operation timed out") {
@@ -3080,6 +3207,7 @@ function withTimeout(promise, timeoutMs, message = "Operation timed out") {
 }
 
 async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {}, images = [], context = {}) {
+  return withMediaCacheLease(async () => {
   const actor = currentAiTenantSession();
   context = assetExecutionContext(actor, context, { shopIds: [variant.shop_id], productId: variant.source_product_id });
   await context.throwIfCancelled?.();
@@ -3135,9 +3263,12 @@ async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {},
   } finally {
     assetVideoInflight.delete(inflightKey);
   }
+
+  },{writes:true});
 }
 
 async function generateAndRegisterAssetVariantVideo({ variant = {}, sourceImage = {}, sourcePath = "", variantDir = "", sourceHash = "", recipe = serverVideoRecipe(), context = {} } = {}) {
+  return withMediaCacheLease(async () => {
   const videoDir = path.join(variantDir, "videos");
   await fs.mkdir(videoDir, { recursive: true });
   const videoPath = path.join(videoDir, "shop-video.mp4");
@@ -3199,9 +3330,12 @@ async function generateAndRegisterAssetVariantVideo({ variant = {}, sourceImage 
     name: asset.original_name || asset.storage_name || "shop-video.mp4",
     sort_order: 1
   };
+
+  },{writes:true});
 }
 
 async function renderServerVideoFast(sourcePath, videoPath) {
+  return withMediaCacheLease(async () => {
   const frameCount = SERVER_VIDEO_FPS * SERVER_VIDEO_DURATION_SECONDS;
   await runFfmpeg([
     "-y",
@@ -3226,9 +3360,12 @@ async function renderServerVideoFast(sourcePath, videoPath) {
     "-movflags", "+faststart",
     videoPath
   ]);
+
+  });
 }
 
 async function renderServerVideoWithFrames(sourcePath, videoDir, videoPath, context = {}) {
+  return withMediaCacheLease(async () => {
   const frameDir = path.join(videoDir, "frames");
   await fs.rm(frameDir, { recursive: true, force: true }).catch(() => {});
   await fs.mkdir(frameDir, { recursive: true });
@@ -3255,9 +3392,12 @@ async function renderServerVideoWithFrames(sourcePath, videoDir, videoPath, cont
   } finally {
     await fs.rm(frameDir, { recursive: true, force: true }).catch(() => {});
   }
+
+  },{writes:true});
 }
 
 async function renderServerVideoFrames(sourcePath, frameDir, context = {}) {
+  return withMediaCacheLease(async () => {
   const frameCount = SERVER_VIDEO_FPS * SERVER_VIDEO_DURATION_SECONDS;
   const source = sharp(sourcePath).rotate();
   const metadata = await source.metadata();
@@ -3298,6 +3438,8 @@ async function renderServerVideoFrames(sourcePath, frameDir, context = {}) {
       .jpeg({ quality: 88, mozjpeg: true })
       .toFile(path.join(frameDir, `frame-${String(index + 1).padStart(4, "0")}.jpg`));
   }
+
+  });
 }
 
 function serverVideoRecipe() {
@@ -3399,6 +3541,7 @@ function assetVariantQuantity(value, context = {}) {
 
 
 async function assetVariantDescription(variant, tags = []) {
+  return withMediaCacheLease(async () => {
   const title = cleanText(variant.variant_title || variant.source_title || "", 500);
   const material = russianMaterialText(variant.material_text);
   const color = russianColorText(variant.color);
@@ -3451,6 +3594,8 @@ async function assetVariantDescription(variant, tags = []) {
     console.warn("asset variant description AI failed", error?.message || error);
   }
   return fallbackRussianDescription(variant, tags);
+
+  });
 }
 
 function russianWordCount(value) {
@@ -3606,6 +3751,7 @@ function assetVariantVariantRow(variant, images = [], videos = [], modelName = "
 }
 
 async function prepareAssetVariantListingTemplate(variant, images = [], videos = [], descriptionCache = null) {
+  return withMediaCacheLease(async () => {
   const ozonCategoryId = cleanText(variant.ozon_category_id || "", 128) || "asset-variant";
   const ozonCategoryName = cleanText(variant.ozon_category_name || "", 500) || "asset variant";
   const descriptionCategoryId = Number(variant.ozon_description_category_id || 0) || 0;
@@ -3714,9 +3860,12 @@ async function prepareAssetVariantListingTemplate(variant, images = [], videos =
     diagnostics: true
   });
   return { templatePayload, sourceRaw, editablePayload, attributes, images, ozonCategoryId, ozonCategoryName };
+
+  });
 }
 
 async function ensureAssetVariantListingTemplateFromPackage(connection, variant, prepared, session) {
+  return withMediaCacheLease(async () => {
   const { templatePayload, sourceRaw, editablePayload, attributes, images, ozonCategoryId, ozonCategoryName } = prepared;
   const name = `缂備浇浜慨闈涱焽濡ゅ懎绀岄柛娑卞墰閻熸劙鏌?${variant.batch_id || "batch"}-${variant.shop_name || variant.shop_id || "shop"}-${variant.id}`;
   const [rows] = await connection.execute(`
@@ -3763,6 +3912,8 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     personId(session)
   ], 0));
   return Number(result.insertId);
+
+  });
 }
 
 async function insertListingDraftFromPackage(connection, templateId, variant, images, videos = [], session) {
@@ -3863,6 +4014,7 @@ function compactAssetVariantPersistencePayload(value) {
 }
 
 async function claimAssetVariantPublish({ variantId, draftId, shopId }, session) {
+  return withMediaCacheLease(async () => {
   const tenantId = businessTaskTenantKey(session);
   return withMysqlTransaction(async connection => {
     await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [Number(session.tenant.id)]);
@@ -3884,9 +4036,12 @@ async function claimAssetVariantPublish({ variantId, draftId, shopId }, session)
     await connection.execute("UPDATE asset_variants SET status = 'submitting' WHERE id = ?", [variantId]);
     return null;
   });
+
+  });
 }
 
 async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shopId = 0, status = "", publishResult = null } = {}) {
+  return withMediaCacheLease(async () => {
   await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [shopId] });
   const normalizedStatus = String(status || "").slice(0, 32);
   if (draftId && shopId) {
@@ -3909,6 +4064,8 @@ async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shop
     await mysqlExecute(`UPDATE asset_variants v JOIN shops s ON s.id = v.shop_id AND ${assetVariantTenantPredicate(scope, "s")}
       SET v.status = ? WHERE v.id = ? AND v.shop_id = ?`, [scope.id, normalizedStatus || "generated", Number(variantId), Number(shopId)]);
   }
+
+  });
 }
 
 function statusFromOzonPublishResult(result = {}) {
@@ -3959,6 +4116,7 @@ function normalizeProductImageList(value) {
 }
 
 async function ensureAssetVariantListingTemplate(connection, variant, session) {
+  return withMediaCacheLease(async () => {
   const ozonCategoryId = cleanText(variant.ozon_category_id || "", 128) || "asset-variant";
   const ozonCategoryName = cleanText(variant.ozon_category_name || "", 500) || "Auto accessories";
   const descriptionCategoryId = Number(variant.ozon_description_category_id || 0) || 0;
@@ -4012,6 +4170,8 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
     personId(session)
   ], 0));
   return Number(result.insertId);
+
+  });
 }
 
 async function insertListingDraft(connection, templateId, variant, images, session) {
@@ -4231,8 +4391,11 @@ function isValidRichContentJson(value = "") {
 }
 
 async function fileSha256(filePath) {
-  const buffer = await fs.readFile(filePath);
+  return withMediaCacheLease(async () => {
+  const buffer = await readCacheAwareFile(filePath);
   return createHash("sha256").update(buffer).digest("hex");
+
+  });
 }
 
 function stableHash(value) {
@@ -4252,8 +4415,11 @@ function sleep(ms) {
 }
 
 async function writeText(filePath, content = "") {
+  return withMediaCacheLease(async () => {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, String(content ?? ""), "utf8");
+
+  },{writes:true});
 }
 
 function sanitizeFilename(value = "") {
@@ -4525,6 +4691,7 @@ function defaultShopWatermark(shop) {
 }
 
 async function readImageBuffer(source) {
+  return withMediaCacheLease(async () => {
   await assertAssetExecutionAccess();
   let text = String(source || "").trim();
   if (/^https?:\/\//i.test(text)) {
@@ -4537,7 +4704,7 @@ async function readImageBuffer(source) {
   const cropper = text.match(/^\/?api\/tools\/image-cropper\/file\/([^/]+)\/(.+)$/i);
   if (cropper) {
     const file = await getCropperTaskFile(decodeURIComponent(cropper[1]), decodeURIComponent(cropper[2]), currentAiTenantSession());
-    return fs.readFile(file.filePath);
+    return readCacheAwareFile(file.filePath);
   }
   const productImageMatch = text.match(/^\/?api\/products\/(\d+)\/image$/i);
   if (productImageMatch) {
@@ -4558,7 +4725,7 @@ async function readImageBuffer(source) {
       error.source = text;
       throw error;
     }
-    return fs.readFile(localPath);
+    return readCacheAwareFile(localPath);
   }
   if (/^\/?api\//i.test(text)) {
     throw Object.assign(new Error("此私有图片地址不支持直接抓取，请重新上传当前企业素材"), { statusCode: 403 });
@@ -4576,7 +4743,9 @@ async function readImageBuffer(source) {
     error.source = text;
     throw error;
   }
-  return fs.readFile(localPath);
+  return readCacheAwareFile(localPath);
+
+  });
 }
 
 async function assertAssetSourceProductTenant(productId) {
@@ -4624,6 +4793,7 @@ async function assertAssetLocalSourceTenant(filePath, source = "") {
 }
 
 async function fetchImageBuffer(url) {
+  return withMediaCacheLease(async () => {
   const image = await requestPublicImage(url, { maxBytes: 20 * 1024 * 1024,
     signal: AbortSignal.timeout(20000), beforeRequest: () => assertAssetExecutionAccess() });
   await assertAssetExecutionAccess();
@@ -4631,9 +4801,12 @@ async function fetchImageBuffer(url) {
     code: "REMOTE_IMAGE_UNAVAILABLE", statusCode: 400, source: url
   });
   return image.buffer;
+
+  });
 }
 
 async function imageResult(filePath, type, sortOrder = 1, context = {}) {
+  return withMediaCacheLease(async () => {
   await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [context.shopId] });
   const relative = path.relative(ROOT_DIR, filePath).replace(/\\/g, "/");
   const parts = relative.split("/");
@@ -4667,6 +4840,8 @@ async function imageResult(filePath, type, sortOrder = 1, context = {}) {
     listingPreviewUrl: asset.previewUrl || asset.preview_url || "",
     hash: asset.hash || asset.hash_sha256 || ""
   };
+
+  });
 }
 
 function fileUrl(batchId, filename) {
@@ -4783,6 +4958,7 @@ function isLocalFileApiSource(value = "") {
 }
 
 async function removeLocalAssetPath(value, { recursive = false } = {}) {
+  return withMediaCacheLease(async () => {
   const text = String(value || "").trim();
   if (!text) return false;
   const absolute = path.resolve(ROOT_DIR, text);
@@ -4798,6 +4974,8 @@ async function removeLocalAssetPath(value, { recursive = false } = {}) {
   } catch {
     return false;
   }
+
+  });
 }
 
 function mediaPublishValue(image = {}) {

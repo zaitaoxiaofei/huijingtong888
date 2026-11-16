@@ -31,6 +31,7 @@ import { backfillInventoryAlertSalesMysql, orderRowsByIdsMysql } from "./service
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler, isVersionedVueAssetPath } from "./http/static.js";
+import {registerMediaCacheReader,protectMediaRequest} from "./services/media-cache-coordination.js";
 import { requestPublicImage, resolvePublicImageTarget } from "./http/public-image-request.js";
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
@@ -2250,6 +2251,7 @@ async function sendRemoteImage(req, res, url) {
   }
 }
 
+await registerMediaCacheReader();
 const server = http.createServer(async (req, res) => {
   const startedAt = performance.now();
   try {
@@ -2263,6 +2265,7 @@ const server = http.createServer(async (req, res) => {
     });
 
     const url = new URL(req.url, `http://${req.headers.host}`);
+    await protectMediaRequest(req,res);
     const parts = url.pathname.split("/").filter(Boolean);
     if (req.method === "GET" && url.pathname === "/api/ready") {
       return json(res, {

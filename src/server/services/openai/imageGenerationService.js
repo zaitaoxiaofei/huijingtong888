@@ -1,5 +1,7 @@
+import {withMediaCacheLease} from "../../../services/media-cache-coordination.js";
+import {readCacheAwareFile} from "../../../services/media-cache-io.js";
 import fs from "node:fs/promises";
-import { restoreMediaCacheFile } from "../../../services/media-cache-files.js";
+import { restoreMediaCacheFile,archiveMediaCacheFile } from "../../../services/media-cache-files.js";
 import fsSync from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -23,15 +25,19 @@ const AI_IMAGE_GENERATION_WAIT_MS = Math.max(15000, Number(process.env.AI_IMAGE_
 const AI_IMAGE_TRANSPORT_GRACE_MS = Math.max(0, Number(process.env.AI_IMAGE_TRANSPORT_GRACE_MS || 60000));
 function withAiImageRuntimeSlot(runtimeConfig, operation) {
   return withUnbilledAiImageRuntimeSlot(runtimeConfig, async () => {
+  return withMediaCacheLease(async () => {
     await assertAiCreditProviderBoundary("image");
     return operation();
+
   });
+});
 }
 const AI_IMAGE_PROVIDER_TIMEOUT_MS = AI_IMAGE_GENERATION_WAIT_MS + AI_IMAGE_TRANSPORT_GRACE_MS;
 const AI_IMAGE_DOWNLOAD_TIMEOUT_MS = Math.max(10000, Number(process.env.AI_IMAGE_DOWNLOAD_TIMEOUT_MS || 60000));
 const AI_IMAGE_DOWNLOAD_ATTEMPTS = Math.max(1, Number(process.env.AI_IMAGE_DOWNLOAD_ATTEMPTS || 3));
 
 export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4", imageCount = 1, runtimeConfig = null, providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   const resolvedRuntimeConfig = runtimeConfig || await aiImageRuntimeConfig();
   const safeTaskId = validateTaskId(taskId);
   const count = clampImageCount(imageCount);
@@ -43,6 +49,7 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
     const filename = `generated_${String(index).padStart(3, "0")}.png`;
     const filePath = path.join(taskDir, filename);
     if (await restoreMediaCacheFile(filePath)) {
+      if(process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await archiveMediaCacheFile(filePath);
       generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
       continue;
     }
@@ -56,13 +63,17 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
     await assertCurrentAiTenantPermission();
     if (image?.remoteUrl) await downloadGeneratedImageToFile(image.remoteUrl, filePath);
     else await fs.writeFile(filePath, image);
+    if(process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await archiveMediaCacheFile(filePath);
     generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
   }
 
   return generatedImages;
+
+  },{writes:true});
 }
 
 export async function editOpenAiImage({ imageBuffer, imageFilePath = "", prompt, ratio = "3:4", filename = "source.png", contentType = "image/png", runtimeConfig = null, providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   const resolvedRuntimeConfig = runtimeConfig || await aiImageRuntimeConfig();
   return requestCompatibleImageEdit({
     runtimeConfig: resolvedRuntimeConfig,
@@ -75,9 +86,12 @@ export async function editOpenAiImage({ imageBuffer, imageFilePath = "", prompt,
     providerJob,
     onProviderJob
   });
+
+  });
 }
 
 export async function testOpenAiImageProvider({ runtimeConfig, mode = "generate" }) {
+  return withMediaCacheLease(async () => {
   const action = mode === "edit" ? "edits" : "generations";
   const endpoints = uses65535TasksImage(runtimeConfig)
     ? [tasks65535Endpoint(runtimeConfig.baseUrl)]
@@ -119,9 +133,12 @@ export async function testOpenAiImageProvider({ runtimeConfig, mode = "generate"
       message: error?.message || "图片通道测试失败"
     };
   }
+
+  });
 }
 
 async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   await assertAiCreditProviderBoundary("image");
   if (!providerJob?.jobId) await reserveTenantAiRequest("image");
   if (uses65535TasksImage(runtimeConfig)) {
@@ -155,15 +172,18 @@ async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob
     providerJob,
     onProviderJob
   });
+
+  });
 }
 
 async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFilePath = "", filename, contentType, prompt, size, providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   await assertAiCreditProviderBoundary("image");
   if (!providerJob?.jobId) await reserveTenantAiRequest("image");
   if (uses65535TasksImage(runtimeConfig)) {
     const resolvedImageBuffer = providerJob?.jobId
       ? null
-      : imageBuffer || (imageFilePath ? await fs.readFile(imageFilePath) : null);
+      : imageBuffer || (imageFilePath ? await readCacheAwareFile(imageFilePath) : null);
     return request65535TaskImage({
       runtimeConfig,
       prompt,
@@ -189,7 +209,7 @@ async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFil
       runtimeConfig,
       prompt,
       size,
-      imageBuffer: imageBuffer || (imageFilePath ? await fs.readFile(imageFilePath) : null),
+      imageBuffer: imageBuffer || (imageFilePath ? await readCacheAwareFile(imageFilePath) : null),
       contentType
     }));
   }
@@ -198,7 +218,7 @@ async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFil
       runtimeConfig,
       prompt,
       size,
-      imageBuffer: imageBuffer || (imageFilePath ? await fs.readFile(imageFilePath) : null),
+      imageBuffer: imageBuffer || (imageFilePath ? await readCacheAwareFile(imageFilePath) : null),
       filename,
       contentType
     }));
@@ -220,9 +240,12 @@ async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFil
     providerJob,
     onProviderJob
   });
+
+  });
 }
 
 async function request65535TaskImage({ runtimeConfig, prompt, size, imageBuffer = null, contentType = "image/png", providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   const endpoint = tasks65535Endpoint(runtimeConfig.baseUrl);
   if (providerJob?.jobId) {
     return pollAsync65535ImageJob({
@@ -270,9 +293,12 @@ async function request65535TaskImage({ runtimeConfig, prompt, size, imageBuffer 
     submittedAt: new Date().toISOString()
   });
   return pollAsync65535ImageJob({ runtimeConfig, endpoint, job: data });
+
+  });
 }
 
 async function requestResponsesImage({ runtimeConfig, prompt, size, imageBuffer = null, contentType = "image/png" }) {
+  return withMediaCacheLease(async () => {
   const endpoint = responsesEndpoint(runtimeConfig.baseUrl);
   const content = [{ type: "input_text", text: responsesImagePrompt(prompt, size) }];
   if (imageBuffer) {
@@ -303,6 +329,8 @@ async function requestResponsesImage({ runtimeConfig, prompt, size, imageBuffer 
     throw error;
   }
   return imageBufferFromProviderResponse(data, endpoint);
+
+  });
 }
 
 function responsesImagePrompt(prompt, size) {
@@ -314,6 +342,7 @@ function responsesImagePrompt(prompt, size) {
 }
 
 async function requestChatCompletionImage({ runtimeConfig, prompt, size, imageBuffer = null, contentType = "image/png" }) {
+  return withMediaCacheLease(async () => {
   const endpoint = chatCompletionsEndpoint(runtimeConfig.baseUrl);
   const body = {
     model: runtimeConfig.imageModel,
@@ -341,6 +370,8 @@ async function requestChatCompletionImage({ runtimeConfig, prompt, size, imageBu
     throw error;
   }
   return imageBufferFromProviderResponse(data, endpoint);
+
+  });
 }
 
 function chatImageContent({ prompt, size, imageBuffer, contentType }) {
@@ -362,6 +393,7 @@ function chatImageContent({ prompt, size, imageBuffer, contentType }) {
 }
 
 async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallbackMessage, providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   if (providerJob?.jobId) {
     return pollAsync65535ImageJob({ runtimeConfig, endpoint: providerJob.endpoint || endpoints[0] || "", job: {
       job_id: providerJob.jobId,
@@ -373,6 +405,7 @@ async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallb
     const isForm = typeof FormData !== "undefined" && body instanceof FormData;
     const useAsync65535 = usesAsync65535Image(runtimeConfig, endpoint);
     const { response, data, image } = await withAiImageRuntimeSlot(runtimeConfig, async () => {
+  return withMediaCacheLease(async () => {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -388,7 +421,9 @@ async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallb
         ? imageBufferFromProviderResponse(data, endpoint)
         : null;
       return { response, data, image };
-    });
+
+  });
+});
     if (useAsync65535 && response.status === 202 && data?.job_id) {
       await onProviderJob?.({
         provider: runtimeConfig.provider || "",
@@ -416,9 +451,12 @@ async function requestImageFromEndpoints({ runtimeConfig, endpoints, body, fallb
   const error = new Error(`${fallbackMessage}: no endpoint available`);
   error.status = 502;
   throw error;
+
+  });
 }
 
 async function pollAsync65535ImageJob({ runtimeConfig, endpoint, job }) {
+  return withMediaCacheLease(async () => {
   const statusUrl = async65535StatusUrl(runtimeConfig, endpoint, job);
   const started = Date.now();
   let lastPayload = null;
@@ -467,6 +505,8 @@ async function pollAsync65535ImageJob({ runtimeConfig, endpoint, job }) {
   error.status = 504;
   error.code = "provider_pending";
   throw error;
+
+  });
 }
 
 function isTransientImagePollingError(error) {
@@ -531,6 +571,7 @@ function imageBufferFromProviderResponse(data = {}, endpoint = "") {
 }
 
 export async function downloadGeneratedImageToFile(imageUrl, filePath) {
+  return withMediaCacheLease(async () => {
   let lastError = null;
   for (let attempt = 1; attempt <= AI_IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
     try {
@@ -547,6 +588,8 @@ export async function downloadGeneratedImageToFile(imageUrl, filePath) {
     }
   }
   throw lastError || new Error("Failed to stream generated image");
+
+  },{writes:true});
 }
 
 function imageBase64FromContent(content) {

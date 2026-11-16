@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from '../src/services/media-cache-coordination.js';
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -19,7 +20,7 @@ test("sixteen concurrent FormData uploads keep independent responses, temp files
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "listing-upload-isolation-"));
   try {
   const tempFiles = [], requests = [], stored = new Map();
-  const server = vm.createContext({ Buffer, fs, path, crypto, os: { tmpdir: () => directory },
+  const server = vm.createContext({ Buffer, fs, path, crypto, withMediaCacheLease, os: { tmpdir: () => directory },
     LISTING_MEDIA_MAX_BYTES: 1024 * 1024, LISTING_MEDIA_MULTIPART_FIELD_MAX_BYTES: 65536, LISTING_MEDIA_MULTIPART_HEADER_MAX_BYTES: 65536 });
   vm.runInContext(source.slice(declaration.start, declaration.end), server);
   const context = vm.createContext({ FormData, crypto, setTimeout, getAuthToken: () => "fixture-token",

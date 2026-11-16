@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify and archive closed MySQL binlogs every ten minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=30s
+Unit=ozon-erp-binlog-archive.service
+
+[Install]
+WantedBy=timers.target

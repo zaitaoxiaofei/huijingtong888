@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
@@ -126,7 +127,8 @@ test("combined downloads preserve every successful generated/cropped file and re
   const source = await fs.readFile(new URL("../src/server/services/ai/aiWorkflowService.js", import.meta.url), "utf8");
   const start = source.indexOf("async function mergeCreditedImageResults("), end = source.indexOf("\nasync function validateCreditedImageInput", start);
   const owners = new Set();
-  const merge = vm.runInNewContext(`(${source.slice(start, end)})`, { crypto, fs, path, aiImageCharge,
+  const merge = vm.runInNewContext(`(${source.slice(start, end)})`, { withMediaCacheLease, crypto, fs, path, aiImageCharge,
+    archiveMediaCacheFile: async file => { assert.ok((await fs.stat(file)).size > 0); },
     registerAiImageTaskOwner: async id => { if (owners.has(id)) throw Object.assign(new Error(), { code: "ER_DUP_ENTRY" }); owners.add(id); },
     assertAiImageTaskOwner: async id => assert.ok(owners.has(id)),
     getAiTaskFile: async (id, scope, filename) => ({ filePath: path.join(directory, id, scope, filename) }),

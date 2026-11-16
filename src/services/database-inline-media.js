@@ -18,7 +18,8 @@ function validateMediaBytes(bytes,type){
 
 // No fallback can write binary/base64 into the database when OSS fails.
 export async function archiveInlineMedia(value,{env=process.env,client,prefix='product-media',beforeRequest=async()=>{}}={}){
- if(typeof value!=='string'||!/^data:/i.test(value))return value;
+ if(typeof value!=='string'||!/^data:/i.test(value.trim()))return value;
+ value=value.trim();
  const match=/^data:([a-z0-9/+.-]+);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(value);
  if(!match||!TYPES[match[1].toLowerCase()])throw Object.assign(new Error('请上传PNG、JPEG、WebP、GIF、AVIF图片或MP4、WebM视频'),{statusCode:400});
  if(match[2].length>Math.ceil(MAX_MEDIA_BYTES/3)*4)throw Object.assign(new Error('图片或视频超过40MB，请压缩后重试'),{statusCode:400});
@@ -38,8 +39,8 @@ export async function externalizeInlineMedia(value,options={}){
  const cache=new Map();let totalBytes=0;
  async function visit(item,depth=0){
   if(depth>64)throw new Error('Media JSON depth exceeds limit');
-  if(typeof item==='string'&&/^data:/i.test(item)){
-   const key=digest(item);if(cache.has(key))return cache.get(key);totalBytes+=Buffer.byteLength(item);if(totalBytes>64*1024*1024)throw Object.assign(new Error('本次内嵌图片总量超过64MB，请分批上传'),{statusCode:400});
+  if(typeof item==='string'&&/^data:/i.test(item.trim())){
+   const key=digest(item.trim());if(cache.has(key))return cache.get(key);totalBytes+=Buffer.byteLength(item);if(totalBytes>64*1024*1024)throw Object.assign(new Error('本次内嵌图片总量超过64MB，请分批上传'),{statusCode:400});
    const stored=await archiveInlineMedia(item,options);cache.set(key,stored);return stored;
   }
   if(Array.isArray(item)){const out=[];for(const child of item)out.push(await visit(child,depth+1));return out;}

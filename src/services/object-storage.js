@@ -293,6 +293,7 @@ export async function putContentAddressedObject(buffer, {
       }
     });
   }
+  if(env.STORAGE_VERIFIED_WRITES_ENABLED==='1')await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size:source.length});
   const url = publicOssObjectUrl({
     region: storage.region,
     bucket: storage.bucket,
@@ -352,12 +353,24 @@ export async function putContentAddressedFile(filePath, {
     });
   }
   if (privateObject) await verifyPrivateOssObject(ossClient, objectKey, { storage });
+  if(env.STORAGE_VERIFIED_WRITES_ENABLED==='1')await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size,signal});
   await assertMediaStorageAccess(beforeRequest, signal);
   return {
     driver: "oss", bucket: storage.bucket, objectKey, storageName: objectKey,
     hashSha256, size, reused: exists,
     url: publicOssObjectUrl({ region: storage.region, bucket: storage.bucket, objectKey, publicBaseUrl: storage.publicBaseUrl })
   };
+}
+
+// All content-addressed writers share the same acknowledgement rule: both a
+// newly uploaded body and an existing deduplicated body must actually match.
+export async function verifyContentAddressedBody(client,objectKey,{hashSha256,size,signal}={}){
+  if(!/^[a-f0-9]{64}$/.test(hashSha256||'')||!Number.isSafeInteger(size)||size<1)throw new Error('Invalid media storage fingerprint');
+  const {stream}=await client.getStream(objectKey);const hash=crypto.createHash('sha256');let bytes=0;
+  try{for await(const chunk of stream){signal?.throwIfAborted();bytes+=chunk.length;if(bytes>size)throw new Error('OSS content exceeds expected size');hash.update(chunk);}}
+  finally{stream.destroy?.();}
+  if(bytes!==size||hash.digest('hex')!==hashSha256)throw new Error('OSS content readback checksum mismatch');
+  return {size,hashSha256};
 }
 
 async function assertMediaStorageAccess(beforeRequest, signal) {
@@ -402,6 +415,7 @@ export async function promoteManagedOssObjectUrl(url, {
   }
   const filename = path.basename(objectKey);
   const hashSha256 = filename.match(/^([a-f0-9]{64})(?:\.|$)/i)?.[1]?.toLowerCase() || "";
+  if(env.STORAGE_VERIFIED_WRITES_ENABLED==='1')await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size:Number((targetHead||sourceHead)?.res?.headers?.['content-length']||0)});
   return {
     driver: "oss",
     bucket: storage.bucket,

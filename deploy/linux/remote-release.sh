@@ -324,6 +324,52 @@ install_storage_collector() {
   systemctl enable --now ozon-erp-storage-collector.timer
 }
 
+install_storage_lifecycle_timers() {
+  # Installation is part of an explicitly approved release. Both new writers
+  # remain off until their reviewed environment flags are enabled.
+  install -d -m 700 -o ozon-erp -g ozon-erp /opt/ozon-erp/shared/storage-maintenance/media-leases
+  install -d -m 700 -o ozon-erp -g ozon-erp /opt/ozon-erp/shared/storage-maintenance/media-cache
+  python3 - "$archive_path" "$(readlink -f "$release_dir/node_modules")" <<'PYWORKER'
+import os,sys,pathlib,zipfile,hashlib,json,stat,shutil,tempfile
+archive=pathlib.Path(sys.argv[1]);dependencies=pathlib.Path(sys.argv[2])
+s=archive.lstat()
+if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_mode&0o022:raise RuntimeError('Root-owned immutable deploy archive required')
+if not __import__('re').fullmatch(r'/opt/ozon-erp/artifacts/dependencies/[a-f0-9]{64}/node_modules',str(dependencies)):raise RuntimeError('Verified dependency-cache path required')
+for p in (dependencies,dependencies.parent):
+ s=p.lstat()
+ if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or s.st_mode&0o222:raise RuntimeError('Root-owned read-only dependencies required')
+names=['scripts/archive-mysql-binlogs.mjs','scripts/lib/verify-mysql-binlog.mjs','src/services/binlog-archive.js','src/services/binlog-baseline.js','src/services/verified-private-object.js','src/services/object-storage.js']
+with zipfile.ZipFile(archive) as package:
+ contents={}
+ for name in names:
+  members=[i for i in package.infolist() if i.filename==name]
+  if len(members)!=1 or members[0].file_size>2*1024*1024 or stat.S_ISLNK(members[0].external_attr>>16):raise RuntimeError('Invalid immutable worker source')
+  contents[name]=package.read(name)
+identity=hashlib.sha256(str(dependencies).encode()+b''.join(name.encode()+contents[name] for name in names)).hexdigest()
+root=pathlib.Path('/usr/local/libexec/ozon-storage-workers');root.mkdir(mode=0o755,parents=True,exist_ok=True);target=root/identity
+if not target.exists():
+ temporary=pathlib.Path(tempfile.mkdtemp(prefix='.install-',dir=root))
+ try:
+  for name,body in contents.items():
+   file=temporary/name;file.parent.mkdir(mode=0o755,parents=True,exist_ok=True);file.write_bytes(body);file.chmod(0o444)
+  (temporary/'package.json').write_text('{"type":"module","private":true}');(temporary/'package.json').chmod(0o444)
+  (temporary/'node_modules').symlink_to(dependencies)
+  temporary.chmod(0o755);temporary.rename(target)
+ except BaseException:shutil.rmtree(temporary);raise
+for name,body in contents.items():
+ file=target/name;s=file.lstat()
+ if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_mode&0o222 or file.read_bytes()!=body:raise RuntimeError('Immutable worker receipt mismatch')
+link=pathlib.Path('/usr/local/libexec/ozon-erp-storage-worker');temporary=link.with_name(link.name+'.new');temporary.unlink(missing_ok=True);temporary.symlink_to(target);os.replace(temporary,link)
+print('Installed root-owned immutable binlog worker:',identity)
+PYWORKER
+  for name in ozon-erp-binlog-archive ozon-erp-media-cleanup; do
+    install -m 644 -o root -g root "$release_dir/deploy/linux/$name.service" "/etc/systemd/system/$name.service"
+    install -m 644 -o root -g root "$release_dir/deploy/linux/$name.timer" "/etc/systemd/system/$name.timer"
+  done
+  systemctl daemon-reload
+  systemctl enable --now ozon-erp-binlog-archive.timer ozon-erp-media-cleanup.timer
+}
+
 plan_database_changes() {
   set -a
   source "$env_file"
@@ -828,6 +874,7 @@ fi
 candidate_pid=""
 
 trap - ERR
+install_storage_lifecycle_timers
 # A failed release never ages out its preceding restore points. Run retention
 # only after the new primary and candidate have both passed readiness checks.
 if ! (cd "$release_dir" && node scripts/prune-release-backups.mjs --apply --lock-fd=9); then

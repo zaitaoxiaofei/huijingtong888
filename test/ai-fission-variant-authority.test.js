@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -14,7 +15,7 @@ const targetMain = "https://media.example/generated-target.jpg";
 const detail = "https://media.example/current-detail.jpg";
 
 function fixture() {
-  const context = vm.createContext({ LOCAL_DICTIONARY_DISPLAY_ZH: new Map() });
+  const context = vm.createContext({ withMediaCacheLease, LOCAL_DICTIONARY_DISPLAY_ZH: new Map() });
   vm.runInContext(functions, context);
   const base = {
     title: "Historical template", editable_payload: {

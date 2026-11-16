@@ -1,0 +1,20 @@
+[Unit]
+Description=Archive and verify closed MySQL binlogs before bounded purge
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/usr/local/libexec/ozon-erp-storage-worker
+EnvironmentFile=/etc/ozon-erp/ozon-erp.env
+ExecStart=/usr/bin/flock -n /var/lock/ozon-erp-release.lock /usr/bin/node /usr/local/libexec/ozon-erp-storage-worker/scripts/archive-mysql-binlogs.mjs --write
+TimeoutStartSec=20min
+MemoryMax=384M
+CPUQuota=50%
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ozon-erp/shared /var/lock

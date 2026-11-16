@@ -26,3 +26,5 @@ test('authorization failure blocks upload and ordinary URL/partial updates retai
  const input={name:'Only text'};assert.deepEqual(await prepareInventoryInlineMedia(input,{env:{}}),input);
  const result=await prepareInventoryInlineMedia({image_url:'https://example.com/a.png',detail_image_urls:JSON.stringify([url])},{env,client:f.client});assert.equal(result.image_url,'https://example.com/a.png');assert.match(result.detail_image_urls[0],/^https:/);
 });
+
+test('surrounding whitespace cannot bypass inline-media OSS persistence',async()=>{const env={OSS_ENABLED:'true',OSS_REGION:'oss-cn-test',OSS_BUCKET:'test',OSS_ACCESS_KEY_ID:'id',OSS_ACCESS_KEY_SECRET:'secret'},bytes=Buffer.from('89504e470d0a1a0a00010203','hex'),data='data:image/png;base64,'+bytes.toString('base64');const objects=new Map();const client={async head(key){if(!objects.has(key))throw Object.assign(Error('missing'),{status:404});},async put(key,body){objects.set(key,Buffer.from(body));},async getStream(key){return {stream:Readable.from([objects.get(key)])};}};const stored=await archiveInlineMedia(' \n'+data+' \t',{env,client});assert(!stored.includes('data:'));assert.equal(objects.size,1);});
