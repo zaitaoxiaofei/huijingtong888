@@ -34,7 +34,7 @@ test('return writes are scoped, idempotent and retain history without changing p
     const details=await profitAftersalesDetailsMysql({from:'2026-01-01',to:'2026-12-31'},'901');
     assert.equal(details.rows[0].bucket,'official_after_delivery_return');
     assert.equal(details.rows[0].actual_loss_cny,null);
-    await storeOzonReturnObservations(fixture.connection,scope,901,[{...row,state:{state:'UtilizedByOzon'}}]);
+    await storeOzonReturnObservations(fixture.connection,scope,901,[{...row,state:{state:'Utilized'}}]);
     assert.equal((await q('SELECT COUNT(*) n FROM ozon_return_history'))[0].n,2);
     assert.equal(JSON.stringify(await q('SELECT * FROM order_profit_items')),ledgerBefore);
     assert.equal((await q('SELECT actual_profit FROM order_items WHERE id=901'))[0].actual_profit,'25.0000');
@@ -48,6 +48,15 @@ test('return writes are scoped, idempotent and retain history without changing p
     await storeOzonReturnObservations(fixture.connection,scope,901,[{...row,return_id:'78',posting_number:'maybe-posting',state:{state:'OnSellerClarification'},product:{sku:2}}]);
     const possible=await ordersPagedMysql({...filters,status:'possible_return',searchQuery:'maybe-posting'},'901');
     assert.equal(possible.total,1);assert.equal(possible.rows[0].id,903);assert.equal(possible.rows[0].aftersale.needs_review,true);
+    assert.equal(possible.rows[0].aftersale.status,'seller_action_required');
+    const actionRows=await ordersPagedMysql({...filters,status:'aftersale',aftersaleStatus:'seller_action',searchQuery:''},'901');
+    assert.equal(actionRows.total,1);assert.equal(actionRows.rows[0].id,903);
+    const disposedRows=await ordersPagedMysql({...filters,status:'aftersale',aftersaleStatus:'disposed'},'901');
+    assert.equal(disposedRows.total,1);assert.equal(disposedRows.rows[0].id,901);
+    const noFalseTodo=await ordersPagedMysql({...filters,status:'possible_return'},'901');assert.equal(noFalseTodo.total,0,'Utilized is a confirmed official state, not a review task');
+    const systemRows=await ordersPagedMysql({...filters,status:'aftersale',aftersaleStatus:'system_review',searchQuery:''},'901');
+    assert.equal(systemRows.total,0);
+    await assert.rejects(ordersPagedMysql({...filters,status:'aftersale',aftersaleStatus:"unsafe') OR 1=1"},'901'),e=>e.statusCode===400);
     await assert.rejects(ordersPagedMysql({...filters,status:'unreviewed_status'},'901'),e=>e.statusCode===503);
 
   }finally{const {closeMysqlPool}=await import('../src/mysql-pool.js');await closeMysqlPool();await fixture.cleanup();}

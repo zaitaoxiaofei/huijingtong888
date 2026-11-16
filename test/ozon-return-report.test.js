@@ -15,7 +15,7 @@ test('partial compensation remains separate; missing actual profit is explicitly
 test('an unaffected SKU and a cancelled request keep their existing reporting result',()=>{
  const legacy={outcome_type:'delivered_signed'};
  assert.equal(officialReturnReportRow({...row('MoneyReturned'),ozon_sku:'2'},legacy),legacy);
- assert.equal(officialReturnReportRow(row('Cancelled'),legacy),legacy);
+ for(const code of ['Cancelled','Solved','Rejected','CrmRejected'])assert.equal(officialReturnReportRow(row(code),legacy),legacy);
 });
 
 test('an old positive actual and unmatched return SKUs cannot masquerade as settled refund loss',()=>{
@@ -23,4 +23,10 @@ test('an old positive actual and unmatched return SKUs cannot masquerade as sett
  assert.equal(old.actual_loss_cny,null);assert.equal(old.needs_review,1);
  const unmapped=row('MoneyReturned');unmapped.aftersale.observations[0].product=null;
  assert.equal(officialReturnReportRow(unmapped,{}).bucket,'official_possible_return');
+});
+
+test('known platform progress is separate from unidentified return states',()=>{
+ const r=officialReturnReportRow(row('CheckingStatus'),{});
+ assert.equal(r.bucket,'official_return_processing');assert.equal(r.aftersale.needs_review,false);
+ for(const code of ['Utilized','Utilizing','ReceivedBySeller'])assert.equal(officialReturnReportRow(row(code),{}).bucket,'official_after_delivery_return');
 });

@@ -21,7 +21,7 @@ export const STATE_META = {
   dispute: { label: "有争议", color: "red" },
   delivered: { label: "已签收", color: "green" },
   aftersale: { label: "退货／售后", color: "amber" },
-  possible_return: { label: "可能退货待确认", color: "red" },
+  possible_return: { label: "售后待处理", color: "red" },
   cancelled: { label: "已取消", color: "slate" },
   unbound: { label: "待绑定库存", color: "amber" },
   pending_purchase: { label: "待采购", color: "red" },

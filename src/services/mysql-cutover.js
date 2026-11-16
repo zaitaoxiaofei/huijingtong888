@@ -27139,7 +27139,8 @@ async function buildProfitSummaryOverviewFromOrdersMysql(from = "", to = "") {
 const AFTERSALE_BUCKETS_MYSQL = [
   { key: "official_after_delivery_return", label: "官方签收后退款／退货", hint: "独立退货接口已确认；货物去向与退款分开记录，损失按账本核对。" },
   { key: "official_partial_compensation", label: "官方部分补偿", hint: "仅调整补偿对应金额，不作为整单退货计入退货率。" },
-  { key: "official_possible_return", label: "可能退货，待人工确认", hint: "官方申请待澄清或新状态待确认，不自动清零销售额。" },
+  { key: "official_return_processing", label: "其他官方售后进度", hint: "运输、平台核查或待卖家处理等已识别进度，不能直接视为退货完成。" },
+  { key: "official_possible_return", label: "售后状态待核对", hint: "系统待识别状态或商品待匹配，需核对来源，不自动清零销售额。" },
   { key: "cargo_loss", label: "配送货损/理赔待核", hint: "配送途中丢失，计商品成本与收单费，不计佣金及运费；不计入退货率，赔付另核销。" },
   { key: "pre_fulfillment_cancel", label: "取消订单", hint: "未发生实质履约损失，销售额不计入有效销售，损失默认为 0。" },
   { key: "rejected_unclaimed", label: "拒收/未取", hint: "买家拒签、未取、配送失败或清关失败，至少核对商品成本、国际运费和收单费。" },
@@ -27385,7 +27386,7 @@ async function aftersaleSalesBaseRowsMysql({ from = "", to = "", shopId = "all" 
 }
 
 function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = []) {
-  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss", "official_partial_compensation", "official_possible_return"].includes(String(row.bucket || "")));
+  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss", "official_partial_compensation", "official_possible_return", "official_return_processing"].includes(String(row.bucket || "")));
   const shops = new Map();
   const skus = new Map();
   const ensureShop = (row) => {
@@ -27559,7 +27560,7 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
   const returnQuantity = operational.shops.reduce((sum, row) => sum + Number(row.return_quantity || 0), 0);
   const salesQuantity = operational.shops.reduce((sum, row) => sum + Number(row.sales_quantity || 0), 0);
   const returnOrders = new Set(normalized
-    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss", "official_partial_compensation", "official_possible_return"].includes(String(row.bucket || "")))
+    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss", "official_partial_compensation", "official_possible_return", "official_return_processing"].includes(String(row.bucket || "")))
     .map((row) => Number(row.order_id))).size;
   return {
     from,
@@ -31144,6 +31145,8 @@ async function orderFilteredSqlMysql(query, base, coverage = null, tenantScope =
   const evidenceAlias = reuseEvidence ? "ogl_filter_evidence" : null;
   const joins = reuseEvidence ? orderPagedOglEvidenceJoinMysql(tenantScope, evidenceAlias) : "";
   where.push(orderStatusSqlMysql(status, coverage, tenantScope, evidenceAlias));
+  const aftersaleStage = String(query.aftersaleStatus || "all");
+  if (aftersaleStage !== "all" && ["aftersale", "possible_return"].includes(status)) where.push(ozonReturnFilterSql(tenantScope, "aftersale", "o", aftersaleStage));
 
   const mark = String(query.markFilter || query.mark_filter || "all");
   if (mark === "quality") {

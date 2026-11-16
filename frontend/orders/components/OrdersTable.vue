@@ -13,6 +13,8 @@ import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js"
 
 const WbHandoverDialog = defineAsyncComponent(() => import("./WbHandoverDialog.vue"));
 const wbHandoverRow = ref(null);
+const OzonAftersaleDialog = defineAsyncComponent(() => import("./OzonAftersaleDialog.vue"));
+const aftersaleRow = ref(null);
 const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/components/procurement/ProcurementLedgerDialog.vue"));
 
 const props = defineProps({
@@ -612,6 +614,7 @@ function canEditCollaborationNote(row) {
         <template #default="{ row }">
           <div class="orders-cell-stack orders-cell-center orders-status-cell">
             <el-tag effect="light" :type="statusTagType(row.statusColor)" :title="row.statusHint || ''">{{ row.statusLabel }}</el-tag>
+            <el-button v-if="row.aftersale" link type="primary" size="small" @click="aftersaleRow=row">{{ row.aftersale.requires_user_action ? '查看待处理申请' : '查看售后进度' }}</el-button>
             <div
               v-if="row.statusDeadlineHint"
               class="orders-status-deadline"
@@ -658,7 +661,6 @@ function canEditCollaborationNote(row) {
             >
               {{ row.profitSummary.alertLevel === "loss" ? "亏损" : "低利润" }}
             </el-tag>
-            <el-tag v-if="row.aftersale && !['closed_without_return', 'request_cancelled'].includes(row.aftersale.status)" size="small" type="warning" title="新增退款或补偿需与官方账单核对；历史预估不能作为最终收益">售后损益需核对</el-tag>
             <div v-if="Number(row.productDisplayRows?.length || 0) > 1" class="orders-profit-merge-hint">
               已按 {{ Number(row.productDisplayRows?.length || 0) }} 个商品分别计算后汇总
             </div>
@@ -855,6 +857,7 @@ function canEditCollaborationNote(row) {
       </template>
     </Teleport>
 
+    <OzonAftersaleDialog v-if="aftersaleRow" :row="aftersaleRow" @close="aftersaleRow=null" @open-profit="id => { aftersaleRow=null; emit('open-profit', id); }" />
     <WbHandoverDialog v-if="wbHandoverRow" :row="wbHandoverRow" @close="wbHandoverRow=null" @changed="emit('inventory-saved')" />
     <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved', $event)">
       <template #management>
