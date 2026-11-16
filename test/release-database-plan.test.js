@@ -168,3 +168,12 @@ test('indexed procurement facts are planned even when the existing order search 
 });
 
 test('WB lifecycle operations are an explicitly allowed additive table and unknown tables still fail closed',()=>{const report={ok:true,mode:'dry-run',changes_database:false,ready:false,missing_tables:['wb_product_operations'],problems:[]};assert.equal(migrationNeedsApply('migrate-wb-listing-catalog.mjs',report),true);assert.throws(()=>migrationNeedsApply('migrate-wb-listing-catalog.mjs',{...report,missing_tables:['unreviewed_table']}),/incompatible WB/);assert.throws(()=>migrationNeedsApply('migrate-wb-listing-catalog.mjs',{...report,problems:['incompatible index']}),/incompatible WB/);});
+
+
+test("SKU attention table is accepted as a pending additive migration without weakening incompatible-schema checks", () => {
+  const report={ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["seller_sku_traffic_watch"],problems:[]};
+  assert.equal(migrationNeedsApply("migrate-sku-traffic-daily.mjs",report),true);
+  assert.equal(migrationNeedsApply("migrate-sku-traffic-daily.mjs",{...report,ready:true,missing_tables:[]}),false);
+  assert.throws(()=>migrationNeedsApply("migrate-sku-traffic-daily.mjs",{...report,problems:["seller_sku_traffic_watch:tenant-primary-key"]}));
+  assert.throws(()=>migrationNeedsApply("migrate-sku-traffic-daily.mjs",{...report,missing_tables:["unrelated_table"]}));
+});
