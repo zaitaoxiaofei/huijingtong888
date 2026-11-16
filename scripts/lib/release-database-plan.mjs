@@ -92,7 +92,7 @@ export function migrationNeedsApply(filename, report) {
     }
     case "migrate-sku-traffic-daily.mjs": {
       const ready=boolean(report.ready,"ready"),missing=list(report.missing_tables,"missing_tables"),problems=list(report.problems,"problems");
-      if(report.ok!==true||problems.length||missing.some(name=>!["seller_sku_traffic_daily","seller_sku_traffic_days","seller_sku_traffic_watch"].includes(name))||ready!==(missing.length===0))invalid("incompatible SKU daily schema");
+      if(report.ok!==true||problems.length||missing.some(name=>!["seller_sku_traffic_daily","seller_sku_traffic_days","seller_sku_traffic_watch","seller_sku_traffic_tags"].includes(name))||ready!==(missing.length===0))invalid("incompatible SKU daily schema");
       return !ready;
     }
     case "migrate-order-search-indexes.mjs": {

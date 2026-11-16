@@ -177,3 +177,9 @@ test("SKU attention table is accepted as a pending additive migration without we
   assert.throws(()=>migrationNeedsApply("migrate-sku-traffic-daily.mjs",{...report,problems:["seller_sku_traffic_watch:tenant-primary-key"]}));
   assert.throws(()=>migrationNeedsApply("migrate-sku-traffic-daily.mjs",{...report,missing_tables:["unrelated_table"]}));
 });
+
+test('SKU tag membership table is an allowed additive migration',()=>{
+ const report={ok:true,mode:'dry-run',changes_database:false,ready:false,missing_tables:['seller_sku_traffic_tags'],problems:[]};
+ assert.equal(migrationNeedsApply('migrate-sku-traffic-daily.mjs',report),true);
+ assert.throws(()=>migrationNeedsApply('migrate-sku-traffic-daily.mjs',{...report,problems:['seller_sku_traffic_tags:tenant-primary-key']}));
+});

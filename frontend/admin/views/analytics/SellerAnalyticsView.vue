@@ -35,23 +35,41 @@ import { loadShopDictionary } from "../../utils/shop-dictionary";
 import {dailyCollectionContext,monitorReturnQuery,supportsTrafficPartitions} from '../../utils/sku-traffic-navigation';
 const route = useRoute(), router=useRouter();
 const dailyContext=computed(()=>dailyCollectionContext(route.query));
-const dailyCoverage=ref(null),dailyError=ref(''),dailyBusy=ref(false),dailyPartitionCapable=ref(false);
-let dailyTimer;
+const dailyCoverage=ref(null),dailyRecords=ref([]),dailySubmission=ref(null),dailyError=ref(''),dailyBusy=ref(false),dailyPartitionCapable=ref(false);
+let dailyTimer,dailyMounted=false,dailyAutoKey='';
 function startDailyPolling(){window.clearInterval(dailyTimer);dailyTimer=window.setInterval(()=>{if(dailyContext.value)void refreshDailyCoverage();},5000);}
 async function refreshDailyCoverage(){
  const ctx=dailyContext.value;if(!ctx)return;
- try{const data=await getSkuTrafficDaily({shop_id:ctx.shopId,metadata_only:1,include_progress:1});dailyCoverage.value=data.coverage?.find(c=>c.date_key===ctx.date)||null;dailyError.value='';}catch(e){dailyError.value=e.message;}
+ try{const data=await getSkuTrafficDaily({shop_id:ctx.shopId,metadata_only:1,include_progress:1});dailyRecords.value=(data.coverage||[]).filter(c=>c.date_key>= (ctx.from||ctx.date)&&c.date_key<=ctx.date);dailyCoverage.value=(ctx.rangeDays?[...dailyRecords.value].sort((a,b)=>b.date_key.localeCompare(a.date_key)).find(c=>c.status==='pending'):null)||dailyRecords.value.find(c=>c.date_key===ctx.date)||null;dailyError.value='';}catch(e){dailyError.value=e.message;}
 }
 async function collectMonitorDay(){
  const ctx=dailyContext.value;if(!ctx||dailyBusy.value)return;
  if(String(state.filters.shopId)!==ctx.shopId){ElMessage.warning('请恢复补采目标店铺后再采集');return;}
- const storeId=selectedStoreId.value;
- if(!(await ensureCollectReady())||String(state.filters.shopId)!==ctx.shopId||selectedStoreId.value!==storeId)return;
- dailyBusy.value=true;
- try{await collectSkuTrafficDaily({shop_id:ctx.shopId,date:ctx.date,category_partitioning:dailyPartitionCapable.value,browser_instance_id:pluginInstanceId.value});ElMessage.success('已提交单日采集，等待插件；请以日数据入库状态为准');await loadRunsMeta(true);await refreshDailyCoverage();}catch(e){ElMessage.error(e.message||'日数据采集失败');}finally{dailyBusy.value=false;}
+ const storeId=selectedStoreId.value,contextKey=JSON.stringify(ctx);
+ dailyBusy.value=true;dailyError.value='';
+ try{
+  await refreshDailyCoverage();
+  if(JSON.stringify(dailyContext.value)!==contextKey)return;
+  if(ctx.rangeDays&&intervalComplete.value===ctx.rangeDays){dailySubmission.value={queued:[],waiting:[],skipped:ctx.rangeDays};ElMessage.success('当前区间已完整采集，无需重复采集');return;}
+  if(!(await ensureCollectReady())||String(state.filters.shopId)!==ctx.shopId||selectedStoreId.value!==storeId||JSON.stringify(dailyContext.value)!==contextKey)return;
+  const period=ctx.rangeDays?{end_date:ctx.date,range_days:ctx.rangeDays,missing_only:true}:{date:ctx.date};
+  const response=await collectSkuTrafficDaily({shop_id:ctx.shopId,...period,category_partitioning:dailyPartitionCapable.value,browser_instance_id:pluginInstanceId.value});
+  dailySubmission.value=response?.data||response;
+  wakeAnalyticsPlugin();
+  ElMessage.success(ctx.rangeDays?'区间补采已排队，完整日期已跳过；同店铺按日执行':'已提交单日采集，等待插件');
+  await loadRunsMeta(true);await refreshDailyCoverage();
+ }catch(e){dailyError.value=e.message||'日数据采集失败';ElMessage.error(dailyError.value);}finally{dailyBusy.value=false;}
 }
+async function maybeAutoCollect(){
+ const ctx=dailyContext.value;if(!dailyMounted||!ctx?.rangeDays||route.query.traffic_auto!=='1')return;
+ const key=JSON.stringify(ctx);if(key===dailyAutoKey)return;dailyAutoKey=key;dailySubmission.value=null;
+ await collectMonitorDay();
+}
+const intervalComplete=computed(()=>dailyRecords.value.filter(day=>day.status==='complete').length);
+const intervalPending=computed(()=>dailyRecords.value.filter(day=>day.status==='pending').length);
+
 function returnToMonitor(){router.push({name:'sku-traffic-monitor',query:monitorReturnQuery(route.query)});}
-watch(()=>route.query,()=>{if(route.name==='seller-analytics'){applyRouteFilters();activeShopId.value=state.filters.shopId;void refreshDailyCoverage();void refreshData();}});
+watch(()=>route.query,()=>{if(route.name==='seller-analytics'){applyRouteFilters();activeShopId.value=state.filters.shopId;void refreshDailyCoverage();void refreshData().then(maybeAutoCollect);}});
 
 const DEFAULT_ANALYTICS_PAGE_SIZE = 30;
 const ANALYTICS_PAGE_SIZE_OPTIONS = [20, 30, 50, 100];
@@ -854,7 +872,7 @@ function applyRouteFilters() {
   if (shopId && shops.value.some((shop) => String(shop.id) === shopId)) state.filters.shopId = shopId;
   if (keyword) state.filters.keyword = keyword;
   if (periodKey && periods.some((item) => item.value === periodKey)) state.filters.periodKey = periodKey;
-  if(dailyContext.value){state.filters.periodKey='custom';state.filters.dateRange=[dailyContext.value.date,dailyContext.value.date];state.filters.keyword='';state.filters.tabKey='all_metrics';}
+  if(dailyContext.value){state.filters.periodKey='custom';state.filters.dateRange=[dailyContext.value.from||dailyContext.value.date,dailyContext.value.date];state.filters.keyword='';state.filters.tabKey='all_metrics';}
   if (shopId || keyword || periodKey) state.page = 1;
 }
 
@@ -2031,6 +2049,7 @@ onMounted(async () => {
   await Promise.all([loadPluginStatus().catch(() => {}), loadPluginValidation().catch(() => {}), loadAuthBindingStatus().catch(() => {}), loadBrowserProfileStatus().catch(() => {})]);
   startPolling();
   startPluginPolling();
+  dailyMounted=true;await maybeAutoCollect();
 });
 onBeforeUnmount(() => {
   window.clearInterval(dailyTimer);
@@ -2042,13 +2061,13 @@ onBeforeUnmount(() => {
 });
 
 onActivated(() => {
-  applyRouteFilters();void refreshDailyCoverage();startDailyPolling();
+  applyRouteFilters();void refreshDailyCoverage();startDailyPolling();void maybeAutoCollect();
   startPolling();
   startPluginPolling();
 });
 
 onDeactivated(() => {
-  window.clearInterval(dailyTimer);
+  window.clearInterval(dailyTimer);dailyAutoKey='';
   stopPolling();
   stopPluginPolling();
 });
@@ -2056,7 +2075,7 @@ onDeactivated(() => {
 
 <template>
   <div class="seller-analytics-page">
-    <section v-if="dailyContext" class="monitor-collection-banner"><div><strong>SKU流量监控 · 单日补采</strong><p>目标店铺：{{shops.find(s=>String(s.id)===dailyContext.shopId)?.name||dailyContext.shopId}} · 报表日期：{{dailyContext.date}} · 仅保存8项核心日指标</p><p>状态：{{dailyError||({complete:'已完整入库',partial:'部分采集，尚未覆盖全店',pending:'等待或正在采集',failed:'采集失败'}[dailyCoverage?.status]||'尚未采集')}}<template v-if="dailyCoverage?.product_count!=null&&['complete','partial'].includes(dailyCoverage.status)"> · {{dailyCoverage.product_count}} SKU</template></p><p v-if="!dailyPartitionCapable">当前插件可使用常规分页；触及接口上限时显示部分采集。支持类目分批的插件连接后会自动启用分批采集。</p><p v-if="dailyCoverage?.progress">请求进度 {{dailyCoverage.progress.completed_requests}} / {{dailyCoverage.progress.total_requests}} · 失败 {{dailyCoverage.progress.failed_requests}}</p><p v-if="dailyCoverage?.message">{{dailyCoverage.message}}</p></div><div><el-button type="primary" :loading="dailyBusy" :disabled="dailyCoverage?.status==='pending'" @click="collectMonitorDay">采集该日全店SKU</el-button><el-button @click="refreshDailyCoverage">刷新状态</el-button><el-button @click="returnToMonitor">返回SKU流量监控</el-button></div></section>
+    <section v-if="dailyContext" class="monitor-collection-banner"><div><strong>SKU流量监控 · {{dailyContext.rangeDays?'区间补采':'单日补采'}}</strong><p>目标店铺：{{shops.find(s=>String(s.id)===dailyContext.shopId)?.name||dailyContext.shopId}} · 报表日期：{{dailyContext.from?dailyContext.from+' — ':''}}{{dailyContext.date}} · 仅保存8项核心日指标</p><p v-if="dailyContext.rangeDays">完整 {{intervalComplete}} / {{dailyContext.rangeDays}} 天 · 排队或采集中 {{intervalPending}} 天。已完整日期自动跳过，缺失、失败和部分采集日期按日补采。</p><p v-if="dailySubmission&&dailyContext.rangeDays">本次新增 {{dailySubmission.queued?.length||0}} 天 · 复用 {{dailySubmission.waiting?.length||0}} 个任务 · 跳过 {{dailySubmission.skipped||0}} 天</p><p v-if="!dailyContext.rangeDays||dailyError">状态：{{dailyError||({complete:'已完整入库',partial:'部分采集，尚未覆盖全店',pending:'等待或正在采集',failed:'采集失败'}[dailyCoverage?.status]||'尚未采集')}}<template v-if="dailyCoverage?.product_count!=null&&['complete','partial'].includes(dailyCoverage.status)"> · {{dailyCoverage.product_count}} SKU</template></p><p v-if="!dailyPartitionCapable">当前插件可使用常规分页；触及接口上限时显示部分采集。支持类目分批的插件连接后会自动启用分批采集。</p><p v-if="dailyCoverage?.progress">{{dailyContext.rangeDays?dailyCoverage.date_key+' · ':''}}请求进度 {{dailyCoverage.progress.completed_requests}} / {{dailyCoverage.progress.total_requests}} · 失败 {{dailyCoverage.progress.failed_requests}}</p><p v-if="dailyCoverage?.message">{{dailyCoverage.message}}</p></div><div><el-button type="primary" :loading="dailyBusy" :disabled="!!intervalPending||(!dailyContext.rangeDays&&dailyCoverage?.status==='pending')" @click="collectMonitorDay">{{dailyContext.rangeDays?'补齐当前区间':'采集该日全店SKU'}}</el-button><el-button @click="refreshDailyCoverage">刷新状态</el-button><el-button @click="returnToMonitor">返回SKU流量监控</el-button></div></section>
     <div class="seller-sticky-head">
       <ErpPageHeader compact title="数据分析" description="店铺经营指标、商品表现与运营行动建议。">
         <template #actions>

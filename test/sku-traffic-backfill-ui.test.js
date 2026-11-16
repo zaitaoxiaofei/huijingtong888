@@ -26,3 +26,24 @@ test('older and unknown collector versions keep regular pagination instead of re
  assert.equal(supportsTrafficPartitions('1.5.6',true),false);assert.equal(supportsTrafficPartitions('',true),false);
  assert.equal(supportsTrafficPartitions('1.5.7',true),true);assert.equal(supportsTrafficPartitions('1.0.46',false),false);assert.equal(supportsTrafficPartitions('1.0.47',false),true);
 });
+
+
+test('interval navigation binds one shop and preserves complete detail return context',async()=>{
+ const {intervalCollectionRoute,monitorContextQuery}=await import('../frontend/admin/utils/sku-traffic-navigation.js');
+ const saved={shops:'7',range_days:7,query:'新品',view:'focused',group_by:'inventory',sort_order:'asc',page:3,pageSize:30,scroll_top:736,tags:JSON.stringify(['新品开发期','测品'])};
+ const target=intervalCollectionRoute(7,'2026-11-07',7,saved);
+ assert.deepEqual(dailyCollectionContext(target.query),{shopId:'7',date:'2026-11-07',rangeDays:7,from:'2026-11-01'});
+ assert.equal(target.query.traffic_auto,'1');
+ const expected=Object.fromEntries(Object.entries(saved).map(([k,v])=>[k,String(v)]));
+ assert.deepEqual(monitorReturnQuery(target.query),expected);
+ assert.deepEqual(monitorReturnQuery({...monitorContextQuery(saved),shop_id:'7',sku:'123'}),expected);
+});
+test('shop preference defaults to the main shop and drops shops outside current membership',async()=>{
+ const {preferredMonitorShops,monitorPreferenceKey}=await import('../frontend/admin/utils/sku-traffic-navigation.js');
+ const shops=[{id:7,name:'RuVibe Mart Z'},{id:4,name:'RuVibe Mart'}];
+ assert.deepEqual(preferredMonitorShops(shops,null),['4']);
+ assert.deepEqual(preferredMonitorShops(shops,['7']),['7']);
+ assert.deepEqual(preferredMonitorShops(shops,['999','4']),['4']);
+ assert.deepEqual(preferredMonitorShops([],['7']),[]);
+ assert.notEqual(monitorPreferenceKey(1),monitorPreferenceKey(2));
+});

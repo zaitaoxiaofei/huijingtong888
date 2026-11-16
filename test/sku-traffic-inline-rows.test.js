@@ -19,5 +19,7 @@ test('each actual rendered SKU row contains its own compact chart and visible pr
  assert.equal((html.match(/viewBox="0 0 700 140"/g)||[]).length,3);
  assert.equal((html.match(/class="trend-chart compact"/g)||[]).length,3);
  assert.equal((html.match(/class="traffic-product-image"/g)||[]).length,3);assert.equal((html.match(/class="el-image"/g)||[]).length,1);assert.ok(!html.includes('data:image'));assert.ok(html.includes('无图'));
+ assert.equal((html.match(/class="missing-day"/g)||[]).length,3);assert.ok(!html.includes('天有日记录'));
+ assert.ok(html.includes('product-actions'));assert.ok(html.includes('查看SKU SKU-A 明细'));
  assert.ok(!html.includes('trend-panel'));assert.ok(!html.includes('<aside'));
 });

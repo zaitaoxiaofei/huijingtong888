@@ -23,8 +23,8 @@ export const navigationMenus = [
     label: "数据分析",
     icon: ChartColumn,
     children: [
-      { key: "sku-traffic-monitor", label: "SKU流量监控", route: "/sku-traffic-monitor" },
       { key: "seller-analytics", label: "数据分析", route: "/seller-analytics" },
+      { key: "sku-traffic-monitor", label: "SKU流量监控", route: "/sku-traffic-monitor" },
       { key: "order-car-heatmap", label: "型号机会", route: "/order-car-heatmap" },
       { key: "advertising-daily", label: "广告分析", route: "/advertising/daily" }
     ]

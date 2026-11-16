@@ -16,7 +16,8 @@ const transaction=async callback=>{const c=await pool.getConnection();try{await 
 const service=createSkuTrafficDailyService({query,execute,transaction});
 const {config}=await import('../../src/config.js');config.dbName=database;process.env.DB_SOCKET_PATH=process.env.TENANT_TEST_MYSQL_SOCKET;
 const analytics=await import('../../src/services/seller-analytics.js');await analytics.ensureSellerAnalyticsSchema();
-const days=trafficDays(),runs=new Map();
+const days=trafficDays(),runs=new Map(),preferences=new Map();
+const simulatedPlugin=process.env.SKU_PREVIEW_PLUGIN_SIMULATED==='1';
 if(!process.env.SKU_PREVIEW_DATABASE){
 await query('CREATE TABLE tenants(id BIGINT PRIMARY KEY,slug VARCHAR(80),status VARCHAR(32),subscription_status VARCHAR(32),subscription_expires_at DATETIME)');
 await query('CREATE TABLE shops(id BIGINT PRIMARY KEY,tenant_id BIGINT,name VARCHAR(255),status VARCHAR(32),ozon_client_id VARCHAR(80))');
@@ -57,12 +58,18 @@ await query("INSERT IGNORE INTO shops VALUES(4,1,'RuVibe Mart · 真实单日验
 const entry=`import '/test/fixtures/sku-traffic-workflow-entry.js';`;
 const server=await createServer({configFile:false,root:process.cwd(),publicDir:false,cacheDir:'/tmp/sku-traffic-vite-cache',logLevel:'error',plugins:[vue(),{name:'sku-daily-fixture',resolveId(id){if(id==='/__sku_preview.js')return id;},load(id){if(id==='/__sku_preview.js')return entry;},configureServer(server){server.middlewares.use(async(req,res,next)=>{
  const url=new URL(req.url,'http://localhost');
- if(url.pathname==='/admin.html'){res.setHeader('content-type','text/html; charset=utf-8');return res.end('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SKU流量监控 · 本地测试数据</title><body><div style="background:#fff3ce;padding:8px 24px;font:13px system-ui">本地隔离验证 · 含合成演示数据；真实采集验收请选Mart主店11月15日单日 · 未写生产</div><div id="adminApp"></div><script type="module" src="/__sku_preview.js"></script></body></html>');}
+ if(url.pathname==='/admin.html'){res.setHeader('content-type','text/html; charset=utf-8');return res.end('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SKU流量监控 · 本地测试数据</title><body><div style="background:#fff3ce;padding:8px 24px;font:13px system-ui">本地隔离验证 · 含合成演示数据；真实采集验收请选Mart主店11月15日单日 · 未写生产</div><div id="adminApp"></div><script>window.skuFixturePlugin='+JSON.stringify(simulatedPlugin)+';</script><script type="module" src="/__sku_preview.js"></script></body></html>');}
  if(url.pathname==='/api/fixture/image'){res.setHeader('content-type','image/svg+xml');return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="84"><rect width="64" height="84" fill="#edf2f7"/><rect x="10" y="28" width="45" height="9" rx="3" fill="#455b6b" transform="rotate(-20 30 40)"/><rect x="8" y="47" width="45" height="7" rx="3" fill="#738ca0" transform="rotate(-20 30 40)"/></svg>');}
  if(!url.pathname.startsWith('/api/'))return next();
  try{
   let data;
-  if(url.pathname==='/api/fixture/queue'){
+  if(url.pathname==='/api/user-preferences'){
+   const person=String(req.headers.authorization||'anonymous');
+   if(req.method==='POST'){let raw='';for await(const c of req)raw+=c;const body=JSON.parse(raw);preferences.set(person+':'+body.key,body.value);data={ok:true,key:body.key,value:body.value};}
+   else data={key:url.searchParams.get('key'),value:preferences.get(person+':'+url.searchParams.get('key'))||null};
+  }else if(simulatedPlugin&&url.pathname==='/api/db/seller-analytics/plugin-status/validate')data={ok:true,plugin_online:true,current_company_id:url.searchParams.get('store_id')};
+  else if(simulatedPlugin&&url.pathname==='/api/db/seller-analytics/plugin-status')data={online:true,plugin_version:'1.5.7'};
+  else if(url.pathname==='/api/fixture/queue'){
    let raw='';for await(const c of req)raw+=c;data=await analytics.queueSkuTrafficDaily({...JSON.parse(raw||'{}'),shop_id:4,category_partitioning:true},'admin');
   }else if(url.pathname==='/api/fixture/next')data=await analytics.claimNextCollectRequests(analytics.sellerAnalyticsDb,'admin',2,{store_id:'3570178'});
   else if(url.pathname==='/api/fixture/result'){
@@ -77,7 +84,8 @@ const server=await createServer({configFile:false,root:process.cwd(),publicDir:f
    data=await service.read(Object.fromEntries(url.searchParams),'admin');
   }else if(url.pathname==='/api/db/seller-analytics/sku-daily/collect'){
    let raw='';for await(const chunk of req)raw+=chunk;
-   data={success:true,data:await analytics.queueSkuTrafficDaily(JSON.parse(raw||'{}'),'admin')};
+   const body=JSON.parse(raw||'{}');if(simulatedPlugin)delete body.browser_instance_id;
+   data={success:true,data:await analytics.queueSkuTrafficDaily(body,'admin')};
   }else data={};
   res.setHeader('content-type','application/json');res.end(JSON.stringify(data));
  }catch(e){res.statusCode=e.statusCode||500;res.setHeader('content-type','application/json');res.end(JSON.stringify({error:e.message}));}

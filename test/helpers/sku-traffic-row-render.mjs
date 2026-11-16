@@ -1,8 +1,9 @@
+import {trafficRowTags} from '../../src/shared/sku-traffic-tags.js';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {compileTemplate,parse} from '@vue/compiler-sfc';
 import {createSSRApp,computed,ref} from 'vue';
-import {ElImage,ElRadioGroup,ElRadioButton} from 'element-plus';
+import {ElImage,ElRadioGroup,ElRadioButton,ElTag} from 'element-plus';
 import {renderToString} from 'vue/server-renderer';
 const view=fs.readFileSync(new URL('../../frontend/admin/views/analytics/SkuTrafficMonitorView.vue',import.meta.url),'utf8');
 const chart=fs.readFileSync(new URL('../../frontend/admin/components/SkuTrafficTrendChart.vue',import.meta.url),'utf8');
@@ -25,8 +26,8 @@ export async function renderTrafficRows(rows){
  },ssrRender:await renderFunction(chartDescriptor.template.content,'TrafficChart')};
  const start=view.indexOf('  <div v-loading="loading" class="records-scroll">'),end=view.indexOf('  <el-dialog :model-value',start);
  const template=view.slice(start,end).replace('v-loading="loading"','');
- const component={setup:()=>({groupBy:'sku',rowGroups:[{id:'all',rows}],watchSaving:false,state:{rows,range_from:'2026-11-01',date:'2026-11-07'},rateLabel:key=>key,metrics,rates:[],hoverMetrics:[],chartOptions:[],visibleKeys:[],toggleLine(){},lineMetrics:metrics,chartGroup:'traffic',shortName:name=>name,inventoryLabel:row=>row.inventory.map(i=>i.name).join(' / ')||'未关联库存',number:value=>value??'—',percent:value=>value===null||value===undefined?'—':`${Number(value).toFixed(2)}%`}),ssrRender:await renderFunction(template,'TrafficRows')};
- const app=createSSRApp(component);app.component('SkuTrafficTrendChart',Chart);app.component('SkuTrafficProductImage',ProductImage);app.component('ElImage',ElImage);app.component('ElRadioGroup',ElRadioGroup);app.component('ElRadioButton',ElRadioButton);app.component('ElEmpty',{render:()=>null});
+ const component={setup:()=>({trafficRowTags,groupBy:'sku',rowGroups:[{id:'all',rows}],watchSaving:false,state:{rows,range_from:'2026-11-01',date:'2026-11-07'},rateLabel:key=>key,metrics,rates:[],hoverMetrics:[],chartOptions:[],visibleKeys:[],toggleLine(){},lineMetrics:metrics,chartGroup:'traffic',shortName:name=>name,inventoryLabel:row=>row.inventory.map(i=>i.name).join(' / ')||'未关联库存',number:value=>value??'—',percent:value=>value===null||value===undefined?'—':`${Number(value).toFixed(2)}%`}),ssrRender:await renderFunction(template,'TrafficRows')};
+ const app=createSSRApp(component);app.component('SkuTrafficTrendChart',Chart);app.component('SkuTrafficProductImage',ProductImage);app.component('ElImage',ElImage);app.component('ElTag',ElTag);app.component('ElRadioGroup',ElRadioGroup);app.component('ElRadioButton',ElRadioButton);app.component('ElEmpty',{render:()=>null});
  const html=await renderToString(app);
  return {html,css:parse(view).descriptor.styles[0].content+chartDescriptor.styles[0].content+imageDescriptor.styles[0].content};
 }
