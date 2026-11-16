@@ -1,6 +1,6 @@
 // Display definitions only. Keep stored keys and accounting calculations unchanged.
 export const billingMetrics = {
-  revenue: { label: "销售收入", hint: "有效订单的销售额，已折算人民币；不是平台到账金额。" },
+  revenue: { label: "销售收入", hint: "商品销售及已确认的平台赔付，已折算人民币；退货销毁的销售收入归零，不是平台到账金额。" },
   order_amount: { label: "订单金额", hint: "下单时的商品金额；取消、退货后可能与销售收入不同。" },
   order_count: { label: "订单数", hint: "当前筛选范围内计入账单统计的订单数量。" },
   purchase_cost: { label: "商品采购成本", hint: "本期订单消耗的商品成本，不是本期全部采购付款。" },

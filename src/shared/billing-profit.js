@@ -1,3 +1,4 @@
+import {CURRENT_BILLING_REPORT} from './billing-report-versions.js';
 // Reporting projection only. Published historical order formulas stay frozen.
 export const BILLING_COST_FIELDS = ['purchase_cost','domestic_shipping_cost','international_shipping_cost','packaging_cost','commission_fee','ozon_service_fee','advertising_cost','other_fee','aftersale_fee'];
 export const BILLING_ORDER_EXPENSE_CATEGORIES = ['domestic_shipping','packaging','order_payment'];
@@ -16,7 +17,7 @@ export function billingProfitTotals(summary={},expenses=null) {
  const effectiveWithdrawal=scoped?cents(summary.withdrawal_fee):withdrawal;
  const autoToDeduct=scoped?cents(summary.withdrawal_auto_to_deduct):(actualRows.length?0:withdrawal);
  const net=(summary.ai_cost_applied&&summary.ai_usage_cost==null)||Number(summary.income_pending_count)>0?null:(revenue-orderCosts-manual-autoToDeduct-(summary.ai_cost_applied?cents(summary.ai_usage_cost):0))/100;
- return {billing_formula_version:summary.ai_cost_applied?'official-net-fees-and-withdrawal-ai-v3':'official-net-fees-and-withdrawal-v2',order_profit:(revenue-orderCosts-orderExtras)/100,net_profit:net,net_profit_margin:net==null?null:revenue?net/(revenue/100):0,
+ return {billing_formula_version:summary.ai_cost_applied?CURRENT_BILLING_REPORT.aiFormula:CURRENT_BILLING_REPORT.formula,order_profit:(revenue-orderCosts-orderExtras)/100,net_profit:net,net_profit_margin:net==null?null:revenue?net/(revenue/100):0,
   withdrawal_calculated:scoped,withdrawal_auto_to_deduct:autoToDeduct/100,withdrawal_base:scoped?Number(summary.withdrawal_base):withdrawalBase/100,withdrawal_rate:.012,withdrawal_fee:effectiveWithdrawal/100,withdrawal_estimate:scoped?Number(summary.withdrawal_estimate):estimatedWithdrawal/100,withdrawal_source:scoped?summary.withdrawal_source:actualRows.length?'recorded':'estimated'};
 }
 

@@ -63,3 +63,24 @@ test('inventory defaults to returned pieces descending and independently sorts b
  const byRate=billingDrilldown(data,{groupBy:'inventory',outcomeType:'returns',sortBy:'rate'});assert.equal(byRate.rows[0].product_id,9);assert.equal(byRate.rows.find(r=>r.product_id===8).rate,.2);
  assert.equal(billingDrilldown(data,{groupBy:'inventory',outcomeType:'returns',sortBy:'amount'}).rows[0].product_id,9);
 });
+
+test('disposed return reporting v4 removes revenue, retains goods, nets reversals once and isolates compensation',async()=>{
+ const {billingReturnItem}=await import('../src/services/billing-ledger-projection.js');
+ const source=billingReturnItem(item({item_revenue:100,aftersale:{observations:[{return_id:'1',product:{sku:'SKU'},state:{state:'Utilizing'}}]}}));
+ assert.equal(source.disposed_return,true);assert.equal(source.return_quantity,1);
+ const finance={ok:true,rows:[fee('collecting_fee',-5),fee('collecting_fee',5,2),{...fee('aftersale_loss',7,3),service_name:'ItemCompensation'}]};
+ const r=projectBillingOrder({...order,revenue:100,official_return_flag:true},[source],finance);
+ assert.equal(r.sales_revenue,0);assert.equal(r.compensation_income,7);assert.equal(r.billing_revenue,7);assert.equal(r.costs.purchase_cost,20);assert.equal(r.costs.other_fee,0);assert.equal(r.costs.aftersale_fee,0);assert.equal(r.income_pending_count,0);assert.equal(r.disposed_revenue_removed,100);assert.equal(r.fee_evidence.at(-1).category,'compensation');
+ const repeat=projectBillingOrder({...order,revenue:100,official_return_flag:true},[source],finance);assert.deepEqual(repeat,r);
+ const legacy=projectBillingOrder({...order,revenue:100,official_return_flag:true},[source],finance,'official-net-fees-and-withdrawal-v2');assert.equal(legacy.billing_revenue,100);assert.equal(legacy.income_pending_count,1);
+ const withIncome=projectBillingOrder({...order,revenue:100,official_return_flag:true},[source],{...finance,income_rows:[{}],sale_accrual_cny:100});assert.equal(withIncome.billing_revenue,7);
+ assert.equal(billingDrilldown([r],{outcomeType:'returns'}).rows[0].billing_revenue,7);
+});
+test('partial disposed SKU removes only its returned quantity and does not zero unrelated items',async()=>{
+ const {billingReturnItem}=await import('../src/services/billing-ledger-projection.js');
+ const source=billingReturnItem(item({quantity:2,item_revenue:200,aftersale:{observations:[{return_id:'1',product:{sku:'SKU',quantity:1},state:{state:'Utilized'}}]}}));
+ const other=item({order_item_id:2,ozon_sku:'OTHER',item_revenue:50,sale_price:50,outcome_type:'active',billing_return:false});
+ const r=projectBillingOrder({...order,revenue:250,official_return_flag:true},[source,other]);assert.equal(r.billing_revenue,150);assert.equal(r.income_pending_count,0);assert.equal(r.items[0].billing_revenue,100);assert.equal(r.items[1].billing_revenue,50);assert.equal(r.costs.purchase_cost,40);
+ const unknown=billingReturnItem(item({quantity:2,item_revenue:200,aftersale:{observations:[{return_id:'2',product:{sku:'SKU'},state:{state:'Utilizing'}}]}}));
+ const pending=projectBillingOrder({...order,revenue:200,official_return_flag:true},[unknown]);assert.equal(pending.billing_revenue,200);assert.equal(pending.income_pending_count,1);
+});
