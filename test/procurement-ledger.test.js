@@ -610,3 +610,12 @@ test('dated purchase backfill is idempotent and distinguishes transit, missing r
     assert.equal(f.executed.filter(row => row.sql.includes('INSERT INTO purchase_orders')).length, 1);
   }
 });
+
+test('order-date bulk backfills allow partial quantities only within same-date selected uncovered orders',()=>{
+ const state=snapshot({orders:[{...snapshot().orders[0],order_item_id:1,ordered_at:'2026-10-01T17:00:00Z',missing_purchase_quantity:3},{...snapshot().orders[0],order_item_id:2,ordered_at:'2026-10-01T08:00:00Z',missing_purchase_quantity:4}]});
+ const input=body('historical_purchase_bulk',{quantity:2,amount:20,inventory_effect:'already_accounted',purchased_at:'2026-10-02T00:00:00+08:00',order_item_ids:[1],purchase_date_basis:'order_date'});
+ const plan=planLedgerAction(state,input);assert.deepEqual(plan.allocations.map(a=>[a.order_item_id,a.quantity]),[[1,2]]);assert.equal(plan.local_delta,0);
+ assert.throws(()=>planLedgerAction(state,{...input,order_item_ids:[1,2]}),/日期/);
+ assert.throws(()=>planLedgerAction(state,{...input,quantity:4}),/缺口/);
+ assert.throws(()=>planLedgerAction(state,{...input,purchased_at:'2026-10-03T00:00:00+08:00'}),/日期/);
+});

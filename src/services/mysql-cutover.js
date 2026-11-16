@@ -31665,7 +31665,7 @@ function inventoryCapitalSourcesMysql(scope) {
   return {
     local: `SELECT p.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
       stock.quantity,stock.quantity * ${cost} AS inventory_value,${costFields},
-      stock.updated_at,stock.unclassified_movements,
+      stock.updated_at,stock.unclassified_movements,COALESCE(procured.purchase_quantity,0) AS purchase_quantity,COALESCE(procured.received_quantity,0) AS received_quantity,
       NULL AS shop_name,NULL AS warehouse_name,NULL AS ozon_sku,NULL AS order_no,NULL AS tracking_number,NULL AS received_at
       FROM (SELECT im.product_id,SUM(im.quantity_delta) AS quantity,
         MAX(im.created_at) AS updated_at,
@@ -31675,7 +31675,10 @@ function inventoryCapitalSourcesMysql(scope) {
         GROUP BY im.product_id) stock
       JOIN products p ON p.id=stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
       ${costJoin}
-      WHERE NOT EXISTS (SELECT 1 FROM product_components capital_component
+      LEFT JOIN (SELECT ir.product_id,SUM(ir.quantity) AS purchase_quantity,
+        SUM(CASE WHEN ir.status='approved' THEN ir.quantity ELSE 0 END) AS received_quantity
+        FROM inbound_records ir WHERE ir.status IN ('approved','pending_arrival') AND ${orderTenantPredicateMysql("ir", scope)} GROUP BY ir.product_id) procured ON procured.product_id=p.id
+      WHERE p.active=1 AND NOT EXISTS (SELECT 1 FROM product_components capital_component
         WHERE capital_component.product_id=p.id AND ${orderTenantPredicateMysql("capital_component", scope)})`,
     fbp: `SELECT oss.id AS row_id,oss.shop_id,
       (SELECT CASE WHEN COUNT(*)=1 THEN MIN(op.id) ELSE NULL END FROM online_products op WHERE op.shop_id=oss.shop_id AND op.ozon_sku=oss.ozon_sku AND op.archived=0) AS online_product_id,
@@ -31710,7 +31713,8 @@ async function availableLocalInventoryCapitalMysql(scope) {
   await ensureProcurementLedgerSchema(mysqlExecute);
   const states = await createInventoryWorkflowService().batch(rows.map(row=>Number(row.product_id)),scope.id,
     {localOnly:true,fresh:true,cache:false});
-  return availableLocalCapitalRows(rows,states);
+  const coverage=await loadOrderProcurementCoverage(mysqlQuery,'',{productIds:rows.map(row=>Number(row.product_id)),tenantId:scope.id,includeLegacyTenantNull:scope.isDefault});
+  return availableLocalCapitalRows(rows,states,coverage);
 }
 
 async function currentInventoryCapitalMysql(scope, localRows = null) {
