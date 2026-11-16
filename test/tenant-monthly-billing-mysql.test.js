@@ -303,5 +303,44 @@ test('monthly billing reads only the current enterprise, including every financi
       await routes['GET /api/monthly-billing-details'](req,url);await routes['GET /api/monthly-billing-orders'](req,url);await routes['GET /api/monthly-billing-source-records'](req,url);
       assert.deepEqual(seen.map(args=>args[1]),['2','2','2']);assert.throws(()=>routes['GET /api/monthly-billing-details']({},url),/企业上下文/);
     });
+    await t.test('cost-only records preserve exact values and tenant scope without loading product identities',async()=>{
+      const base=await monthlyBillingOrderDetailsMysql({...range,pageSize:200},'2');
+      for(const field of ['purchase_cost','domestic_shipping_cost','international_shipping_cost','packaging_cost','commission_fee','ozon_service_fee','other_fee']){
+        const lite=await monthlyBillingOrderDetailsMysql({...range,pageSize:200,field},'2');
+        assert.equal(lite.total,base.total);assert.equal(lite.cost_field,field);
+        for(const row of lite.rows){const original=base.rows.find(x=>x.order_id===row.order_id);if(original)assert.equal(row[field],original[field]);assert.notEqual(row.shop_id,30);assert.equal('product_name' in row,false);}
+      }
+      await assert.rejects(monthlyBillingOrderDetailsMysql({...range,field:'__proto__'},'2'),{statusCode:400});
+      await assert.rejects(monthlyBillingOrderDetailsMysql({...range,field:'other_fee',companyId:3},'2'),{statusCode:404});
+    });
+    await t.test('paid pending payroll is recognized once per company and month, including concurrent approval',async()=>{
+      const {createFinanceSubmissions}=await import('../src/services/finance-submissions.js');
+      const {paidPayrollAccruals}=await import('../src/services/finance-payroll-accruals.js');
+      const {withMysqlReadSnapshot}=await import('../src/mysql-pool.js');
+      const service=createFinanceSubmissions();const actor={personId:2,name:'A owner',tenant:{id:2,slug:'a',role:'owner'}};
+      const added=await service.savePayrollItem({company_id:2,month:'2026-06',person_name:'工资计提测试',base:1000,employer:300,employee:100,tax:0,employer_items:null,employee_items:null},actor);
+      const filters={from:'2026-06-01',to:'2026-06-30',companyId:2,includeAppendices:'0'},read=()=>monthlyBillingDetailsMysql(filters,'2');
+      assert.equal((await read()).selected.summary.salary_expense,0);
+      await service.recordPayrollPaid({item_id:added.id,paid_amount:300,expected_paid_amount:0},actor);
+      let report=await read();assert.equal(report.selected.summary.salary_expense,1300);assert.equal(report.selected.summary.net_profit,-1300);assert.equal(report.selected.expenses.filter(e=>e.salary_recognition==='paid_pending').length,1);
+      assert.equal((await monthlyBillingDetailsMysql({...filters,shopId:20},'2')).selected.summary.salary_expense,0);
+      assert.equal((await monthlyBillingDetailsMysql({...filters,from:'2026-06-01',to:'2026-06-20'},'2')).selected.summary.salary_expense,0);
+      const annual=await monthlyBillingDetailsMysql({year:2026,fromMonth:6,toMonth:6,companyId:2,overviewOnly:'1'},'2');assert.equal(annual.selected.summary.net_profit,-1300);
+      assert.equal((await paidPayrollAccruals({tenantId:3,from:filters.from,to:filters.to})).length,0);
+      await service.recordPayrollPaid({item_id:added.id,paid_amount:0,expected_paid_amount:300},actor);
+      assert.equal((await service.payrollLedger({year:2026,company_id:2},actor)).rows.find(x=>Number(x.id)===added.id).cost_confirmed,true);
+      assert.equal((await read()).selected.summary.salary_expense,1300);
+      const {createCompanyFinanceDocuments}=await import('../src/services/company-finance-documents.js');
+      const companyReport=createCompanyFinanceDocuments({query:q,execute:q,authorize:async value=>value});
+      assert.equal((await companyReport.report({company_id:2,month:'2026-06'},actor)).lines.reduce((n,line)=>n+line.amount,0),1300);
+      const [item]=await q('SELECT submission_id FROM finance_submission_items WHERE id=?',[added.id]);
+      await withMysqlReadSnapshot(async read=>{
+        const posted=await read("SELECT amount_cny FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[added.id]);assert.equal(posted.length,0);
+        await service.review({id:item.submission_id,status:'approved'},actor);
+        const accrual=await paidPayrollAccruals({tenantId:2,companyId:2,from:filters.from,to:filters.to},read);assert.equal(accrual.reduce((n,e)=>n+e.amount_cny,0),1300);
+      });
+      report=await read();assert.equal(report.selected.summary.salary_expense,1300);assert.equal(report.selected.expenses.filter(e=>e.salary_recognition==='paid_pending').length,0);
+      assert.equal((await companyReport.report({company_id:2,month:'2026-06'},actor)).lines.reduce((n,line)=>n+line.amount,0),1300);
+    });
   } finally { globalThis.fetch=originalFetch;await closeMysqlPool?.();await fixture.cleanup(); }
 });

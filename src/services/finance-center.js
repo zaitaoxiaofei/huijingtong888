@@ -1,5 +1,6 @@
-import { BILLING_COST_SCHEMA } from "./finance-billing-cost-schema.js";
-import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { FINANCE_SUBMISSIONS_SCHEMA } from "./finance-submissions-schema.js";
+import { paidPayrollAccruals } from "./finance-payroll-accruals.js";
+import { mysqlExecute, mysqlQuery, withMysqlTransaction, withMysqlReadSnapshot } from "../mysql-pool.js";
 import { assertFinanceAttachment } from "./tenant-private-files.js";
 
 let schemaReady = false;
@@ -45,7 +46,7 @@ async function requireFinanceCompany(companyId, tenantId = "admin") {
 export async function ensureFinanceCenterSchema() {
   if (schemaReady) return;
   const statements = [
-    ...BILLING_COST_SCHEMA,
+    ...FINANCE_SUBMISSIONS_SCHEMA,
     `CREATE TABLE IF NOT EXISTS finance_companies (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       tenant_id BIGINT UNSIGNED NULL,
@@ -260,7 +261,12 @@ export async function financeExpenses(query = {}, tenantId = "admin") {
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
   const shopScope = await financeShopScope(tenantId);
   const tenantFilter = normalizedTenantId == null ? "AND (e.tenant_id IS NULL OR e.tenant_id = 0)" : "AND e.tenant_id = ? AND c.tenant_id = ?";
-  return mysqlQuery(`SELECT e.*, s.name AS shop_name, c.name AS company_name FROM finance_expenses e JOIN finance_companies c ON c.id=e.company_id LEFT JOIN shops s ON s.id=e.shop_id AND ${shopScope.sql} WHERE e.company_id=? ${tenantFilter} AND e.expense_date>=? AND e.expense_date<? ORDER BY e.expense_date DESC, e.id DESC`, [...shopScope.params, companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
+  return withMysqlReadSnapshot(async mysqlQuery=>{
+  const rows=await mysqlQuery(`SELECT e.*, s.name AS shop_name, c.name AS company_name FROM finance_expenses e JOIN finance_companies c ON c.id=e.company_id LEFT JOIN shops s ON s.id=e.shop_id AND ${shopScope.sql} WHERE e.company_id=? ${tenantFilter} AND e.expense_date>=? AND e.expense_date<? ORDER BY e.expense_date DESC, e.id DESC`, [...shopScope.params, companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
+  const end=new Date(toExclusive+'T00:00:00Z');end.setUTCDate(end.getUTCDate()-1);
+  if(query.include_accruals!==true)return rows;
+  return rows.concat(await paidPayrollAccruals({tenantId:shopScope.id,legacy:normalizedTenantId==null,companyId,from,to:end.toISOString().slice(0,10)},mysqlQuery));
+  },{interactive:true});
 }
 
 export async function saveFinanceExpense(body = {}, personId = null, tenantId = "admin") {
@@ -432,7 +438,7 @@ export async function financeMonthlyExport(query = {}, tenantId = "admin") {
   const companyId = requiredId(query.company_id, "公司");
   const { month } = monthRange(query.month);
   const [report, expenses, vouchers, platformItems] = await Promise.all([
-    financeMonthlyReport({ company_id: companyId, month }, tenantId), financeExpenses({ company_id: companyId, month }, tenantId), financeVouchers({ company_id: companyId, month }, tenantId), financePlatformItems({ company_id: companyId, month }, tenantId)
+    financeMonthlyReport({ company_id: companyId, month }, tenantId), financeExpenses({ company_id: companyId, month, include_accruals:true }, tenantId), financeVouchers({ company_id: companyId, month }, tenantId), financePlatformItems({ company_id: companyId, month }, tenantId)
   ]);
   const sheets = [
     excelSheet("月度汇总", ["公司", "月份", "科目", "来源", "金额（人民币）"], report.rows.map((row) => [report.company?.name || "", month, row.label, row.source, Number(row.amount || 0)])),
@@ -466,7 +472,11 @@ export async function financeMonthlyReport(query = {}, tenantId = "admin") {
     mysqlQuery(`SELECT COALESCE(SUM(CASE WHEN source.accruals_for_sale_cny>0 THEN source.accruals_for_sale_cny ELSE 0 END),0) settlement_revenue, COALESCE(SUM(source.amount_cny),0) net_settlement_cashflow, COALESCE(SUM(ABS(source.sale_commission_cny)),0) commission, COALESCE(SUM(ABS(source.delivery_charge_cny)),0) delivery, COALESCE(SUM(ABS(source.return_delivery_charge_cny)),0) return_delivery, COALESCE(SUM(CASE WHEN source.amount_cny<0 THEN -source.amount_cny ELSE 0 END),0) total_platform_fees, COUNT(*) finance_rows, MAX(source.synced_at) last_synced_at FROM ozon_finance_items source ${assignmentJoin} WHERE source.operation_date>=? AND source.operation_date<?`, [...assignmentParams, from, toExclusive]),
     mysqlQuery(`SELECT COALESCE(SUM(source.spend_cny),0) advertising FROM ozon_ad_sku_daily source ${assignmentJoin} WHERE source.date_key>=? AND source.date_key<?`, [...assignmentParams, from, toExclusive]),
     mysqlQuery(`SELECT COALESCE(SUM(opi.purchase_cost_cny),0) purchase_cost, COALESCE(SUM(opi.domestic_shipping_cny),0) domestic_freight, COALESCE(SUM(opi.international_shipping_cny),0) international_freight, COALESCE(SUM(opi.net_profit_cny),0) order_profit, COUNT(*) order_item_count, SUM(CASE WHEN opi.order_item_id IS NULL OR opi.purchase_cost_cny IS NULL OR opi.purchase_cost_cny<=0 THEN 1 ELSE 0 END) missing_cost_items FROM orders source JOIN order_items oi ON oi.order_id=source.id LEFT JOIN order_profit_items opi ON opi.order_item_id=oi.id ${assignmentJoin} WHERE source.ordered_at>=? AND source.ordered_at<?`, [...assignmentParams, from, toExclusive]),
-    mysqlQuery(`SELECT COALESCE(SUM(amount_cny),0) manual_expenses, COUNT(*) expense_count, SUM(CASE WHEN voucher_status!='matched' THEN 1 ELSE 0 END) missing_expense_vouchers FROM finance_expenses WHERE company_id=? ${tenantScoped ? "AND tenant_id=?" : "AND (tenant_id IS NULL OR tenant_id=0)"} AND expense_date>=? AND expense_date<?`, [...companyParams, from, toExclusive]),
+    withMysqlReadSnapshot(async read=>{const rows=await read(`SELECT COALESCE(SUM(amount_cny),0) manual_expenses, COUNT(*) expense_count, SUM(CASE WHEN voucher_status!='matched' THEN 1 ELSE 0 END) missing_expense_vouchers FROM finance_expenses WHERE company_id=? ${tenantScoped ? "AND tenant_id=?" : "AND (tenant_id IS NULL OR tenant_id=0)"} AND expense_date>=? AND expense_date<?`, [...companyParams, from, toExclusive])
+      const end=new Date(toExclusive+'T00:00:00Z');end.setUTCDate(end.getUTCDate()-1);
+      const paid=await paidPayrollAccruals({tenantId:shopScope.id,legacy:normalizedTenantId==null,companyId,from,to:end.toISOString().slice(0,10)},read);
+      rows[0].manual_expenses=Number(rows[0].manual_expenses||0)+paid.reduce((n,row)=>n+row.amount_cny,0);rows[0].expense_count=Number(rows[0].expense_count||0)+paid.length;return rows;
+    },{interactive:true}),
     mysqlQuery(`SELECT COALESCE(SUM(total_amount),0) voucher_amount, COUNT(*) voucher_count, SUM(CASE WHEN review_status='approved' THEN 1 ELSE 0 END) approved_vouchers, SUM(CASE WHEN review_status IN ('pending','supplement') THEN 1 ELSE 0 END) pending_vouchers FROM finance_vouchers WHERE company_id=? ${tenantScoped ? "AND tenant_id=?" : "AND (tenant_id IS NULL OR tenant_id=0)"} AND COALESCE(issue_date, DATE(created_at))>=? AND COALESCE(issue_date, DATE(created_at))<?`, [...companyParams, from, toExclusive]),
     mysqlQuery(`SELECT * FROM finance_periods WHERE company_id=? ${tenantScoped ? "AND tenant_id=?" : "AND (tenant_id IS NULL OR tenant_id=0)"} AND month_key=?`, [...companyParams, month])
   ]);

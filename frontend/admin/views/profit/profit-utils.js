@@ -1,5 +1,5 @@
 export function formatMoney(value) {
-  return Number(value || 0).toFixed(2);
+  return Number(value || 0).toLocaleString("zh-CN", {minimumFractionDigits:2,maximumFractionDigits:2});
 }
 
 export function formatInteger(value) {
@@ -8,8 +8,8 @@ export function formatInteger(value) {
 
 export function formatDelta(value) {
   const amount = Number(value || 0);
-  if (amount > 0) return `+${amount.toFixed(2)}`;
-  if (amount < 0) return amount.toFixed(2);
+  if (amount > 0) return `+${formatMoney(amount)}`;
+  if (amount < 0) return formatMoney(amount);
   return "0.00";
 }
 

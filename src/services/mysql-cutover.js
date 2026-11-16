@@ -1,3 +1,4 @@
+import { paidPayrollAccruals } from "./finance-payroll-accruals.js";
 import { billingProfitTotals } from "../shared/billing-profit.js";
 import { INVENTORY_CAPITAL_REVIEWS, inventoryCapitalReviewMatches } from '../shared/inventory-capital-review.js';
 import {prepareInventoryInlineMedia} from "./database-inline-media.js";
@@ -28107,7 +28108,8 @@ async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scop
     where.push("e.shop_id = ?");
     params.push(numericShopId);
   }
-  const rows = await mysqlQuery(`
+  const rows = await withMysqlReadSnapshot(async read=>{
+    const booked=await read(`
     SELECT e.*, s.name AS shop_name, c.name AS company_name, a.order_id AS cost_order_id, a.field AS cost_field, a.revision AS cost_revision, a.base_amount AS cost_base
     FROM finance_expenses e
     LEFT JOIN finance_billing_cost_adjustments a ON a.id=e.source_id AND e.source_type='billing_cost_adjustment' AND a.expense_id=e.id
@@ -28116,6 +28118,8 @@ async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scop
     WHERE ${where.join(" AND ")}
     ORDER BY e.expense_date DESC, e.id DESC
   `, params);
+    return booked.concat(await paidPayrollAccruals({tenantId:scope.id,legacy:scope.defaultTenant,companyId,shopId,from,to},read));
+  },{interactive:true});
   const byShop = new Map();
   let sharedManualExpense = 0;
   let sharedSalaryExpense = 0;
@@ -28155,7 +28159,8 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
   const params = [from, to];
   if (Number(shopId) > 0) { where.push("e.shop_id = ?"); params.push(Number(shopId)); }
   if (companyId) { where.push("e.company_id = ?"); params.push(companyId); }
-  const rows = await mysqlQuery(`
+  const {rows,paid}=await withMysqlReadSnapshot(async read=>{
+    const rows=await read(`
     SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key, e.category, SUM(e.amount_cny) amount_cny,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN e.amount_cny ELSE 0 END), 0) AS salary_expense,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN 0 ELSE e.amount_cny END), 0) AS manual_expense,
@@ -28165,8 +28170,15 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
     LEFT JOIN shops s ON s.id=e.shop_id
     WHERE ${where.join(" AND ")}
     GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m'), e.category`, params);
+    return {rows,paid:await paidPayrollAccruals({tenantId:scope.id,legacy:scope.defaultTenant,companyId,shopId,from,to},read)};
+  },{interactive:true});
   const months=new Map();
   for(const row of rows){const current=months.get(row.month_key)||{manual_expense:0,salary_expense:0,order_expense:0,expense_totals:[]};for(const key of ['manual_expense','salary_expense','order_expense'])current[key]=roundMoneyMysql(current[key]+Number(row[key]||0));current.expense_totals.push({category:row.category,amount_cny:Number(row.amount_cny)});months.set(row.month_key,current);}
+  for(const wage of paid){
+    const month=wage.expense_date.slice(0,7),total=months.get(month)||{salary_expense:0,manual_expense:0,order_expense:0,expense_totals:[]};
+    total.salary_expense=roundMoneyMysql(total.salary_expense+wage.amount_cny);total.paid_pending_salary=roundMoneyMysql(Number(total.paid_pending_salary||0)+wage.amount_cny);
+    const category=total.expense_totals.find(row=>row.category==='salary');if(category)category.amount_cny=roundMoneyMysql(category.amount_cny+wage.amount_cny);else total.expense_totals.push({category:'salary',amount_cny:wage.amount_cny});months.set(month,total);
+  }
   return months;
 }
 
@@ -28192,6 +28204,8 @@ async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMon
     const expense = expenses.get(range.month_key) || {};
     summary.manual_expense = roundMoneyMysql(expense.manual_expense);
     summary.salary_expense = roundMoneyMysql(expense.salary_expense);
+    summary.paid_pending_salary = roundMoneyMysql(expense.paid_pending_salary);
+    summary.salary_recognition_version = 'paid-payroll-v1';
     summary.order_expense = roundMoneyMysql(expense.order_expense);
     Object.assign(summary,billingProfitTotals(summary));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
@@ -28279,6 +28293,29 @@ function monthlyBillingOrderSettlementHavingMysql(settlementState = "") {
   if (normalized === "terminal_estimate") return `NOT (${accrued}) AND ${terminal}`;
   if (normalized === "pending_estimate") return `NOT (${accrued}) AND NOT ${terminal}`;
   return "";
+}
+
+const BILLING_RECORD_COST_SQL={
+ purchase_cost:'COALESCE(opi.purchase_cost_cny,oi.frozen_purchase_cost*oi.quantity,0)',
+ domestic_shipping_cost:'COALESCE(opi.domestic_shipping_cny,oi.frozen_domestic_shipping*oi.quantity,0)',
+ international_shipping_cost:'COALESCE(opi.international_shipping_cny,oi.frozen_international_shipping*oi.quantity,0)',
+ packaging_cost:'COALESCE(opi.packaging_cost_cny,oi.frozen_handling_fee*oi.quantity,0)',
+ commission_fee:'COALESCE(opi.commission_fee_cny,oi.estimated_commission,0)',
+ ozon_service_fee:'COALESCE(opi.ozon_service_fee_cny,oi.platform_fee_actual,0)',
+ other_fee:'COALESCE(opi.other_fee_cny,0)'
+};
+async function monthlyBillingCostRowsMysql(from,to,shopId,options){
+ const scope=options.tenantScope,field=options.costField,expression=BILLING_RECORD_COST_SQL[field];
+ const dateFilter=options.dateBasis==='status_changed'?profitTimestampUtcRangeMysql('o.last_status_changed_at',from,to):profitOrderedAtUtcRangeMysql('o',from,to);
+ const extra=monthlyBillingOrderFilterMysql({shopId,keyword:options.keyword,outcomeType:options.outcomeType});
+ const where=[orderTenantPredicateMysql('s',scope),...extra.where];
+ if(options.companyId)where.push(billingCompanyOrderPredicateMysql('o',options.companyId,scope));
+ const rows=await mysqlQuery(`SELECT o.id order_id,o.shop_id,MAX(s.name) shop_name,MAX(o.posting_number) posting_number,MAX(o.ordered_at) ordered_at,COUNT(oi.id) item_count,
+  SUM(CASE WHEN COALESCE(opi.profit_status,oi.settlement_state,'')='accrued' THEN 1 ELSE 0 END) accrued_items,SUM(${expression}) cost_amount
+  FROM (SELECT o.id FROM orders o JOIN shops s ON s.id=o.shop_id WHERE 1=1 ${dateFilter.whereSql} AND ${where.join(' AND ')} ORDER BY o.ordered_at DESC,o.id DESC LIMIT ? OFFSET ?) page
+  JOIN orders o ON o.id=page.id JOIN shops s ON s.id=o.shop_id LEFT JOIN order_items oi ON oi.order_id=o.id LEFT JOIN order_profit_items opi ON opi.order_item_id=oi.id
+  GROUP BY o.id,o.shop_id ORDER BY MAX(o.ordered_at) DESC,o.id DESC`,[...dateFilter.params,...extra.params,options.pageSize,options.offset]);
+ return rows.map(row=>({order_id:Number(row.order_id),shop_id:Number(row.shop_id),shop_name:row.shop_name,posting_number:row.posting_number,ordered_at:mysqlDateTimeIso(row.ordered_at),settlement_state:Number(row.item_count)>0&&Number(row.accrued_items)>=Number(row.item_count)?'finance_accrued':'pending_estimate',[field]:roundMoneyMysql(row.cost_amount)}));
 }
 
 async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", options = {}) {
@@ -28506,7 +28543,10 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
   const shopId = String(query.shopId || query.shop_id || "all");
   const page = Math.max(Number(query.page || 1), 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 50), 1), 200);
+  const costField=String(query.field||'');
+  if(costField&&!Object.hasOwn(BILLING_RECORD_COST_SQL,costField))throw Object.assign(new Error('费用项目无效'),{statusCode:400});
   const options = {
+    costField,
     tenantScope,
     companyId,
     keyword: query.keyword || query.search || "",
@@ -28517,9 +28557,9 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
     offset: (page - 1) * pageSize
   };
   const [shops, total, rows] = await Promise.all([
-    shopsMysql(tenantId),
+    costField?Promise.resolve([]):shopsMysql(tenantId),
     monthlyBillingOrderTotalMysql(range.from, range.to, shopId, options),
-    monthlyBillingOrderRowsMysql(range.from, range.to, shopId, options)
+    costField&&!options.settlementState?monthlyBillingCostRowsMysql(range.from,range.to,shopId,options):monthlyBillingOrderRowsMysql(range.from, range.to, shopId, options)
   ]);
   return {
     year,
@@ -28531,6 +28571,7 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
     shopId,
     shops: shops.map((shop) => ({ id: shop.id, name: shop.name })),
     rows,
+    cost_field:costField,
     total,
     page,
     pageSize,
@@ -28620,6 +28661,8 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
     const summary = sumMonthlyBillingRowsMysql(shopRows);
     summary.manual_expense = expenses.total_manual_expense;
     summary.salary_expense = expenses.total_salary_expense;
+    summary.paid_pending_salary = roundMoneyMysql(expenses.rows.filter(row=>row.salary_recognition==='paid_pending').reduce((n,row)=>n+row.amount_cny,0));
+    summary.salary_recognition_version = 'paid-payroll-v1';
     Object.assign(summary,billingProfitTotals(summary,expenses.rows));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
     const selected = {
@@ -28675,6 +28718,8 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
     const summary = sumMonthlyBillingRowsMysql(shopRows);
     summary.manual_expense = expenses.total_manual_expense;
     summary.salary_expense = expenses.total_salary_expense;
+    summary.paid_pending_salary = roundMoneyMysql(expenses.rows.filter(row=>row.salary_recognition==='paid_pending').reduce((n,row)=>n+row.amount_cny,0));
+    summary.salary_recognition_version = 'paid-payroll-v1';
     Object.assign(summary,billingProfitTotals(summary,expenses.rows));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
     return {

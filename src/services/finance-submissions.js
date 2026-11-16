@@ -147,7 +147,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
     if (selected != null && !companyList.some(company => Number(company.id) === selected)) fail("公司不存在或不属于当前企业", 404);
     if (!companyList.length) return { year, companies: [], rows: [] };
     const companyIds = selected ? [selected] : companyList.map(company => Number(company.id));
-    const records = await query(`SELECT i.id, i.detail_json, s.status AS approval_status, p.paid_amount, p.created_at AS paid_updated_at
+    const records = await query(`SELECT i.id, i.detail_json, s.status AS approval_status, p.paid_amount, p.created_at AS paid_updated_at, EXISTS(SELECT 1 FROM finance_payroll_payment_updates confirmed WHERE confirmed.tenant_id=i.tenant_id AND confirmed.item_id=i.id AND confirmed.paid_amount>0) AS payment_confirmed
       FROM finance_submission_items i
       JOIN finance_submissions s ON s.id=i.submission_id AND s.tenant_id=i.tenant_id AND s.kind='payroll'
       JOIN finance_imported_payroll_periods period ON period.tenant_id=i.tenant_id AND period.submission_id=i.submission_id
@@ -157,7 +157,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
         AND s.status IN ('pending','approved') ORDER BY i.expense_date, i.company_id, i.id`, [actor.tenantId, ...companyIds, `${year}-01-01`, `${Number(year) + 1}-01-01`]);
     return { year, companies: companyList, rows: records.map(record => {
       const row = JSON.parse(record.detail_json), paid = money(record.paid_amount || 0);
-      return { ...row, id: record.id, revision: payrollRevision(record.detail_json), approval_status: record.approval_status, paid_amount: paid,
+      return { ...row, id: record.id, revision: payrollRevision(record.detail_json), approval_status: record.approval_status, cost_confirmed: record.approval_status==='approved'||Boolean(record.payment_confirmed), paid_amount: paid,
         remaining_amount: money(row.net - paid), paid_updated_at: record.paid_updated_at };
     }) };
   }
