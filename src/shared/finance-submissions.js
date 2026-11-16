@@ -8,7 +8,7 @@ export function canReviewFinance(session) {
 export function financeSubmissionRoute(parts, method) {
   if (parts[1] !== "finance-submissions" || parts.length !== 3) return null;
   if (method === "GET" && ["payroll-ledger", "payroll-export"].includes(parts[2])) return "reviewer";
-  if (method === "POST" && ["payroll-paid", "payroll-paid-batch", "payroll-item", "payroll-delete"].includes(parts[2])) return "reviewer";
+  if (method === "POST" && ["payroll-paid", "payroll-paid-batch", "payroll-item", "payroll-delete", "billing-cost"].includes(parts[2])) return "reviewer";
   if (method === "GET" && ["companies", "template", "list", "detail", "export"].includes(parts[2])) return "member";
   if (method === "POST" && ["preview", "submit"].includes(parts[2])) return "member";
   if (method === "POST" && parts[2] === "review") return "reviewer";

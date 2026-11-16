@@ -24,7 +24,7 @@ test("finance, private files and background tasks use A/B/default ownership in r
   const key = id => id === 1 ? "admin" : String(id);
   const companies = new Map(), expenses = new Map(), urls = new Map();
   try {
-    await query("INSERT INTO tenants(id,slug,name) VALUES(1,'default','Default'),(2,'tenant-2','A'),(3,'tenant-3','B')");
+    await query("INSERT INTO tenants(id,slug,name,plan_code,subscription_status) VALUES(1,'default','Default','monthly_team','active'),(2,'tenant-2','A','monthly_team','active'),(3,'tenant-3','B','monthly_team','active')");
     await query("INSERT INTO people(id,name,role) VALUES(1,'Shared login','operations')");
     for (const id of [1, 2, 3]) {
       await query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(?,1,'owner',JSON_ARRAY('operations'))", [id]);

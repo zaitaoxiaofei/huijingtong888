@@ -1,4 +1,6 @@
+import { BILLING_COST_SCHEMA } from "./finance-billing-cost-schema.js";
 export const FINANCE_SUBMISSIONS_SCHEMA = [
+  ...BILLING_COST_SCHEMA,
   `CREATE TABLE IF NOT EXISTS finance_submissions (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     tenant_id BIGINT UNSIGNED NOT NULL, applicant_id BIGINT UNSIGNED NOT NULL,
