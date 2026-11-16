@@ -105,7 +105,6 @@ const STATUS_TABS = [
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "aftersale", label: "退货／售后" },
-  { value: "possible_return", label: "可能退货待确认" },
   { value: "cancelled", label: "已取消" },
   { value: "unbound", label: "待绑定库存" },
   { value: "pending_purchase", label: "待采购" },
@@ -184,6 +183,7 @@ function createDefaultFilters(defaultFrom, defaultTo) {
     page: 1,
     pageSize: DEFAULT_PAGE_SIZE,
     status: DEFAULT_ORDER_STATUS,
+    aftersaleStatus: "all",
     shopId: "all",
     logisticsCarrier: "all",
     logisticsMethod: "all",
@@ -305,7 +305,8 @@ export function useOrdersPage() {
       paged: "1",
       page: String(filters.page || 1),
       pageSize: String(filters.pageSize || DEFAULT_PAGE_SIZE),
-      status: filters.status || DEFAULT_ORDER_STATUS,
+      status: filters.status === "possible_return" ? "aftersale" : filters.status || DEFAULT_ORDER_STATUS,
+      aftersaleStatus: ["aftersale", "possible_return"].includes(filters.status) ? filters.aftersaleStatus || "all" : "all",
       shopId: filters.shopId || "all",
       logisticsCarrier: filters.logisticsCarrier || "all",
       logisticsMethod: filters.logisticsMethod || "all",
@@ -383,7 +384,8 @@ export function useOrdersPage() {
       vm.filters = {
         page: Number(filters.page || 1),
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
-        status: filters.status === "ogl_bound" ? "awaiting_deliver" : ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
+        status: filters.status === "possible_return" ? "aftersale" : filters.status === "ogl_bound" ? "awaiting_deliver" : ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
+        aftersaleStatus: String(filters.aftersaleStatus || "all"),
         shopId: String(filters.shopId || "all"),
         logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
@@ -1061,7 +1063,8 @@ export function useOrdersPage() {
     changeStatus: (status) => {
       vm.filters = {
         ...vm.filters,
-        status,
+        status: status === "possible_return" ? "aftersale" : status,
+        aftersaleStatus: "all",
         page: 1
       };
       return Promise.resolve(changeOrderStatus(status)).then(loadOrders);

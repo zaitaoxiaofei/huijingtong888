@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from "vue";
+import { OZON_AFTERSALE_FILTER_OPTIONS } from "../../../src/shared/ozon-return-state.js";
 
 const props = defineProps({ filters: { type: Object, default: () => ({}) } });
 const emit = defineEmits(["apply"]);
@@ -33,6 +34,9 @@ function clear(choice) {
 
 <template>
   <div class="orders-quick-filter-tags" aria-label="订单快速筛选">
+    <el-select v-if="['aftersale','possible_return'].includes(filters.status)" :model-value="filters.aftersaleStatus || 'all'" aria-label="售后进度" style="width: 205px" @change="emit('apply', {aftersaleStatus: $event, page: 1})">
+      <el-option v-for="option in OZON_AFTERSALE_FILTER_OPTIONS" :key="option.value" :label="option.label" :value="option.value" />
+    </el-select>
     <el-popover
       v-for="choice in choices"
       :key="choice.key"
