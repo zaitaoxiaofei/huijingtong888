@@ -199,6 +199,27 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    await service.saveWatch({...mark,focused:false,tags:[]},'admin');
    assert.equal((await service.read({shop_id:11,tags:JSON.stringify(['自建标签','重点关注'])},'admin')).rows.some(row=>row.sku==='same'),false);
   });
+  await t.test('bulk labels preserve notes and unrelated labels, deduplicate and reject the whole foreign or invalid selection',async()=>{
+   const a={shop_id:11,sku:'same'},b={shop_id:11,sku:'bulk-new'};
+   await query("INSERT INTO online_products VALUES(11,'bulk-new','Bulk fixture',NULL,'bulk-offer')");
+   await service.saveWatch({...a,focused:false,tags:['原标签'],note:'独立备注'},'admin');
+   await service.saveWatch({...b,focused:true,tags:['另一标签'],note:'另一个备注'},'admin');
+   assert.deepEqual(await service.saveWatchBatch({items:[a,b,a],mode:'add',tags:['新品开发期','重点关注']},'admin'),{selected_count:2,updated_count:2});
+   let result=await service.read({shop_id:11,query:'same',search_by:'sku'},'admin');
+   assert.equal(result.rows[0].note,'独立备注');assert.equal(result.rows[0].focused,true);assert.deepEqual(new Set(result.rows[0].tags),new Set(['原标签','新品开发期']));
+   assert.equal((await service.saveWatchBatch({items:[a,b],mode:'add',tags:['新品开发期','重点关注']},'admin')).updated_count,0);
+   await service.saveWatchBatch({items:[a,b],mode:'remove',tags:['新品开发期','重点关注']},'admin');
+   result=await service.read({shop_id:11,query:'same',search_by:'sku'},'admin');assert.equal(result.rows[0].focused,false);assert.deepEqual(result.rows[0].tags,['原标签']);assert.equal(result.rows[0].note,'独立备注');
+   await assert.rejects(service.saveWatchBatch({items:[a,{shop_id:22,sku:'same'}],mode:'add',tags:['禁止部分写入']},'admin'),/不属于/);
+   await assert.rejects(service.saveWatchBatch({items:[a,{shop_id:11,sku:'nonexistent'}],mode:'add',tags:['禁止部分写入']},'admin'),/不存在/);
+   assert.equal((await query("SELECT * FROM seller_sku_traffic_tags WHERE tag='禁止部分写入'")).length,0);
+   await service.saveWatch({...b,focused:false,tags:Array.from({length:12},(_,i)=>`满额${i}`),note:'另一个备注'},'admin');
+   await assert.rejects(service.saveWatchBatch({items:[a,b],mode:'add',tags:['超额']},'admin'),/超过12/);
+   assert.equal((await query("SELECT * FROM seller_sku_traffic_tags WHERE tag='超额'")).length,0);
+   await assert.rejects(service.saveWatchBatch({items:[a],mode:'replace',tags:['覆盖']},'admin'),/有效/);
+   await assert.rejects(service.saveWatchBatch({items:[a],mode:'add',tags:[]},'admin'),/至少/);
+   await assert.rejects(service.saveWatchBatch({items:Array.from({length:501},(_,i)=>({shop_id:11,sku:String(i)})),mode:'add',tags:['数量限制']},'admin'),/500/);
+  });
   await t.test('retention clears only expired daily facts and temporary pages/runs, keeps active stage and legacy analysis',async()=>{
    const oldest=trafficDays()[0],expired=shiftTrafficDate(oldest,-1);
    await execute('INSERT INTO seller_sku_traffic_daily(tenant_id,shop_id,sku,date_key,total_views,updated_at) VALUES(?,?,?,?,?,UTC_TIMESTAMP())',['admin',11,'expired',expired,1]);

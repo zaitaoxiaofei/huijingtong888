@@ -30,7 +30,7 @@ test('older and unknown collector versions keep regular pagination instead of re
 
 test('interval navigation binds one shop and preserves complete detail return context',async()=>{
  const {intervalCollectionRoute,monitorContextQuery}=await import('../frontend/admin/utils/sku-traffic-navigation.js');
- const saved={shops:'7',range_days:7,query:'新品',view:'focused',group_by:'inventory',sort_order:'asc',page:3,pageSize:30,scroll_top:736,tags:JSON.stringify(['新品开发期','测品'])};
+ const saved={shops:'7',range_days:7,query:'新品',view:'focused',group_by:'inventory',sort_order:'asc',page:3,pageSize:30,scroll_top:736,trend_metric:'pdp_views',exposure_trend:'other_views',click_trend:'pdp_cart_rate',order_trend:'cart_order_rate',tags:JSON.stringify(['新品开发期','测品'])};
  const target=intervalCollectionRoute(7,'2026-11-07',7,saved);
  assert.deepEqual(dailyCollectionContext(target.query),{shopId:'7',date:'2026-11-07',rangeDays:7,from:'2026-11-01'});
  assert.equal(target.query.traffic_auto,'1');

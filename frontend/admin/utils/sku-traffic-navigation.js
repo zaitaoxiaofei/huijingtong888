@@ -7,7 +7,7 @@ export function dailyCollectionContext(query={}) {
 }
 export function monitorReturnQuery(query={}) {
  const result={};
- for(const key of ['shops','query','search_by','range_days','sort_key','sort_order','view','tag','tags','group_by','date','exact','filters','page','pageSize','scroll_top']){
+ for(const key of ['shops','query','search_by','range_days','sort_key','sort_order','view','tag','tags','group_by','date','exact','filters','page','pageSize','scroll_top','trend_metric','exposure_trend','click_trend','order_trend']){
   const value=query['monitor_'+key];if(typeof value==='string'&&value.length<=4096)result[key]=value;
  }
  return result;

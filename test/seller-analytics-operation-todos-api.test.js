@@ -51,10 +51,12 @@ test("seller analytics route binds tenant scope to the session and ignores clien
 
   await routes["GET /api/db/seller-analytics/analysis"](req, url);
   await routes["POST /api/db/seller-analytics/collect-runs"](req);
+  await routes["POST /api/db/seller-analytics/sku-daily/watch/batch"](req);
 
   assert.deepEqual(calls, [
     { method: "sellerAnalyticsAnalysis", args: [{ store_id: "store-a" }, "42"] },
-    { method: "sellerAnalyticsCreateCollectRun", args: [{ store_id: "store-a" }, "42"] }
+    { method: "sellerAnalyticsCreateCollectRun", args: [{ store_id: "store-a" }, "42"] },
+    { method: "skuTrafficDailySaveWatchBatch", args: [{ store_id: "store-a" }, "42"] }
   ]);
 });
 

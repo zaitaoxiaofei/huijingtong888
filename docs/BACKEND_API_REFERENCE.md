@@ -2292,6 +2292,19 @@ Read a tail image owned by the current enterprise. Other media, generation, jobs
 
 ### SKU Daily Traffic
 
+#### `POST /api/db/seller-analytics/sku-daily/watch/batch`
+
+Atomically add or remove shared labels for up to 500 distinct owned shop/SKUs. Duplicates are processed once. Existing unrelated labels and all notes are preserved. Unknown SKUs, foreign shops or a resulting total above 12 labels reject the whole batch. Does not change traffic facts.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/db/seller-analytics/sku-daily/watch`
 
 Save enterprise-shared attention, one tag and a note by owned shop/SKU. Does not change daily traffic facts or their retention.

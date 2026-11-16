@@ -40,7 +40,8 @@ for(const shop of [11,22]){
   if(index<12)await execute('INSERT INTO sku_mappings(tenant_id,shop_id,ozon_sku,product_id) VALUES(1,?,?,?)',[shop,sku,index%2?101:102]);
   for(const [i,day] of days.entries()){
    if(index===0&&[4,8].includes(i))continue;
-   const exposure=index===1?0:Math.round(70+index*17+(i+1)**2*(shop===11?5:2));
+   const shape=[[1,1.08,1.25,1.12,1.04,.83,.94],[1,.9,.92,1.14,1.26,1.09,1.31],[1,1,1,1,1,1,1]][index%3][i%7];
+   const exposure=index===1?0:Math.round((70+index*17+(i+1)**2*(shop===11?5:2))*shape);
    await execute('INSERT INTO seller_sku_traffic_daily(tenant_id,shop_id,sku,date_key,total_views,search_views,pdp_views,total_hits_to_cart,ordered_units,conv_views_to_order,conv_total_views_to_cart,conv_hits_to_cart_to_order,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP())',['admin',shop,sku,day,exposure,Math.floor(exposure*.7),Math.floor(exposure*.15),Math.floor(exposure*.025),Math.floor(exposure*.008),.8,2.5,32]);
   }
  }
@@ -77,7 +78,9 @@ const server=await createServer({configFile:false,root:process.cwd(),publicDir:f
   }else if(url.pathname==='/api/shops')data=await query('SELECT *,ozon_client_id store_id FROM shops');
   else if(url.pathname==='/api/db/seller-analytics/analysis')data=await analytics.getAnalysis(analytics.sellerAnalyticsDb,Object.fromEntries(url.searchParams),'admin');
   else if(url.pathname==='/api/db/seller-analytics/collect-runs')data=await analytics.listCollectRuns(analytics.sellerAnalyticsDb,Object.fromEntries(url.searchParams),'admin');
-  else if(url.pathname==='/api/db/seller-analytics/sku-daily/watch'){
+  else if(url.pathname==='/api/db/seller-analytics/sku-daily/watch/batch'){
+   let raw='';for await(const c of req)raw+=c;data={success:true,data:await service.saveWatchBatch(JSON.parse(raw),'admin')};
+  }else if(url.pathname==='/api/db/seller-analytics/sku-daily/watch'){
    let raw='';for await(const c of req)raw+=c;data={success:true,data:await service.saveWatch(JSON.parse(raw),'admin')};
   }else if(url.pathname==='/api/db/seller-analytics/sku-daily'){
    if(url.searchParams.get('query')==='error-fixture')throw Object.assign(Error('演示接口失败，请刷新重试'),{statusCode:503});

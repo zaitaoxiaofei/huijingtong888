@@ -96,3 +96,7 @@ export function collectSkuTrafficDaily(payload = {}) {
 export function saveSkuTrafficWatch(payload = {}) {
   return apiClient.post('/api/db/seller-analytics/sku-daily/watch', payload);
 }
+
+export function saveSkuTrafficWatchBatch(payload = {}) {
+  return apiClient.post('/api/db/seller-analytics/sku-daily/watch/batch', payload);
+}

@@ -31834,9 +31834,9 @@ async function availableLocalInventoryCapitalMysql(scope) {
   const rows = await mysqlQuery(inventoryCapitalSourcesMysql(scope).local);
   if (!rows.length) return [];
   await ensureProcurementLedgerSchema(mysqlExecute);
-  const states = await createInventoryWorkflowService().batch(rows.map(row=>Number(row.product_id)),scope.id,
-    {localOnly:true,fresh:true,cache:false});
   const coverage=await loadOrderProcurementCoverage(mysqlQuery,'',{productIds:rows.map(row=>Number(row.product_id)),tenantId:scope.id,includeLegacyTenantNull:scope.isDefault});
+  const states = await createInventoryWorkflowService().batch(rows.map(row=>Number(row.product_id)),scope.id,
+    {localOnly:true,fresh:true,cache:false,coverage});
   return availableLocalCapitalRows(rows,states,coverage);
 }
 
@@ -31863,6 +31863,19 @@ async function currentInventoryCapitalMysql(scope, localRows = null) {
     inventory_total_value:local.value==null?null:roundMoneyMysql(local.value+fbp.value+transit.value) };
 }
 
+// Read-only list snapshots: tenant identity and workflow revision are part of
+// the key. Writers and explicit refreshes never rely on this cached projection.
+async function inventoryCapitalListSnapshotMysql(scope, query) {
+  const load=async()=>{
+    const local=await availableLocalInventoryCapitalMysql(scope);
+    return {local,summary:await currentInventoryCapitalMysql(scope,local),snapshot_at:new Date().toISOString()};
+  };
+  if(String(query.reuse_snapshot)!=='1')return load();
+  const key=`inventory-capital:list:v1:${scope.id}:${scope.defaultTenant?1:0}:${workflowRevision()}`;
+  if(String(query.refresh)==='1')invalidateMasterDataCache(key);
+  return getCachedMasterData(key,load,20_000);
+}
+
 export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const scope = await orderListTenantScopeMysql(tenantId);
@@ -31881,7 +31894,7 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
   const page = Math.max(1,Math.min(100000,Math.floor(Number(query.page)||1)));
   const pageSize = Math.max(1,Math.min(100,Math.floor(Number(query.pageSize)||20)));
   if (kind === 'local') {
-    const all = await availableLocalInventoryCapitalMysql(scope);
+    const snapshot=await inventoryCapitalListSnapshotMysql(scope,query),all=snapshot.local;
     const keyword = String(query.query || '').trim().slice(0,128).toLocaleLowerCase();
     const aliasIds = keyword ? new Set((await mysqlQuery(`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p', scope)} AND ${inventoryAliasSearch(keyword, 'p', { fuzzy: true }).sql}`, inventoryAliasSearch(keyword, 'p', { fuzzy: true }).params)).map(row=>Number(row.id))) : new Set();
     const filtered = all.filter(row=>inventoryCapitalReviewMatches(row,review) && (!keyword || aliasIds.has(Number(row.product_id)) || [row.product_name,row.inventory_number,row.code,row.row_id].filter(v=>v!=null).join(' ').toLocaleLowerCase().includes(keyword)));
@@ -31890,7 +31903,7 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
     const totals = localCapitalTotals(filtered);
     return {kind,page,pageSize,total:filtered.length,filtered_quantity:totals.quantity,
       filtered_value:totals.value==null?null:roundMoneyMysql(totals.value),availability_unknown_count:totals.availability_unknown_count,
-      summary:await currentInventoryCapitalMysql(scope,all),snapshot_at:new Date().toISOString(),
+      summary:snapshot.summary,snapshot_at:snapshot.snapshot_at,
       rows:filtered.slice((page-1)*pageSize,page*pageSize).map(row=>({...row,
         row_id:Number(row.row_id),product_id:Number(row.product_id),unit_cost:Number(row.unit_cost),
         cost_missing:Boolean(Number(row.cost_missing)),unclassified_movements:Number(row.unclassified_movements)}))};
@@ -31910,10 +31923,10 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
   const [rows, totals, summary] = await Promise.all([
     mysqlQuery(`SELECT * ${source} ORDER BY inventory_value DESC,quantity DESC,row_id LIMIT ? OFFSET ?`,[...params,pageSize,(page-1)*pageSize]),
     mysqlQueryOne(`SELECT COUNT(*) AS total,COALESCE(SUM(quantity),0) AS quantity,COALESCE(SUM(inventory_value),0) AS value ${source}`,params),
-    currentInventoryCapitalMysql(scope)
+    inventoryCapitalListSnapshotMysql(scope,query)
   ]);
   return {kind,page,pageSize,total:Number(totals.total),filtered_quantity:Number(totals.quantity),
-    filtered_value:roundMoneyMysql(totals.value),summary,snapshot_at:new Date().toISOString(),
+    filtered_value:roundMoneyMysql(totals.value),summary:summary.summary,snapshot_at:summary.snapshot_at,
     rows:rows.map(row=>({...row,product_id:Number(row.product_id)||null,row_id:Number(row.row_id),
       quantity:Number(row.quantity),unit_cost:row.unit_cost==null?null:Number(row.unit_cost),inventory_value:Number(row.inventory_value),
       cost_missing:Boolean(Number(row.cost_missing)),unclassified_movements:Number(row.unclassified_movements)}))};

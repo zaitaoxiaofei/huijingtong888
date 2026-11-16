@@ -251,6 +251,31 @@ test('monthly billing reads only the current enterprise, including every financi
       assert.equal(detail.rows[0].physical_quantity,-5);
       await q("DELETE FROM inventory_movements WHERE source_type='capital-unknown'");await q("DELETE FROM products WHERE id=25");
     });
+    await t.test('capital list filters and pages share a scoped snapshot; writes and manual refresh invalidate it',async()=>{
+      const {getMysqlPoolMetrics}=await import('../src/mysql-pool.js');
+      const {invalidateInventoryWorkflow}=await import('../src/services/inventory-workflow-cache.js');
+      const {invalidateMasterDataCachePrefix}=await import('../src/services/mysql-master-data-cache.js');
+      invalidateMasterDataCachePrefix('inventory-capital:list:');
+      let before=getMysqlPoolMetrics().acquisitions;
+      const cold=await financeInventoryCapitalDetailsMysql({kind:'local',reuse_snapshot:'1'},'2');
+      const coldReads=getMysqlPoolMetrics().acquisitions-before;
+      before=getMysqlPoolMetrics().acquisitions;
+      const warm=await financeInventoryCapitalDetailsMysql({kind:'local',reuse_snapshot:'1',pageSize:100},'2');
+      const warmReads=getMysqlPoolMetrics().acquisitions-before;
+      assert.deepEqual(warm.summary,cold.summary);assert.equal(warm.snapshot_at,cold.snapshot_at);
+      assert.ok(warmReads<coldReads/2,`cold ${coldReads}, reused ${warmReads}`);
+      for(const review of ['cost','availability','purchase']){
+        const filtered=await financeInventoryCapitalDetailsMysql({kind:'local',reuse_snapshot:'1',review},'2');
+        assert.equal(filtered.snapshot_at,cold.snapshot_at);
+      }
+      const foreign=await financeInventoryCapitalDetailsMysql({kind:'local',reuse_snapshot:'1'},'3');assert.ok(foreign.rows.every(r=>r.product_id===30));
+      await q('UPDATE products SET purchase_cost=3 WHERE id=20');invalidateInventoryWorkflow({tenantId:2,productIds:[20]});
+      const changed=await financeInventoryCapitalDetailsMysql({kind:'local',reuse_snapshot:'1'},'2');assert.equal(changed.rows.find(r=>r.product_id===20).unit_cost,3);
+      await q('UPDATE products SET purchase_cost=4 WHERE id=20');
+      const forced=await financeInventoryCapitalDetailsMysql({kind:'local',reuse_snapshot:'1',refresh:'1'},'2');assert.equal(forced.rows.find(r=>r.product_id===20).unit_cost,4);
+      await q('UPDATE products SET purchase_cost=2 WHERE id=20');invalidateInventoryWorkflow();
+      t.diagnostic(`capital SQL acquisitions: cold=${coldReads}, reused filters/pages=${warmReads}`);
+    });
     await t.test('annual grouping matches each month including Beijing boundaries, ads and company expenses',async()=>{
       await q("INSERT INTO finance_shop_company_assignments(tenant_id,shop_id,company_id,effective_from) VALUES(2,20,2,'2026-01-01')");
       for(const [id,date] of [[201,'2026-08-31 15:59:59'],[202,'2026-08-31 16:00:00'],[203,'2026-09-30 16:00:00']]){

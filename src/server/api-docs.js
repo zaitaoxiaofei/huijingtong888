@@ -1348,6 +1348,10 @@ const endpoints = [
     })
   ]),
   section("SKU Daily Traffic", [
+    endpoint("POST", "/api/db/seller-analytics/sku-daily/watch/batch", "Atomically add or remove shared labels for up to 500 distinct owned shop/SKUs. Duplicates are processed once. Existing unrelated labels and all notes are preserved. Unknown SKUs, foreign shops or a resulting total above 12 labels reject the whole batch. Does not change traffic facts.", {
+      requestBody: body(objectOf("Bulk SKU labels", [field("items", scalar("array", "Selected objects containing shop_id and sku; 1–2000 entries, at most 500 distinct pairs")),field("mode", scalar("string", "add or remove; replacement is not supported")),field("tags", scalar("array", "1–12 labels, each up to 80 characters; 重点关注 controls the attention flag"))])),
+      responses: [response(200, "application/json", scalar("object", "selected_count and updated_count in data")),response(400, "application/json", ref("ErrorResponse")),response(404, "application/json", ref("ErrorResponse")),response(409, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("POST", "/api/db/seller-analytics/sku-daily/watch", "Save enterprise-shared attention, one tag and a note by owned shop/SKU. Does not change daily traffic facts or their retention.", {
       requestBody: body(objectOf("SKU attention", [field("shop_id", scalar("number", "One owned shop ID")), field("sku", scalar("string", "Existing shop SKU")), field("focused", scalar("boolean", "Attention flag")), field("tag", scalar("string", "Up to 80 characters")), field("note", scalar("string", "Up to 512 characters"))])),
       responses: [response(200, "application/json", scalar("object", "Saved attention")), response(400, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
