@@ -1,5 +1,6 @@
+import {trafficCategoryPartitions,trafficPartitionFilters,reconcileDailyTotals} from '../shared/sku-traffic-partitions.js';
 import {skuTrafficDaily} from './sku-traffic-daily.js';
-import {dailyTrafficCoverage, SKU_TRAFFIC_METRICS, COLLECT_REQUEST_STALE_MS} from '../shared/sku-traffic-daily.js';
+import {dailyTrafficCoverage, normalizeDailyTrafficMetric, SKU_TRAFFIC_METRICS, COLLECT_REQUEST_STALE_MS} from '../shared/sku-traffic-daily.js';
 import crypto from "node:crypto";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import {
@@ -2214,6 +2215,16 @@ function responseItemCount(value) {
   return getResponseItems(value).length
 }
 
+function splitDailyPartition(run,request,parentId=request.id){
+  const find=(nodes,key)=>{for(const n of nodes){if(`${n.level}:${n.id}`===key)return n;const found=find(n.children,key);if(found)return found;}return null;};
+  const children=request.partition_key?find(run.daily_category_tree,request.partition_key)?.children:run.daily_category_tree;
+  if(!children?.length)return false;
+  for(const page of run.requests.filter(r=>r.endpoint_type==='by_sku'&&r.partition_key===request.partition_key))page.partition_replaced=true;
+  run.daily_partition_leaves=(run.daily_partition_leaves||[]).filter(k=>k!==request.partition_key);
+  for(const child of children){const key=`${child.level}:${child.id}`;run.daily_partition_leaves.push(key);run.requests.push({id:newId('sar'),source_key:'all_metrics',source_label:'日监控类目分批',endpoint_type:'by_sku',parent_request_id:parentId,partition_key:key,page_index:0,auto_all_pages:true,max_pages:500,limit:50,request_url:request.request_url,request_method:'POST',request_headers:{...request.request_headers},request_body:{...buildCollectRequestBody('all_metrics','by_sku',run,0,50),filters:trafficPartitionFilters(child)},status:'pending',attempts:0});}
+  run.request_count=run.requests.length;return true;
+}
+
 function appendNextAutoPageRequest(run, request, payload) {
   if (!request.auto_all_pages || request.endpoint_type !== 'by_sku') return false
   const pageIndex = parsePageIndex(request.page_index) || 0
@@ -2227,6 +2238,12 @@ function appendNextAutoPageRequest(run, request, payload) {
   const nextPageIndex = pageIndex + 1
   const nextOffset = nextPageIndex * limit
   if (nextOffset >= SELLER_ANALYTICS_MAX_OFFSET) {
+    if(run.daily_traffic&&run.category_partitioning){
+      if(!run.daily_category_tree){
+        if(!run.requests.some(r=>r.endpoint_type==='category_tree'))run.requests.push({id:newId('sar'),source_key:'all_metrics',source_label:'日监控类目分批计划',parent_request_id:request.id,endpoint_type:'category_tree',request_url:'https://seller.ozon.ru/api/site/seller-analytics/charts/seller-category-tree',request_method:'POST',request_headers:{...request.request_headers},request_body:{},status:'pending',attempts:0});
+        run.request_count=run.requests.length;
+      }else if(splitDailyPartition(run,request))return true;
+    }
     request.auto_stop_code = 'source_offset_cap'
     request.auto_stop_reason = `已达到 Ozon 分析接口最大偏移量 ${SELLER_ANALYTICS_MAX_OFFSET}`
     return false
@@ -2238,7 +2255,7 @@ function appendNextAutoPageRequest(run, request, payload) {
   const alreadyQueued = (run.requests || []).some((item) =>
     item.source_key === request.source_key &&
     item.endpoint_type === 'by_sku' &&
-    parsePageIndex(item.page_index) === nextPageIndex
+    parsePageIndex(item.page_index) === nextPageIndex && item.partition_key===request.partition_key
   )
   if (alreadyQueued) return false
   run.requests.push({
@@ -2254,7 +2271,8 @@ function appendNextAutoPageRequest(run, request, payload) {
     request_url: request.request_url,
     request_method: request.request_method || 'POST',
     request_headers: { ...(request.request_headers || {}) },
-    request_body: buildCollectRequestBody(request.source_key, 'by_sku', run, nextPageIndex, limit),
+    request_body: {...buildCollectRequestBody(request.source_key, 'by_sku', run, nextPageIndex, limit),filters:request.request_body.filters},
+    ...(request.partition_key?{partition_key:request.partition_key}:{}),
     status: 'pending',
     attempts: 0
   })
@@ -2274,7 +2292,7 @@ async function createCollectRun(db, payload = {}, tenantId = 'admin') {
       throw error
     }
     const activeRuns = await listCollectRuns(db, { limit: 100 }, tenantId)
-    const matchingRun = activeRuns.find((run) => Boolean(run.daily_traffic) === Boolean(payload.daily_traffic) && collectRunMatchesRequest(run, period, requests, storeId))
+    const matchingRun = activeRuns.find((run) => Boolean(run.daily_traffic) === Boolean(payload.daily_traffic) && Boolean(run.category_partitioning) === Boolean(payload.category_partitioning) && collectRunMatchesRequest(run, period, requests, storeId))
     if (matchingRun) return { ...matchingRun, reused: true }
     const now = new Date().toISOString()
     const run = {
@@ -2284,6 +2302,7 @@ async function createCollectRun(db, payload = {}, tenantId = 'admin') {
       status: 'pending',
       period_key: period.periodKey,
       daily_traffic: payload.daily_traffic === true,
+      category_partitioning: payload.category_partitioning === true,
       current_period: period.current_period,
       previous_period: period.previous_period,
       request_count: requests.length,
@@ -2654,6 +2673,12 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
         payload={...payload,success:false,error:'插件实际请求日期与每日任务不一致，未发布日数据，请重新补采'}
       }
     }
+    if(run.daily_traffic&&payload.success!==false){
+      try{
+        if(request.endpoint_type==='category_tree')trafficCategoryPartitions(parseJson(payload.response_body||payload.responseBody||payload.data,{}));
+        if(request.partition_key){const actual=parseJson(payload.request_body||payload.requestBody,{})?.filters;for(const key of ['desc_type_ids','category_3_ids','category_2_ids'])if(JSON.stringify((actual?.[key]||[]).map(String).sort())!==JSON.stringify((request.request_body.filters?.[key]||[]).map(String).sort()))throw Error('采集实际类目分区与任务不一致，请重新补采');}
+      }catch(e){payload={...payload,success:false,error:e.message};}
+    }
     const success = payload.success !== false
     let snapshotResult = null
     if (success) {
@@ -2708,6 +2733,11 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
       request.returned_count = responseItemCount(payload.response_body || payload.responseBody || payload.data)
       const responsePage=parseJson(payload.response_body || payload.responseBody || payload.data,{})
       request.reported_has_more=responsePage.has_more === true || responsePage.result?.has_more === true
+      if(run.daily_traffic&&request.endpoint_type==='category_tree'){
+        run.daily_category_tree=trafficCategoryPartitions(parseJson(payload.response_body||payload.responseBody||payload.data,{}));
+        const capped=run.requests.find(r=>r.endpoint_type==='by_sku'&&r.auto_stop_code==='source_offset_cap'&&!r.partition_replaced);
+        if(!capped||!splitDailyPartition(run,capped,request.id))throw new Error('类目分区计划无法建立');
+      }
       appendNextAutoPageRequest(run, request, payload)
       if (!run.daily_traffic) appendAbcAnalysisRequest(run, request, payload)
     } else {
@@ -4864,6 +4894,11 @@ export async function publishSkuTrafficDailyRun(run, tenantId = 'admin') {
         if (!normalized) throw new Error('临时页包含无法识别的SKU记录，请检查接口字段')
         rows.push(normalized)
       }
+    }
+    if(run.daily_partition_leaves&&coverage.complete){
+      const totalsRequest=run.requests.find(r=>r.source_key==='all_metrics'&&r.endpoint_type==='totals'&&r.status==='success');
+      const [snapshot]=totalsRequest?await mysqlQuery('SELECT response_body FROM seller_analytics_snapshots WHERE tenant_id=? AND id=?',[tenantId,totalsRequest.snapshot_id]):[];
+      reconcileDailyTotals(rows.map(normalizeDailyTrafficMetric),parseJson(snapshot?.response_body,{}));
     }
     return await skuTrafficDaily.publish(run,tenantId,rows)
   } catch (e) {

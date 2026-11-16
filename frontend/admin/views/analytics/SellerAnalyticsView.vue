@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Refresh, Search, VideoPlay } from "@element-plus/icons-vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -9,6 +9,7 @@ import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import { useAuthStore } from "../../stores/auth";
 import {
+  collectSkuTrafficDaily, getSkuTrafficDaily,
   cancelSellerAnalyticsCollectRun,
   createSellerAnalyticsCollectRun,
   confirmSellerAnalyticsBrowserProfile,
@@ -31,7 +32,27 @@ import { createCollectionRefreshGate } from "../../utils/seller-analytics-progre
 import { isSellerAnalyticsStoreMismatch, isSellerAnalyticsValidationReady, waitForSellerAnalyticsPreparation } from "../../utils/seller-analytics-recognition";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 
-const route = useRoute();
+import {dailyCollectionContext,monitorReturnQuery,supportsTrafficPartitions} from '../../utils/sku-traffic-navigation';
+const route = useRoute(), router=useRouter();
+const dailyContext=computed(()=>dailyCollectionContext(route.query));
+const dailyCoverage=ref(null),dailyError=ref(''),dailyBusy=ref(false),dailyPartitionCapable=ref(false);
+let dailyTimer;
+function startDailyPolling(){window.clearInterval(dailyTimer);dailyTimer=window.setInterval(()=>{if(dailyContext.value)void refreshDailyCoverage();},5000);}
+async function refreshDailyCoverage(){
+ const ctx=dailyContext.value;if(!ctx)return;
+ try{const data=await getSkuTrafficDaily({shop_id:ctx.shopId,metadata_only:1,include_progress:1});dailyCoverage.value=data.coverage?.find(c=>c.date_key===ctx.date)||null;dailyError.value='';}catch(e){dailyError.value=e.message;}
+}
+async function collectMonitorDay(){
+ const ctx=dailyContext.value;if(!ctx||dailyBusy.value)return;
+ if(String(state.filters.shopId)!==ctx.shopId){ElMessage.warning('请恢复补采目标店铺后再采集');return;}
+ const storeId=selectedStoreId.value;
+ if(!(await ensureCollectReady())||String(state.filters.shopId)!==ctx.shopId||selectedStoreId.value!==storeId)return;
+ dailyBusy.value=true;
+ try{await collectSkuTrafficDaily({shop_id:ctx.shopId,date:ctx.date,category_partitioning:dailyPartitionCapable.value,browser_instance_id:pluginInstanceId.value});ElMessage.success('已提交单日采集，等待插件；请以日数据入库状态为准');await loadRunsMeta(true);await refreshDailyCoverage();}catch(e){ElMessage.error(e.message||'日数据采集失败');}finally{dailyBusy.value=false;}
+}
+function returnToMonitor(){router.push({name:'sku-traffic-monitor',query:monitorReturnQuery(route.query)});}
+watch(()=>route.query,()=>{if(route.name==='seller-analytics'){applyRouteFilters();activeShopId.value=state.filters.shopId;void refreshDailyCoverage();void refreshData();}});
+
 const DEFAULT_ANALYTICS_PAGE_SIZE = 30;
 const ANALYTICS_PAGE_SIZE_OPTIONS = [20, 30, 50, 100];
 const FILTER_CACHE_KEY_PREFIX = "ozon-erp:seller-analytics:filters";
@@ -833,6 +854,7 @@ function applyRouteFilters() {
   if (shopId && shops.value.some((shop) => String(shop.id) === shopId)) state.filters.shopId = shopId;
   if (keyword) state.filters.keyword = keyword;
   if (periodKey && periods.some((item) => item.value === periodKey)) state.filters.periodKey = periodKey;
+  if(dailyContext.value){state.filters.periodKey='custom';state.filters.dateRange=[dailyContext.value.date,dailyContext.value.date];state.filters.keyword='';state.filters.tabKey='all_metrics';}
   if (shopId || keyword || periodKey) state.page = 1;
 }
 
@@ -1059,21 +1081,6 @@ async function handleShopChange(nextShopId) {
   if (String(nextShopId) === previousShopId) return;
   switchingShop.value = true;
   try {
-    const previousShop = shops.value.find((shop) => String(shop.id) === previousShopId);
-    const previousStoreId = previousShop ? getShopSellerStoreId(previousShop) || previousShopId : "";
-    if (previousStoreId) {
-      const previousRuns = await getSellerAnalyticsCollectRuns({ store_id: previousStoreId, limit: 100, summary: 1 });
-      const activeRuns = (Array.isArray(previousRuns) ? previousRuns : []).filter((run) => ["pending", "running"].includes(run.status));
-      if (activeRuns.length) {
-        await ElMessageBox.confirm(
-          `原店铺还有 ${activeRuns.length} 个采集批次正在运行。取消后剩余请求不会继续执行，已入库数据会保留。确认取消并切换店铺？`,
-          "切换店铺并取消采集",
-          { type: "warning", confirmButtonText: "取消采集并切换", cancelButtonText: "留在原店铺" }
-        );
-        for (const run of activeRuns) await cancelCollectRunAndNotify(run.id);
-        ElMessage.success(`已取消原店铺 ${activeRuns.length} 个采集批次`);
-      }
-    }
     activeShopId.value = String(nextShopId);
     collectRuns.value = [];
     analysis.value = { summary: {}, products: [], focusProducts: [], recommendations: [], totalsRow: null, totalsBySource: {} };
@@ -1452,6 +1459,7 @@ async function recognizeCurrentShop() {
 }
 
 async function handleCollect(page = nextCollectPage.value) {
+  if(dailyContext.value)return collectMonitorDay();
   if (state.filters.keyword.trim()) {
     ElMessage.info("关键词搜索只查询已保存数据，不创建插件采集批次");
     return refreshData();
@@ -1477,6 +1485,7 @@ async function collectNextPage() {
 }
 
 async function collectFullStore() {
+  if(dailyContext.value)return collectMonitorDay();
   if (state.filters.keyword.trim()) {
     ElMessage.info("关键词搜索只查询已保存数据，不创建插件采集批次");
     return refreshData();
@@ -1498,6 +1507,7 @@ async function collectFullStore() {
 }
 
 async function collectDailyDefaultPeriods() {
+  if(dailyContext.value)return collectMonitorDay();
   if (state.filters.keyword.trim()) {
     ElMessage.info("关键词搜索只查询已保存数据，不创建插件采集批次");
     return refreshData();
@@ -1979,6 +1989,7 @@ function handlePluginInstanceMessage(event) {
   const unified = event.data.capabilities?.collector === true && event.data.capabilities?.sellerAnalytics === true;
   if (pluginInstanceUnified && !unified) return;
   if (pluginInstanceId.value && !unified) return;
+  dailyPartitionCapable.value=supportsTrafficPartitions(event.data.pluginVersion,unified);
   if (nextId === pluginInstanceId.value && unified === pluginInstanceUnified) return;
   pluginInstanceEpoch += 1;
   for (const cancel of [...pendingPluginStoreChecks]) cancel();
@@ -2013,6 +2024,7 @@ onMounted(async () => {
   else if (!state.filters.dateRange?.length) state.filters.dateRange = getAnalyticsPeriodDateRange("7d");
   await loadShops();
   applyRouteFilters();
+  await refreshDailyCoverage();startDailyPolling();
   activeShopId.value = state.filters.shopId;
   await refreshData();
   await loadRunsMeta(true).catch(() => {});
@@ -2021,6 +2033,7 @@ onMounted(async () => {
   startPluginPolling();
 });
 onBeforeUnmount(() => {
+  window.clearInterval(dailyTimer);
   pluginInstanceEpoch += 1;
   for (const cancel of [...pendingPluginStoreChecks]) cancel();
   window.removeEventListener("message", handlePluginInstanceMessage);
@@ -2029,11 +2042,13 @@ onBeforeUnmount(() => {
 });
 
 onActivated(() => {
+  applyRouteFilters();void refreshDailyCoverage();startDailyPolling();
   startPolling();
   startPluginPolling();
 });
 
 onDeactivated(() => {
+  window.clearInterval(dailyTimer);
   stopPolling();
   stopPluginPolling();
 });
@@ -2041,18 +2056,20 @@ onDeactivated(() => {
 
 <template>
   <div class="seller-analytics-page">
+    <section v-if="dailyContext" class="monitor-collection-banner"><div><strong>SKU流量监控 · 单日补采</strong><p>目标店铺：{{shops.find(s=>String(s.id)===dailyContext.shopId)?.name||dailyContext.shopId}} · 报表日期：{{dailyContext.date}} · 仅保存8项核心日指标</p><p>状态：{{dailyError||({complete:'已完整入库',partial:'部分采集，尚未覆盖全店',pending:'等待或正在采集',failed:'采集失败'}[dailyCoverage?.status]||'尚未采集')}}<template v-if="dailyCoverage?.product_count!=null&&['complete','partial'].includes(dailyCoverage.status)"> · {{dailyCoverage.product_count}} SKU</template></p><p v-if="!dailyPartitionCapable">当前插件可使用常规分页；触及接口上限时显示部分采集。支持类目分批的插件连接后会自动启用分批采集。</p><p v-if="dailyCoverage?.progress">请求进度 {{dailyCoverage.progress.completed_requests}} / {{dailyCoverage.progress.total_requests}} · 失败 {{dailyCoverage.progress.failed_requests}}</p><p v-if="dailyCoverage?.message">{{dailyCoverage.message}}</p></div><div><el-button type="primary" :loading="dailyBusy" :disabled="dailyCoverage?.status==='pending'" @click="collectMonitorDay">采集该日全店SKU</el-button><el-button @click="refreshDailyCoverage">刷新状态</el-button><el-button @click="returnToMonitor">返回SKU流量监控</el-button></div></section>
     <div class="seller-sticky-head">
       <ErpPageHeader compact title="数据分析" description="店铺经营指标、商品表现与运营行动建议。">
         <template #actions>
-          <ErpFilterBar class="seller-toolbar">
+          <ErpFilterBar v-if="!dailyContext" class="seller-toolbar">
         <div class="seller-toolbar__filters">
-          <el-select v-model="state.filters.shopId" class="seller-filter seller-filter--shop" placeholder="店铺" :disabled="switchingShop" @change="handleShopChange">
+          <el-select v-model="state.filters.shopId" class="seller-filter seller-filter--shop" placeholder="店铺" :disabled="switchingShop||!!dailyContext" @change="handleShopChange">
             <el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
           </el-select>
-          <el-select v-model="state.filters.periodKey" class="seller-filter" @change="handlePeriodChange">
+          <el-select v-model="state.filters.periodKey" class="seller-filter" :disabled="!!dailyContext" @change="handlePeriodChange">
             <el-option v-for="item in periods" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
           <el-date-picker
+            :disabled="!!dailyContext"
             v-model="state.filters.dateRange"
             type="daterange"
             value-format="YYYY-MM-DD"
@@ -2118,10 +2135,10 @@ onDeactivated(() => {
             <strong>{{ directSyncStatus.title }}</strong>
             <em>{{ directSyncStatus.detail }}</em>
           </div>
-          <div><span>数据来源</span><strong>ERP 本地快照</strong><em>刷新不请求 Ozon</em></div>
-          <div><span>最新入库</span><strong>{{ latestText || "暂无数据" }}</strong><em>北京时间</em></div>
-          <div><span>数据区间</span><strong>{{ runPeriodText(latestCurrentPeriodRun) }}</strong><em>{{ periodHint }}</em></div>
-          <div><span>接口进度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
+          <div v-if="!dailyContext"><span>数据来源</span><strong>ERP 本地快照</strong><em>刷新不请求 Ozon</em></div>
+          <div v-if="!dailyContext"><span>最新入库</span><strong>{{ latestText || "暂无数据" }}</strong><em>北京时间</em></div>
+          <div v-if="!dailyContext"><span>数据区间</span><strong>{{ runPeriodText(latestCurrentPeriodRun) }}</strong><em>{{ periodHint }}</em></div>
+          <div v-if="!dailyContext"><span>接口进度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
         </div>
         <div class="seller-sync-assistant__progress">
           <div class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${prepareFlow.tone}`">
@@ -2130,14 +2147,14 @@ onDeactivated(() => {
             </el-tag>
             <span>{{ prepareFlow.detail }}</span>
           </div>
-          <div class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${collectStatus.tone}`">
+          <div v-if="!dailyContext" class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${collectStatus.tone}`">
             <el-tag :type="collectStatus.tone === 'danger' ? 'danger' : collectStatus.tone === 'success' ? 'success' : collectStatus.tone === 'warning' ? 'warning' : 'info'" effect="light">
               {{ collectStatus.title }}
             </el-tag>
             <span>{{ collectStatus.detail }}</span>
             <strong v-if="runningRun">{{ progressPercent }}%</strong>
           </div>
-          <el-progress v-if="runningRun" :percentage="progressPercent" :show-text="false" :stroke-width="6" class="seller-sync-assistant__progress-bar" />
+          <el-progress v-if="runningRun&&!dailyContext" :percentage="progressPercent" :show-text="false" :stroke-width="6" class="seller-sync-assistant__progress-bar" />
         </div>
         <div class="seller-sync-assistant__actions">
           <el-tag v-if="browserProfileStatus?.configured || showLocalBrowserProfileControls" :type="browserProfileStatus?.configured ? 'success' : 'info'" effect="light">
@@ -2147,12 +2164,12 @@ onDeactivated(() => {
           <el-button v-if="showLocalBrowserProfileControls" size="large" type="primary" plain :loading="browserProfilePreparing" @click="confirmPersistentBrowserLogin">确认长期绑定</el-button>
           <el-button size="large" @click="openOzonAnalyticsPage">打开本机 Ozon 分析页</el-button>
           <el-button size="large" :loading="recognizingPlugin" @click="recognizeCurrentShop">重新识别店铺</el-button>
-          <el-button v-if="runningRun" size="large" type="danger" plain :loading="cancellingRun" @click="cancelCurrentRun">取消当前采集</el-button>
-          <el-button v-if="hasFailedRuns" size="large" type="warning" plain @click="openFailedBatchRetry">失败页批次补采</el-button>
+          <el-button v-if="runningRun&&!dailyContext" size="large" type="danger" plain :loading="cancellingRun" @click="cancelCurrentRun">取消当前采集</el-button>
+          <el-button v-if="hasFailedRuns&&!dailyContext" size="large" type="warning" plain @click="openFailedBatchRetry">失败页批次补采</el-button>
         </div>
       </section>
 
-      <section class="seller-ozon-overview">
+      <section v-if="!dailyContext" class="seller-ozon-overview">
         <div class="seller-ozon-overview__head">
           <div class="seller-ozon-overview__summary">
             <strong>经营概览</strong>
@@ -2169,7 +2186,7 @@ onDeactivated(() => {
       </section>
     </div>
 
-    <div class="seller-workspace-scroll">
+    <div v-if="!dailyContext" class="seller-workspace-scroll">
     <el-tabs v-model="activePane" class="seller-tabs seller-tabs--workbench">
       <el-tab-pane label="商品诊断" name="diagnosis" lazy>
         <el-table v-loading="loading" :data="tableProducts" :row-key="rowKey" :row-class-name="tableRowClassName" height="100%" class="seller-product-table seller-product-table--compact" @sort-change="handleSortChange">
@@ -2374,6 +2391,7 @@ onDeactivated(() => {
     </div>
 
     <PageFooterPagination
+      v-if="!dailyContext"
       class="seller-global-footer"
       compact
       :total="totalProductCount"
@@ -2562,6 +2580,8 @@ onDeactivated(() => {
 </template>
 
 <style scoped>
+.monitor-collection-banner{display:flex;align-items:center;justify-content:space-between;gap:20px;background:var(--erp-surface);border:1px solid var(--el-color-primary-light-7);border-left:4px solid var(--el-color-primary);padding:14px 18px;border-radius:8px;margin-bottom:12px}.monitor-collection-banner p{font-size:12px;color:var(--erp-text-secondary);margin:6px 0}.monitor-collection-banner>div+div{display:flex;flex-wrap:wrap;gap:8px}
+
 .seller-analytics-page { display: flex; flex-direction: column; gap: 8px; height: calc(100dvh - 96px); min-height: 0; overflow: hidden; }
 .seller-sticky-head { position: sticky; top: 0; z-index: 20; display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; padding-bottom: 2px; background: var(--el-bg-color); }
 .seller-sticky-head :deep(.erp-page-header) { align-items: flex-start; }

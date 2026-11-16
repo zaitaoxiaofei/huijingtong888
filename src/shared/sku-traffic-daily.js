@@ -1,3 +1,4 @@
+import {dailyPartitionCoverage} from './sku-traffic-partitions.js';
 export const COLLECT_REQUEST_STALE_MS = 120000;
 export const SKU_TRAFFIC_RETENTION_DAYS = 30;
 export const SKU_TRAFFIC_METRICS = [
@@ -26,6 +27,7 @@ export function dailyTrafficCoverage(run, {allowPartial = false} = {}) {
   const day = trafficDate(run?.current_period?.date_from);
   if (!day || day !== run?.current_period?.date_to) return {ok: false, error: '只接受单个报表日，七天汇总不能拆成每日数据'};
   if (run.status !== 'success') return {ok: false, error: '采集任务尚未完整成功'};
+  if(run.daily_partition_leaves){const coverage=dailyPartitionCoverage(run);return {...coverage,day};}
   const pages = (run.requests || []).filter(r => r.source_key === 'all_metrics' && r.endpoint_type === 'by_sku').sort((a,b) => a.page_index - b.page_index);
   if (!pages.length) return {ok: false, error: '缺少 SKU 明细页'};
   for (const [index, page] of pages.entries()) {

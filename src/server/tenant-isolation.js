@@ -40,6 +40,7 @@ const TENANT_PLUGIN_TOKEN_ROUTES = new Set([
 const TENANT_SELLER_ANALYTICS_ROUTES = new Set([
   "GET db/seller-analytics/sku-daily",
   "POST db/seller-analytics/sku-daily/collect",
+  "POST db/seller-analytics/sku-daily/watch",
   "GET db/seller-analytics/summary",
   "GET db/seller-analytics/metrics",
   "GET db/seller-analytics/analysis",

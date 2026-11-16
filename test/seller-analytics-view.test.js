@@ -217,7 +217,7 @@ test("seller analytics workbench keeps filters tabs and table headers fixed", ()
 
   assert.match(source, /class="seller-sticky-head"/);
   assert.match(source, /\.seller-sticky-head \{[^}]*position: sticky/);
-  assert.match(source, /<ErpFilterBar class="seller-toolbar">[\s\S]*class="seller-toolbar__filters"[\s\S]*class="seller-toolbar__query"[\s\S]*class="seller-filter seller-filter--source"[\s\S]*class="seller-toolbar__divider"[\s\S]*class="seller-toolbar__collect"/);
+  assert.match(source, /<ErpFilterBar[^>]*class="seller-toolbar"[^>]*>[\s\S]*class="seller-toolbar__filters"[\s\S]*class="seller-toolbar__query"[\s\S]*class="seller-filter seller-filter--source"[\s\S]*class="seller-toolbar__divider"[\s\S]*class="seller-toolbar__collect"/);
   assert.match(source, /<ErpPageHeader compact title="数据分析"/);
   assert.match(source, /\.seller-analytics-page \{[^}]*overflow: hidden/);
   assert.match(source, /\.seller-workspace-scroll \{[^}]*overflow: hidden/);

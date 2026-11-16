@@ -1011,6 +1011,7 @@ export const mysqlRuntimeServices = {
   reviewReplyTemplates: reviewReplyTemplatesMysql,
   skuTrafficDailyRead: (body = {},tenantId) => skuTrafficDaily.read(body,tenantId),
   skuTrafficDailyQueue: queueSkuTrafficDaily,
+  skuTrafficDailySaveWatch: (body = {},tenantId) => skuTrafficDaily.saveWatch(body,tenantId),
   skuTrafficDailySchedule: queueAllSkuTrafficDaily,
   sellerAnalyticsAnalysis: (query = {}, tenantId = "admin") => getAnalysis(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCollectRuns: (query = {}, tenantId = "admin") => listCollectRuns(sellerAnalyticsDb, query, tenantId),
