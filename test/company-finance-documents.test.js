@@ -18,6 +18,7 @@ function database(){
   if(sql.includes('FROM finance_expenses'))return [];
   if(sql.includes('FROM finance_companies'))return p[0]===p[1]?[{id:p[0],name:`Company ${p[0]}`,tax_number:''}]:[];
   if(sql.includes('FROM finance_shop_company_assignments'))return p[0]===p[1]?[{id:p[0]*10,name:'Example Z'}]:[];
+  if(sql.includes('FROM finance_reconciliation_adjustments'))return [];
   if(sql.includes('FROM finance_periods'))return closed.has(`${p[0]}:${p[1]}`)?[{id:1}]:[];
   if(sql.includes('FROM finance_import_documents')){
    assert.match(sql,/tenant_id=\?/);assert.match(sql,/company_id=\?/);

@@ -2557,6 +2557,39 @@ Return ranking rows for the selected profit dimension. inventory=1 groups bound 
 - Responses:
   - `200` `application/json` -> `array<object>`
 
+#### `GET /api/finance-center/document-reconciliation`
+
+Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Query parameters:
+  - `company_id` (`integer`, required): Owned company ID.
+  - `shop_id` (`integer`, required): Shop assigned to the company in the selected month.
+  - `month` (`string`, required): Business month YYYY-MM.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/finance-center/document-calibration`
+
+Preview or explicitly confirm adjustments to the company reconciliation ledger. Never rewrites frozen order profit. Confirmation rechecks evidence, baseline, month closing and optimistic tokens atomically; duplicate submissions reuse history.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/finance-center/order-sales-source`
+
+Read an owned authorized Ozon shop's official monthly order realization report without changing Ozon or ERP amounts. Rechecks membership, assignment, credentials and matching company tax number. The returned CNY original can then be uploaded and separately confirmed.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/monthly-billing-details`
 
 Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.

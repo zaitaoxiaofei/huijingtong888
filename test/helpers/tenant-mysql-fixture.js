@@ -49,6 +49,7 @@ export async function createTenantMysqlFixture(prefix = 'inventory') {
     }
     constants.TENANT_LOGIN_DELIVERY_SCHEMA = await staticSchema('tenant-login-delivery.js', 'TENANT_LOGIN_DELIVERY_SCHEMA');
     constants.TEAM_TASKS_SCHEMA = await staticSchema('team-task-schema.js', 'TEAM_TASKS_SCHEMA');
+    constants.FINANCE_CALIBRATION_SCHEMA = await staticSchema('finance-reconciliation-schema.js', 'FINANCE_CALIBRATION_SCHEMA');
     constants.OZON_RETURN_SCHEMA = await staticSchema('ozon-return-schema.js', 'OZON_RETURN_SCHEMA');
     constants.ORDER_HEATMAP_TENANT_SCHEMA = await staticSchema('order-heatmap-tenant-schema.js', 'ORDER_HEATMAP_TENANT_SCHEMA');
     constants.MATERIAL_ASSETS_SCHEMA = await staticSchema('material-assets-schema.js', 'MATERIAL_ASSETS_SCHEMA');

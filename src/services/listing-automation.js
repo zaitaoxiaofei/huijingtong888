@@ -3680,7 +3680,7 @@ export async function uploadTeamAttachment(req, { purpose = "team" } = {}) {
   const originalName = purpose === "finance" ? financeOriginalName(file.filename) : null;
   const safeName = sanitizeListingMediaFilename(file.filename || "attachment");
   const extension = path.extname(safeName).toLowerCase();
-  const expectedContentType = TEAM_ATTACHMENT_TYPES.get(extension);
+  const expectedContentType = purpose === "finance" && extension === ".json" ? "application/json" : TEAM_ATTACHMENT_TYPES.get(extension);
   if (!expectedContentType) {
     const error = new Error("附件仅支持图片、Excel、Word、PDF、CSV、TXT、PPT 或 ZIP");
     error.status = 415;

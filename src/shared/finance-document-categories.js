@@ -31,6 +31,7 @@ const metricCategory=metric=>{
 export function financeDocumentCategories(doc){
  const p=typeof doc.payload_json==='string'?JSON.parse(doc.payload_json):doc.payload_json||{};
  const ids=new Set((p.facts||[]).map(l=>metricCategory(l.metric)));
+ if(p.kind==='order-sales')ids.add('sales');
  if(['balance','currency-settlement','platform-payments','collection-cash'].includes(p.kind))ids.add('cash');
  if(p.kind==='foreign-invoice'||p.kind==='star-service')ids.add('advertising');
  if(p.kind==='payroll'||p.upload_type==='payroll')ids.add('payroll');
