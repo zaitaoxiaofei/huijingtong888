@@ -17,3 +17,16 @@ test('trend hover and keyboard select the exact calendar day; missing dates brea
  props.tooltipMetrics=[{key:'ordered_units',label:'下单件数',unit:''},{key:'pdp_order_rate',label:'浏览下单率',unit:'%'}];assert.equal(api.tooltipLines.value.length,2);assert.equal(api.number(2,api.tooltipLines.value[0].unit),'2');assert.equal(api.number(10,api.tooltipLines.value[1].unit),'10%');
  props.compact=true;assert.equal(api.segments('total_views')[0][0].y,108);
 });
+
+test('readable list chart adapts coordinates to its actual size and keeps exact hover days',()=>{
+ const props={readable:true,compact:true,unit:'',metrics:[['total_views','曝光']],series:[{date_key:'2026-11-14',available:true,total_views:0},{date_key:'2026-11-15',available:true,total_views:20}]};
+ let mount,unmount,resize,disconnected=false;
+ const context=vm.createContext({defineProps:()=>props,ref:value=>({value}),computed:fn=>({get value(){return fn();}}),onMounted:fn=>mount=fn,onBeforeUnmount:fn=>unmount=fn,ResizeObserver:class{constructor(fn){resize=fn;}observe(){}disconnect(){disconnected=true;}}});
+ vm.runInContext(script+';this.api={svg,canvasWidth,canvasHeight,x,bottom,move,selected};',context);
+ const api=context.api;let width=520;
+ api.svg.value={getBoundingClientRect:()=>({left:100,top:20,width,height:96})};mount();
+ assert.equal(api.canvasWidth.value,520);assert.equal(api.canvasHeight.value,96);assert.equal(api.bottom.value,72);assert.equal(api.x(1),500);
+ api.move({clientX:600,clientY:30});assert.equal(api.selected.value.date_key,'2026-11-15');
+ width=340;resize();assert.equal(api.x(1),320);api.move({clientX:146,clientY:30});assert.equal(api.selected.value.date_key,'2026-11-14');
+ unmount();assert.equal(disconnected,true);
+});
