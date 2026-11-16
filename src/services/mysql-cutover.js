@@ -28047,7 +28047,7 @@ function sumMonthlyBillingRowsMysql(rows = []) {
     total.manual_expense += Number(row.manual_expense || 0);
     total.salary_expense += Number(row.salary_expense || 0);
     total.net_profit += Number(row.net_profit || 0);
-    for(const key of ['aftersale_fee','legacy_withdrawal_removed','reconciliation_pending_count','income_pending_count'])total[key]=Number(total[key]||0)+Number(row[key]||0);
+    for(const key of ['aftersale_fee','legacy_withdrawal_removed','reconciliation_pending_count','income_pending_count','compensation_income','disposed_revenue_removed','disposed_return_count'])total[key]=Number(total[key]||0)+Number(row[key]||0);
   }
   total.accrued_profit = rows.reduce((sum, row) => sum + Number(row.accrued_profit ?? 0), 0);
   total.accrued_order_count = rows.reduce((sum, row) => sum + Number(row.accrued_order_count || 0), 0);
@@ -28395,7 +28395,7 @@ function applyBillingProjectionMysql(rows,projection){
  return rows.map(row=>{
   const additions=[...grouped.values()].filter(x=>Number(x.shop_id)===Number(row.shop_id)&&(!row.month_key||row.month_key===x.month_key));
   const result={...row,billing_projection_version:BILLING_PROJECTION_VERSION};
-  for(const key of [...billingCostKeys,'revenue','legacy_withdrawal_removed','reconciliation_pending_count','income_pending_count'])result[key]=roundMoneyMysql(Number(row[key]||0)+additions.reduce((n,a)=>n+Number(a[key]||0),0));
+  for(const key of [...billingCostKeys,'revenue','legacy_withdrawal_removed','reconciliation_pending_count','income_pending_count','compensation_income','disposed_revenue_removed','disposed_return_count'])result[key]=roundMoneyMysql(Number(row[key]||0)+additions.reduce((n,a)=>n+Number(a[key]||0),0));
   const ads=(projection.advertising||[]).filter(x=>Number(x.shop_id)===Number(row.shop_id)&&(!row.month_key||x.month_key===row.month_key));
   if(ads.length){result.advertising_cost=roundMoneyMysql(ads.reduce((n,a)=>n+Number(a.amount||0),0));result.advertising_cost_source='ozon_ad_sku_daily';}
   return result;

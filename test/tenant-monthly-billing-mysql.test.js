@@ -473,6 +473,22 @@ test('monthly billing reads only the current enterprise, including every financi
       const statement=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;assert.equal(statement.income_pending_count,1);assert.equal(statement.net_profit,null);
       await q('DELETE FROM ozon_return_observations WHERE order_id=920');await q('DELETE FROM order_profit_items WHERE order_item_id IN (920,921)');await q('DELETE FROM order_items WHERE order_id=920');await q('DELETE FROM orders WHERE id=920');await q('DELETE FROM sku_mappings WHERE id=921');await q('DELETE FROM products WHERE id=921');await q('UPDATE sku_mappings SET product_id=30 WHERE id=20');
     });
+    await t.test('disposed returns zero revenue in monthly, annual and inventory views without dropping goods costs',async()=>{
+      const filters={from:'2026-02-01',to:'2026-02-28',companyId:2,includeAppendices:'0'};
+      await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(930,20,'DISPOSED-RETURN','delivered','delivered','2026-02-10')");
+      await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(930,930,20,'same-sku',1,100)");
+      await q("INSERT INTO order_profit_items(order_item_id,sale_amount_cny,purchase_cost_cny,profit_status) VALUES(930,100,20,'estimated')");
+      const before=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;
+      const record={return_id:'9301',posting_number:'DISPOSED-RETURN',state:{state:'Utilizing'},product:{sku:'same-sku'}};
+      await q("INSERT INTO ozon_return_observations(tenant_id,shop_id,order_id,source_endpoint,return_id,posting_number,official_state,state_json,observed_at) VALUES(2,20,930,'/v2/returns/rfbs/list','9301','DISPOSED-RETURN','Utilizing',?,NOW())",[JSON.stringify(record)]);
+      const after=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;
+      assert.equal(after.revenue,before.revenue-100);assert.equal(after.purchase_cost,before.purchase_cost);assert.equal(after.income_pending_count,0);assert.equal(after.disposed_return_count,1);assert.equal(after.disposed_revenue_removed,100);assert.equal(typeof after.net_profit,'number');
+      const annual=(await monthlyBillingDetailsMysql({year:2026,fromMonth:2,toMonth:2,companyId:2,overviewOnly:'1'},'2')).selected.summary;
+      assert.equal(annual.net_profit,after.net_profit);assert.equal(annual.revenue,after.revenue);assert.equal(annual.disposed_return_count,1);
+      const details=await monthlyBillingOrderDetailsMysql({...filters,outcomeType:'returns',groupBy:'order'},'2');const row=details.rows.find(r=>r.order_id===930);assert.equal(row.billing_revenue,0);assert.equal(row.billing_costs.purchase_cost,20);assert.equal(row.disposed_return,true);
+      const unchanged=await q('SELECT sale_amount_cny FROM order_profit_items WHERE order_item_id=930');assert.equal(Number(unchanged[0].sale_amount_cny),100);
+      await q('DELETE FROM ozon_return_observations WHERE order_id=930');await q('DELETE FROM order_profit_items WHERE order_item_id=930');await q('DELETE FROM order_items WHERE order_id=930');await q('DELETE FROM orders WHERE id=930');
+    });
     await t.test('paid pending payroll is recognized once per company and month, including concurrent approval',async()=>{
       const {createFinanceSubmissions}=await import('../src/services/finance-submissions.js');
       const {paidPayrollAccruals}=await import('../src/services/finance-payroll-accruals.js');

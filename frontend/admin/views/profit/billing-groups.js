@@ -22,7 +22,7 @@ export function buildBillingGroups(summary = {}, expenses = []) {
       return { key, label: definition?.label || `历史费用（${key}）`, hint: definition?.hint || "历史录入费用，保留原类别。", amount: (totals.get(key) || 0) / 100, source: "expenses" };
     });
   const groups = [
-    { key: "income", label: "经营收入", hint: "订单销售收入；额外奖励须核实后单列。", children: [metric("revenue", "订单销售收入"), { key: "platform_rewards", label: "平台奖励 / 补贴", amount: null, source: "unavailable", hint: "尚未独立识别，未计入收入；可查看原始账单。" }] },
+    { key: "income", label: "经营收入", hint: "退货销毁的销售收入归零，已确认的平台赔付单列。", children: [{...metric("revenue", "订单销售收入"),amount:Number(summary.revenue||0)-Number(summary.compensation_income||0)}, {key:"compensation_income",label:"平台赔付",amount:Number(summary.compensation_income||0),source:"orders",hint:"官方ItemCompensation净额；单独计入收入，不再冲减退货服务费。"}, { key: "platform_rewards", label: "平台奖励 / 补贴", amount: null, source: "unavailable", hint: "尚未独立识别，未计入收入；可查看原始账单。" }] },
     { key: "goods", label: "商品成本", hint: "本期订单消耗的商品采购成本。", children: [metric("purchase_cost")] },
     { key: "logistics", label: "物流费用", hint: "国内运输、跨境运输及平台配送。", children: [editableCost("domestic_shipping_cost","domestic_shipping"), metric("international_shipping_cost", "跨境及平台配送费"), ...categories("logistics")] },
     { key: "platform", label: "平台费用", hint: "佣金、广告、收单及平台服务费；平台物流列在物流费用中。", children: [metric("commission_fee"), metric("ozon_service_fee"), { ...metric("advertising_cost"), source: "advertising" },editableCost("other_fee","order_payment","Ozon收单费"),{key:"aftersale_fee",label:"退货服务费",amount:Number(summary.aftersale_fee||0),source:"aftersale",hint:"官方退货、逆向物流等净扣款，已扣除冲回；不与损失汇总重复扣。"}] },
