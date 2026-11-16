@@ -28,8 +28,8 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
   await query("INSERT INTO tenants VALUES(1,'default','active','active',NULL),(2,'second','active','active',NULL),(3,'expired','active','expired',NULL)");
   await query("INSERT INTO shops VALUES(11,NULL,'Default shop','active','111111'),(22,2,'Second shop','active','222222'),(33,3,'Expired shop','active','333333')");
   await query("INSERT INTO online_products VALUES(11,'same','Original shared product metadata','https://example.test/image.jpg','offer1'),(22,'same','Other tenant metadata',NULL,'other-offer')");
-  await t.test('migration inspects without writes, creates only two additive tables, and refuses a global SKU key',async()=>{
-   const before=await migrateSkuTrafficDaily(query);assert.equal(before.ready,false);assert.equal(before.missing_tables.length,2);
+  await t.test('migration inspects without writes, creates three additive tables, and refuses a global SKU key',async()=>{
+   const before=await migrateSkuTrafficDaily(query);assert.equal(before.ready,false);assert.equal(before.missing_tables.length,3);
    assert.equal((await migrateSkuTrafficDaily(query,{apply:true})).ready,true);
    assert.equal((await migrateSkuTrafficDaily(query,{apply:true})).ready,true);
    await query('ALTER TABLE seller_sku_traffic_daily DROP PRIMARY KEY,ADD PRIMARY KEY(shop_id,date_key,sku)');
@@ -44,6 +44,8 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
   pipeline(true);
   await t.test('complete controlled queue publishes daily facts and only one temporary page copy',()=>{const result=JSON.parse(pipeline(false).trim().split('\n').at(-1));assert.equal(result.ok,true);assert.equal(result.duplicateMetricRows,0);});
   await t.test('replayed results repair missing child rows without resetting live leases or duplicating pages',()=>{const result=JSON.parse(pipeline(false,'seller-analytics-queue-replay.mjs').trim().split('\n').at(-1));assert.equal(result.ok,true);assert.equal(result.missingChildRepaired,true);});
+  await t.test('two browser workers collect different shops concurrently and reject crossed results',()=>{const result=JSON.parse(pipeline(false,'sku-traffic-concurrency.mjs').trim().split('\n').at(-1));assert.equal(result.ok,true);assert.equal(result.crossShopResultRejected,true);});
+  await t.test('category split children are claimed and only reconciled terminal partition pages publish',()=>{const result=JSON.parse(pipeline(false,'sku-traffic-partition-pipeline.mjs').trim().split('\n').at(-1));assert.equal(result.ok,true);});
   const day=trafficDays().at(-1);
   const makeRun=(id,store='111111',count=1)=>({id,store_id:store,daily_traffic:true,status:'success',current_period:{date_from:day,date_to:day},requests:[{source_key:'all_metrics',endpoint_type:'by_sku',page_index:0,status:'success',auto_all_pages:true,limit:100,returned_count:count,snapshot_id:'evidence'}]});
   const reserve=async(id,key='admin',shop=11)=>execute("INSERT INTO seller_sku_traffic_days(tenant_id,shop_id,date_key,status,run_id,requested_at) VALUES(?,?,?,'pending',?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE status='pending',run_id=VALUES(run_id)",[key,shop,day,id]);
@@ -158,6 +160,25 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    await query("UPDATE seller_analytics_collect_requests SET claimed_at=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 5 MINUTE) WHERE id='proof-2'");const stalled=await service.read({shop_id:11,metadata_only:1},'admin');const stalledDay=stalled.coverage.find(p=>p.date_key===statusDay);assert.equal(stalledDay.progress.active_requests,0);assert.equal(stalledDay.progress.stale_requests,1);
    await query("UPDATE seller_analytics_collect_requests SET status='success' WHERE id='proof-2'");metadata=await service.read({shop_id:11,metadata_only:1},'admin');observed=metadata.coverage.find(p=>p.date_key===statusDay);assert.equal(observed.status,'pending');assert.equal(observed.progress.completed_requests,2);
    assert.equal((await query('SELECT sku FROM seller_sku_traffic_daily WHERE date_key=?',[statusDay])).length,0);
+  });
+  await t.test('multiple shops, persistent attention and inventory groups include missing SKUs without leaking tenants',async()=>{
+   await query("INSERT INTO shops VALUES(44,1,'Owned second shop','active','444444')");
+   await query("INSERT INTO online_products VALUES(44,'watch-missing','Missing SKU',NULL,'offer-missing')");
+   await query("INSERT INTO sku_mappings(id,tenant_id,shop_id,ozon_sku,product_id) VALUES(44,1,44,'watch-missing',123)");
+   const note={shop_id:44,sku:'watch-missing',focused:true,tag:'新品',note:'观察流量'};
+   await service.saveWatch(note,'admin');
+   let result=await service.read({shop_ids:'11,44',view:'focused',tag:'新品',range_days:7},'admin');
+   assert.equal(result.rows.length,1);assert.equal(result.rows[0].sku,'watch-missing');assert.equal(result.rows[0].focused,true);assert.equal(result.rows[0].note,'观察流量');assert.equal(result.rows[0].summary.total_views,null);assert.equal(result.rows[0].summary.available_days,0);
+   assert.ok(result.rows[0].series.every(day=>day.available===false));
+   await assert.rejects(service.read({shop_ids:'11,22'},'admin'),/不属于/);
+   await assert.rejects(service.saveWatch(note,'2'),/不属于/);
+   await assert.rejects(service.saveWatch({...note,sku:'foreign-sku'},'admin'),/不存在/);
+   await service.saveWatch({...note,focused:false},'admin');assert.equal((await service.read({view:'focused',tag:'新品'},'admin')).total,0);
+   result=await service.read({shop_ids:'11,44',group_by:'inventory',view:'bound',pageSize:1},'admin');
+   assert.ok(result.rows.length>0);assert.ok(result.rows.every(r=>r.inventory_group===result.rows[0].inventory_group));
+   const otherPage=await service.read({shop_ids:'11,44',group_by:'inventory',view:'bound',pageSize:1,page:2},'admin');
+   if(otherPage.rows.length)assert.notEqual(otherPage.rows[0].inventory_group,result.rows[0].inventory_group);
+   await query("DELETE FROM seller_sku_traffic_watch WHERE shop_id=44");await query("DELETE FROM sku_mappings WHERE id=44");await query("DELETE FROM online_products WHERE shop_id=44");await query("DELETE FROM shops WHERE id=44");
   });
   await t.test('retention clears only expired daily facts and temporary pages/runs, keeps active stage and legacy analysis',async()=>{
    const oldest=trafficDays()[0],expired=shiftTrafficDate(oldest,-1);

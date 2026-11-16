@@ -2292,12 +2292,28 @@ Read a tail image owned by the current enterprise. Other media, generation, jobs
 
 ### SKU Daily Traffic
 
+#### `POST /api/db/seller-analytics/sku-daily/watch`
+
+Save enterprise-shared attention, one tag and a note by owned shop/SKU. Does not change daily traffic facts or their retention.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 #### `GET /api/db/seller-analytics/sku-daily`
 
-Read current-enterprise daily SKU traffic for the last 15 complete report dates. Missing data stays null. Product metadata is reused from online products; counts distinguish PDP views from clicks and ordered units from order counts.
+Read current-enterprise daily SKU traffic for the last 30 complete report dates. Missing data stays null. Product metadata is reused from online products; counts distinguish PDP views from clicks and ordered units from order counts.
 
 - Auth: `authenticated`
 - Query parameters:
+  - `shop_ids` (`string`, optional): Comma-separated owned shop IDs; every ID must belong to this enterprise
+  - `view` (`string`, optional): all, focused, bound or unbound
+  - `tag` (`string`, optional): Exact saved attention tag
+  - `group_by` (`string`, optional): sku or inventory; inventory mode paginates whole groups, keeps SKU metrics separate, and may repeat combo SKUs in associated groups without aggregating them
   - `shop_id` (`string`, optional): Owned shop ID or all
   - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to latest available owned-shop date, or yesterday if no facts; explicit missing dates stay missing
   - `date_mode` (`string`, optional): Optional latest_report_day anchors the range to yesterday, preserving recent gaps; absent retains legacy latest-available behavior

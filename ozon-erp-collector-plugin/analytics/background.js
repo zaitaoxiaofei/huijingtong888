@@ -678,6 +678,9 @@ function compactDailyTrafficResult(request, payload) {
   if (!planned?.date_from || planned.date_from !== planned.date_to || observed?.date_from !== planned.date_from || observed?.date_to !== planned.date_to) throw new Error('每日采集实际日期未确认，未上传日指标');
   const company = String(Object.entries(payload.request_headers || {}).find(([key]) => key.toLowerCase() === 'x-o3-company-id')?.[1] || '');
   if (!company || company !== String(request.store_id || request.company_id || '') || (payload.current_company_id && String(payload.current_company_id) !== company) || (payload.verified_company_id && String(payload.verified_company_id) !== company)) throw new Error('每日采集实际店铺未对齐，未上传日指标');
+  const partitionFilters=request.request_body?.filters;
+  const hasPartition=partitionFilters&&['desc_type_ids','category_3_ids','category_2_ids'].some(key=>partitionFilters[key]?.length);
+  if(hasPartition){const actual=parse(payload.request_body)?.filters;for(const key of ['desc_type_ids','category_3_ids','category_2_ids'])if(JSON.stringify((actual?.[key]||[]).map(String).sort())!==JSON.stringify((partitionFilters[key]||[]).map(String).sort()))throw new Error('每日采集实际类目分区不一致，未上传日指标');}
   const body = parse(payload.response_body);
   const sourceItems = body?.items || body?.result?.items;
   if (status !== 200 || !Array.isArray(sourceItems)) throw new Error('每日SKU响应结构不完整，未上传空日数据');
@@ -704,7 +707,7 @@ function compactDailyTrafficResult(request, payload) {
   const more = body.has_more ?? body.result?.has_more;
   if (typeof more === 'boolean') responseBody.has_more = more;
   if (body.nextOffset !== undefined && Number.isInteger(Number(body.nextOffset)) && Number(body.nextOffset) >= 0) responseBody.nextOffset = Number(body.nextOffset);
-  return {compact_daily_v1:true,success:true,response_status:200,response_body:responseBody,request_body:{current_period:{date_from:observed.date_from,date_to:observed.date_to}},request_headers:{'X-O3-Company-Id':company},current_company_id:payload.current_company_id,verified_company_id:payload.verified_company_id};
+  return {compact_daily_v1:true,success:true,response_status:200,response_body:responseBody,request_body:{current_period:{date_from:observed.date_from,date_to:observed.date_to},...(hasPartition?{filters:partitionFilters}:{})},request_headers:{'X-O3-Company-Id':company},current_company_id:payload.current_company_id,verified_company_id:payload.verified_company_id};
 }
 
 async function postCollectResult(request, payload) {

@@ -1,26 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import vm from 'node:vm';
-import {ref,reactive,computed} from 'vue';
-import {SKU_TRAFFIC_OPERATION_METRICS,SKU_TRAFFIC_PRIMARY_RATE_KEYS} from '../src/shared/sku-traffic-monitor-query.js';
-import {trafficRowSeries} from '../frontend/admin/utils/sku-traffic-row-series.js';
-import {collectionDayState,verifiedCollectionShop} from '../frontend/admin/utils/sku-traffic-collection-state.js';
-function harness(){
- const source=fs.readFileSync('frontend/admin/views/analytics/SkuTrafficMonitorView.vue','utf8').match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import .*$/gm,'');
- const days=Array.from({length:7},(_,i)=>'2026-11-0'+(i+1)),calls=[],warnings=[];let dispose,identity={ok:true,companyId:'111'},checks=0;
- const data={rows:[],shops:[{id:11,name:'Z',store_id:'111'},{id:12,name:'X',store_id:'222'}],days,coverage:[],date:days.at(-1),report_end_date:days.at(-1),range_from:days[0]};
- const context=vm.createContext({ref,reactive,computed,Date,useRouter:()=>({push(){}}),onMounted(){},onBeforeUnmount:fn=>dispose=fn,SKU_TRAFFIC_OPERATION_METRICS,SKU_TRAFFIC_PRIMARY_RATE_KEYS,trafficRowSeries,collectionDayState,verifiedCollectionShop,createTrafficBrowserBridge:()=>({start(){},stop(){},wake(){},check:async()=>{checks++;return identity;}}),createDailyTrafficMonitor:()=>({start(){},stop(){}}),ElMessage:{info(){},warning:message=>warnings.push(message),error:message=>warnings.push(message)},window:{location:{origin:'http://localhost:8788'},postMessage(){},clearInterval(){}},getSkuTrafficDaily:async()=>data,prepareSellerAnalyticsPlugin:async()=>({}),collectSkuTrafficDaily:async body=>{calls.push(body);return {queued:[],waiting:[]};}});
- vm.runInContext(source+';this.api={load,collect,continueBackfill,backfill,state,localBrowser};',context);context.api.localBrowser.pluginInstanceId='browser-A';return{api:context.api,days,calls,warnings,dispose:()=>dispose(),setIdentity:value=>identity=value,get checks(){return checks;}};
-}
-test('backfill only queues the verified local shop, continues bounded waves, and pauses after the browser switches shops',async()=>{
- const h=harness(),a=h.api;await a.load();a.backfill.value={shop_id:'11',range_days:7};await a.continueBackfill();assert.equal(h.calls.length,1);assert.equal(h.calls[0].shop_id,'11');assert.equal(h.calls[0].browser_instance_id,'browser-A');assert.equal(h.calls[0].missing_only,true);
- a.state.coverage=[{shop_id:11,date_key:h.days[0],status:'pending'}];await a.continueBackfill();assert.equal(h.calls.length,1);
- a.state.coverage=h.days.map(date_key=>({shop_id:11,date_key,status:'complete'}));await a.continueBackfill();assert.equal(a.backfill.value,null);
- a.state.coverage=[];a.backfill.value={shop_id:'11',range_days:7};h.setIdentity({ok:true,companyId:'222'});await a.continueBackfill();assert.equal(h.calls.length,1);assert.match(h.warnings.at(-1),/已切换/);assert.equal(a.backfill.value,null);
- a.backfill.value={shop_id:'11',range_days:7};h.dispose();await a.continueBackfill();assert.equal(h.calls.length,1);
+import {dailyCollectionContext,dailyCollectionRoute,monitorReturnQuery} from '../frontend/admin/utils/sku-traffic-navigation.js';
+test('single-day collection route restores multiple shops, inventory grouping, watch and search filters',()=>{
+ const saved={shops:'4,7',view:'focused',tag:'新品',group_by:'inventory',range_days:7,query:'INV-12',search_by:'inventory',date:'2026-11-14',page:2,filters:'[{"metric":"total_views","op":"gt","value":0}]'};
+ const route=dailyCollectionRoute(4,'2026-11-13',saved);
+ assert.deepEqual(dailyCollectionContext(route.query),{shopId:'4',date:'2026-11-13'});
+ assert.deepEqual(monitorReturnQuery(route.query),Object.fromEntries(Object.entries(saved).map(([k,v])=>[k,String(v)])));
+ assert.equal(dailyCollectionContext({...route.query,shop_id:'all'}),null);
+ assert.equal(dailyCollectionContext({...route.query,date:'2026-02-30'}),null);
+ assert.deepEqual(monitorReturnQuery({monitor_redirect:'https://untrusted.test',monitor_shops:'4'}),{shops:'4'});
 });
-test('existing complete dates skip duplicate collection even if the local browser is unavailable; mismatched shops never queue',async()=>{
- const h=harness(),a=h.api;await a.load();a.state.shop_id='11';a.state.coverage=[{shop_id:11,date_key:h.days.at(-1),status:'complete'}];await a.collect('latest');assert.equal(h.calls.length,0);assert.equal(h.checks,0);
- a.state.coverage=[];a.state.shop_id='12';h.setIdentity({ok:false,code:'store_mismatch',pageCompanyId:'111'});await a.collect('latest');assert.equal(h.calls.length,0);assert.match(h.warnings.at(-1),/切换/);
+
+test('switching the analysis view does not cancel another browser shop collection',async()=>{
+ const {default:fs}=await import('node:fs');const {default:vm}=await import('node:vm');
+ const source=fs.readFileSync('frontend/admin/views/analytics/SellerAnalyticsView.vue','utf8');
+ const fn=source.match(/async function handleShopChange\([\s\S]*?\n\}/)[0];
+ let cancellations=0;
+ const context=vm.createContext({activeShopId:{value:'7'},switchingShop:{value:false},collectRuns:{value:[{id:'other-browser'}]},analysis:{value:{}},pluginValidation:{value:{}},authBindingStatus:{value:{}},browserProfileStatus:{value:{}},retryDialog:{visible:true},state:{filters:{shopId:'4'}},handleSearch(){},wakeAnalyticsPlugin(){},loadRunsMeta:async()=>{},cancelCollectRunAndNotify:async()=>{cancellations++;},ElMessage:{error(){}}});
+ vm.runInContext(fn+';this.change=handleShopChange;',context);await context.change('4');
+ assert.equal(cancellations,0);assert.equal(context.activeShopId.value,'4');assert.equal(context.switchingShop.value,false);
+});
+
+test('older and unknown collector versions keep regular pagination instead of requiring an update',async()=>{
+ const {supportsTrafficPartitions}=await import('../frontend/admin/utils/sku-traffic-navigation.js');
+ assert.equal(supportsTrafficPartitions('1.5.6',true),false);assert.equal(supportsTrafficPartitions('',true),false);
+ assert.equal(supportsTrafficPartitions('1.5.7',true),true);assert.equal(supportsTrafficPartitions('1.0.46',false),false);assert.equal(supportsTrafficPartitions('1.0.47',false),true);
 });

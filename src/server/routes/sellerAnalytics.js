@@ -18,6 +18,7 @@ async function payloadFromRequest(req, readJson) {
 
 export function createSellerAnalyticsRoutes({ services, readJson }) {
   return {
+    "POST /api/db/seller-analytics/sku-daily/watch": async req => ({success:true,data:await services.skuTrafficDailySaveWatch(await payloadFromRequest(req,readJson),tenantIdFromRequest(req))}),
     "GET /api/db/seller-analytics/sku-daily": (req,url) => services.skuTrafficDailyRead(queryFromUrl(url),tenantIdFromRequest(req)),
     "POST /api/db/seller-analytics/sku-daily/collect": async req => ({success:true,data:await services.skuTrafficDailyQueue(await payloadFromRequest(req,readJson),tenantIdFromRequest(req))}),
     "GET /api/db/seller-analytics/summary": (req) => services.sellerAnalyticsSummary(tenantIdFromRequest(req)),

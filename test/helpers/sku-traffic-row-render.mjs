@@ -23,9 +23,9 @@ export async function renderTrafficRows(rows){
   vm.runInContext(chartScript+';this.exposed={hidden,hover,svg,lines,shown,value,maximum,ceiling,bottom,x,y,ticks,segments,move,keyMove,toggle,selected,number,hasData,tooltipLines,tooltipPosition};',context);
   return {...props,...context.exposed};
  },ssrRender:await renderFunction(chartDescriptor.template.content,'TrafficChart')};
- const start=view.indexOf('  <div v-loading="loading" class="records-scroll">'),end=view.indexOf('  <el-drawer',start);
+ const start=view.indexOf('  <div v-loading="loading" class="records-scroll">'),end=view.indexOf('  <el-dialog :model-value',start);
  const template=view.slice(start,end).replace('v-loading="loading"','');
- const component={setup:()=>({state:{rows,range_from:'2026-11-01',date:'2026-11-07'},rateLabel:key=>key,metrics,rates:[],hoverMetrics:[],chartOptions:[],visibleKeys:[],toggleLine(){},lineMetrics:metrics,chartGroup:'traffic',shortName:name=>name,inventoryLabel:row=>row.inventory.map(i=>i.name).join(' / ')||'未关联库存',number:value=>value??'—',percent:value=>value===null||value===undefined?'—':`${Number(value).toFixed(2)}%`}),ssrRender:await renderFunction(template,'TrafficRows')};
+ const component={setup:()=>({groupBy:'sku',rowGroups:[{id:'all',rows}],watchSaving:false,state:{rows,range_from:'2026-11-01',date:'2026-11-07'},rateLabel:key=>key,metrics,rates:[],hoverMetrics:[],chartOptions:[],visibleKeys:[],toggleLine(){},lineMetrics:metrics,chartGroup:'traffic',shortName:name=>name,inventoryLabel:row=>row.inventory.map(i=>i.name).join(' / ')||'未关联库存',number:value=>value??'—',percent:value=>value===null||value===undefined?'—':`${Number(value).toFixed(2)}%`}),ssrRender:await renderFunction(template,'TrafficRows')};
  const app=createSSRApp(component);app.component('SkuTrafficTrendChart',Chart);app.component('SkuTrafficProductImage',ProductImage);app.component('ElImage',ElImage);app.component('ElRadioGroup',ElRadioGroup);app.component('ElRadioButton',ElRadioButton);app.component('ElEmpty',{render:()=>null});
  const html=await renderToString(app);
  return {html,css:parse(view).descriptor.styles[0].content+chartDescriptor.styles[0].content+imageDescriptor.styles[0].content};

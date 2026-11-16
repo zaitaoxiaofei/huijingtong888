@@ -10,6 +10,7 @@
   const nativeJsonStringify = JSON.stringify.bind(JSON);
   const nativeJsonParse = JSON.parse.bind(JSON);
   const TARGET_PATHS = [
+    '/api/site/seller-analytics/charts/seller-category-tree',
     '/api/site/seller-analytics/charts/v3/table/totals',
     '/api/site/seller-analytics/charts/v3/table/by_sku',
     '/api/site/seller-analytics/charts/v3/abc'
