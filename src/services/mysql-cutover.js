@@ -1,3 +1,4 @@
+import {createInventoryBatchStocktake} from './inventory-batch-stocktake.js';
 import {billingOverviewCache} from './billing-overview-cache.js';
 import {financeAiCostPolicy,allocateBillingAiCost} from './finance-ai-cost-policy.js';
 import { billingProfitTotals, fixedAiExpenseTotal, billingMonthStatus } from "../shared/billing-profit.js";
@@ -14042,7 +14043,8 @@ async function tenantInventoryProductDetailMysql(id, query = {}, tenantId) {
   `, [Number(id), tenantPk]);
   if (!row) return null;
   const includeOperations = String(query.includeOperations ?? query.include_operations ?? "1") !== "0";
-  const compositionItems = includeOperations ? await productComponentRowsMysql(Number(id), String(tenantPk)) : [];
+  const saveResponse=String(query.saveResponse||'')==='1';
+  const compositionItems = saveResponse ? await mysqlQuery(`SELECT c.component_product_id,c.quantity,c.component_role,p.name AS component_name,p.inventory_number AS inventory_id,p.stock_unit FROM product_components c JOIN products p ON p.id=c.component_product_id AND ${inventoryTenantSql(scope,'p')} WHERE c.product_id=? AND ${inventoryTenantSql(scope,'c')} ORDER BY c.component_product_id`,[Number(id)]) : includeOperations ? await productComponentRowsMysql(Number(id), String(tenantPk)) : [];
   return {
     ...withProductImageEndpointMysql(row, { thumbnail: true }),
     is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
@@ -14067,7 +14069,7 @@ async function tenantInventoryProductDetailMysql(id, query = {}, tenantId) {
     composition_items: compositionItems,
     component_count: compositionItems.length,
     component_summary: compositionItems.map((item) => `${item.component_name || item.inventory_id} x ${item.quantity}${item.stock_unit || "个"}`).join("；"),
-    component_available: compositionItems.length ? Math.min(...compositionItems.map((item) => Number(item.available_quantity || 0))) : null,
+    component_available: saveResponse ? null : compositionItems.length ? Math.min(...compositionItems.map((item) => Number(item.available_quantity || 0))) : null,
     pricing: calculateSelectionPricing(row)
   };
 }
@@ -14077,6 +14079,7 @@ export async function selectionProductMysql(id, query = {}, tenantId = "admin") 
   const scope = await resolveInventoryTenantScope(tenantId);
   const owner = await mysqlQueryOne(`SELECT id FROM products WHERE id = ? AND ${scope.predicate().sql} AND active = 1`, [Number(id), scope.id]);
   if (!owner) return null;
+  if(String(query.saveResponse||'')==='1')return tenantInventoryProductDetailMysql(id,query,scope.id);
   if (String(tenantId) !== "admin") return await tenantInventoryProductDetailMysql(id, query, tenantId);
   await ensureSelectionCreativeSchemaMysql();
   await ensureAssetVariantJobsTableMysql();
@@ -15355,8 +15358,11 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin", opti
     cycleSettingsChanged=true;
   }
   if (body.composition_items !== undefined || body.components !== undefined) {
-    await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantPk) : "admin");
-    shouldSyncOutbound = true;
+    const previous=await run(`SELECT component_product_id,quantity,component_role FROM product_components WHERE product_id=? AND ${inventoryTenantSql(scope)} ORDER BY component_product_id FOR UPDATE`,[productId]);
+    const next=normalizeProductComponentItemsMysql(body.composition_items || body.components || []);
+    const signature=items=>JSON.stringify(items.map(r=>[Number(r.component_product_id),Number(r.quantity),r.component_role==='gift'?'gift':'included']).sort((a,b)=>a[0]-b[0]));
+    shouldSyncOutbound=signature(previous)!==signature(next);
+    if(shouldSyncOutbound)await saveProductComponentsTxMysql(connection, productId, next, tenantScoped ? String(tenantPk) : "admin");
   }
   if (body.structured_naming || body.structuredNaming) await saveStructuredNamingMysql(productId, body, connection, String(tenantPk));
   const afterIdentity=await readProductIdentity(run,scope,productId);
@@ -15366,7 +15372,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin", opti
   }
   });
 
-  if (body.composition_items !== undefined || body.components !== undefined) {
+  if (shouldSyncOutbound) {
     invalidateOrderProcurementCoverage();
     invalidateInventoryAlertSalesBindingMysql();
   }
@@ -35763,6 +35769,9 @@ async function readLedgerWithFlow(query, tenantId) {
 }
 const purchaseBundleReviewService=createPurchaseBundleReview({ledger:procurementLedgerService});
 const inventoryBundleStocktakeService=createInventoryBundleStocktake({ledger:procurementLedgerService});
+const inventoryBatchStocktakeService=createInventoryBatchStocktake({prepare:()=>procurementLedgerService.prepare()});
+export const inventoryBatchStocktakeContextMysql=(params,session)=>inventoryBatchStocktakeService.context(params,session);
+export const applyInventoryBatchStocktakeMysql=(body,session)=>inventoryBatchStocktakeService.apply(body,session);
 export const inventoryBundleContextMysql=(params,session)=>inventoryBundleStocktakeService.context(params,session);
 export const applyInventoryBundleStocktakeMysql=(body,session)=>inventoryBundleStocktakeService.apply(body,session);
 export const purchaseBundleContextMysql=(params,session)=>purchaseBundleReviewService.context(params,session);

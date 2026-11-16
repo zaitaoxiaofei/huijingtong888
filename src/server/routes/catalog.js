@@ -129,7 +129,7 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
       return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }, tenantIdFromRequest(req)) });
     }
     await services.updateProduct(productId, await readProductSaveJson(readJson, req), tenantIdFromRequest(req), {session:req._session});
-    return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }, tenantIdFromRequest(req)) });
+    return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0, saveResponse: 1 }, tenantIdFromRequest(req)) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "recalculate-profits") {
