@@ -110,6 +110,21 @@ test('actual V2 inventory edits retain stable product identity and record only c
    assert.ok(event.changed_fields.includes('components'));assert.deepEqual(event.after.components,[{product_id:203,quantity:2,component_role:'included'},{product_id:204,quantity:1,component_role:'gift'}]);
    const count=result.total;await save();assert.equal((await history()).total,count);assert.deepEqual(await references(),referenceBefore);
   });
+  await t.test('unchanged composition is not rewritten and lean save response preserves identities and profit parameters',async()=>{
+   const components=await q('SELECT component_product_id,quantity,component_role FROM product_components WHERE product_id=200 ORDER BY component_product_id');
+   assert.equal(components.length,2);
+   const before=await q('SELECT * FROM product_components WHERE product_id=200 ORDER BY component_product_id');
+   const result=await save({composition_items:components,supplier_note:'Updated without replaying stock'});
+   assert.equal(result.outbound_sync,null);
+   assert.deepEqual(await q('SELECT * FROM product_components WHERE product_id=200 ORDER BY component_product_id'),before);
+   const {getMysqlPoolMetrics}=await import('../src/mysql-pool.js');const acquired=getMysqlPoolMetrics().acquisitions;
+   const light=await api.selectionProductMysql(200,{saveResponse:1,includeDetails:0},2);
+   const reads=getMysqlPoolMetrics().acquisitions-acquired;
+   assert.equal(light.component_count,2);assert.equal(light.component_available,null);assert.equal(Number(light.purchase_cost),17);assert.equal(Number(light.package_weight_g),50);
+   assert.deepEqual(light.composition_items.map(c=>Number(c.component_product_id)),components.map(c=>Number(c.component_product_id)));
+   assert.ok(reads<15,`save response used ${reads} SQL acquisitions`);
+   t.diagnostic(`lean product save response: ${reads} SQL acquisitions`);
+  });
   await t.test('stale, foreign and revoked writes never leave a successful version',async()=>{
    const before=json(await product()),count=await versions(200);
    await assert.rejects(save({updated_at:'2000-01-01T00:00:00Z',name:'过期保存'}),error=>error.status===409||error.statusCode===409);
