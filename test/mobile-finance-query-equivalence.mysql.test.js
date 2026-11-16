@@ -1,3 +1,6 @@
+import {BILLING_COST_SCHEMA} from '../src/services/finance-billing-cost-schema.js';
+import {billingProfitTotals,fixedAiExpenseTotal} from '../src/shared/billing-profit.js';
+import {scopedBillingWithdrawal} from '../src/shared/billing-withdrawal.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -11,12 +14,13 @@ import { createOrderFixtureSchema, loadTenantOrderService, orderFunctionSource }
 const methods = ['profitRankingMysql','profitOrderedAtUtcRangeMysql','profitTimestampUtcRangeMysql','terminalOrderLossSqlMysql','returnLossTotalSqlMysql','roundMoneyMysql',
   'monthlyBillingPendingByShopMysql','monthlyFinanceTenantPredicateMysql','billingCompanyOrderPredicateMysql','billingCompanyIdMysql','monthlyBillingExpensesMysql',
   'annualBillingExpensesMysql','annualBillingOverviewMysql','monthlyBillingDetailsMysql','emptyMonthlyBillingSummaryMysql','sumMonthlyBillingRowsMysql',
-  'enrichMonthlyBillingShopRowMysql','monthRangeMysql','billingDateRangeMysql'];
+  'enrichMonthlyBillingShopRowMysql','mergeBillingShopsMysql','billingExpenseTotalsForMonth','monthRangeMysql','billingDateRangeMysql'];
 const json = value => JSON.parse(JSON.stringify(value));
 const normalized = value => value.replaceAll('\r\n','\n');
 const sha256 = value => createHash('sha256').update(normalized(value)).digest('hex');
 const baselineHashes = {
-  profitRankingMysql:'81dff47157000b420457a385559179f5eafa048a346ea9f262d12a61b84dd162',
+  // The approved inventory-ranking additions in release 9193a086 are retained.
+  profitRankingMysql:'ac82bd4b1aef6f522943aae308bb5b1c4b6543debfa55a0cb0c8475747fa28b6',
   monthlyBillingPendingByShopMysql:'282f7e09887b7b07c65e438249c217efbe495f8fca62399377df4ba45e2844d9'
 };
 function replaceExactly(source, before, after, count = 1) {
@@ -40,7 +44,7 @@ function originalRanking() {
   ].join('\n');
   const source = replaceExactly(normalized(orderFunctionSource('profitRankingMysql')),
     '  const outcomeCteSql = inventoryMode ? "" : orderReportOutcomeCtesSql(orderScope, dateFilter.whereSql);', oldCte);
-  assert.equal(sha256(source), baselineHashes.profitRankingMysql, 'Restored ranking must be byte-identical to commit 45b9854 (LF)');
+  assert.equal(sha256(source), baselineHashes.profitRankingMysql, 'Restored ranking must match the reviewed release 9193a086 baseline (LF)');
   return source;
 }
 function originalPending() {
@@ -62,6 +66,7 @@ test('mobile finance materialized outcomes preserve the complete 45b report and 
   const q = fixture.query;
   try {
     await createOrderFixtureSchema(fixture.connection);
+    for(const statement of BILLING_COST_SCHEMA)await fixture.connection.query(statement);
     await q("INSERT INTO tenants(id,slug,name) VALUES(1,'default','Default'),(2,'a','A'),(3,'b','B')");
     await q("INSERT INTO shops(id,tenant_id,name) VALUES(10,NULL,'Legacy'),(11,1,'Default explicit'),(20,2,'A'),(21,2,'A alternate company'),(22,2,'A expenses only'),(30,3,'B private')");
     await q("INSERT INTO finance_companies(id,tenant_id,name) VALUES(1,NULL,'Legacy'),(2,2,'A company'),(3,3,'B private'),(4,1,'Default explicit'),(5,2,'A second company')");
@@ -102,7 +107,9 @@ test('mobile finance materialized outcomes preserve the complete 45b report and 
       for(const day of ['2026-08-31','2026-09-01','2026-10-01','2026-11-01'])if(index===0)await q('INSERT INTO ozon_ad_sku_daily(date_key,shop_id,ozon_sku,spend_cny,revenue_cny) VALUES(?,?,\'shared-sku\',?,?)',[day,shop,3.17+shop,22.19]);
     }
     const appendixCalls={procurement:0,ai:0};
-    const overrides={extraMethods:methods,buildOrderOutcomeSql,orderReportOutcomeCtesSql,todayDateKeyMysql:()=> '2026-11-06',ensureFinanceCenterSchema:async()=>{},
+    // This harness compares CTE versus the reviewed original predicates. Official
+    // reconciliation has its own real-DB regressions in tenant-monthly-billing.
+    const overrides={extraMethods:methods,withMysqlReadSnapshot:async operation=>operation(q),billingProfitTotals,fixedAiExpenseTotal,financeAiCostPolicy:{readForScope:async()=>null},allocateBillingAiCost:()=>({}),scopedBillingWithdrawal,paidPayrollAccruals:async()=>[],monthlyBillingProjectionMysql:async()=>[],billingWithdrawalAssignmentsMysql:async()=>[],applyBillingProjectionMysql:rows=>rows,buildOrderOutcomeSql,orderReportOutcomeCtesSql,todayDateKeyMysql:()=> '2026-11-06',ensureFinanceCenterSchema:async()=>{},
       shopsMysql:async tenant=>(await q(`SELECT id,name FROM shops WHERE ${tenant==='admin'?'tenant_id IS NULL OR tenant_id=1':'tenant_id=?'} ORDER BY id`,tenant==='admin'?[]:[Number(tenant)])),
       monthlyProcurementInventorySummaryMysql:async(from,to,scope)=>{appendixCalls.procurement++;return {period_basis:'purchased_at',snapshot_basis:'current',purchase_total_amount:scope.id,inventory_total_value:scope.id*3};},
       billingAiUsageMysql:async()=>{appendixCalls.ai++;return {request_count:0,cost:0};},monthlyBillingOrderRowsMysql:async()=>[]};

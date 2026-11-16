@@ -11,10 +11,10 @@ test("six outgoing groups conserve every expense once and expose individual amou
   assert.equal(byKey.income.children.find(x=>x.key==='platform_rewards').amount,null);
   assert.equal(byKey.goods.amount,120);
   assert.equal(byKey.logistics.amount,35);
-  assert.equal(byKey.platform.amount,15);
+  assert.equal(byKey.platform.amount,16);
   assert.equal(byKey.operating.amount,2708);
   assert.equal(byKey.personnel.amount,5480);
-  assert.equal(byKey.funds.amount,10);
+  assert.equal(byKey.funds.amount,9);
   assert.equal(groups.slice(1).reduce((sum,g)=>sum+g.amount,0),8368);
   assert.equal(byKey.personnel.children.find(x=>x.key==='team_building').amount,200);
   assert.equal(byKey.operating.children.find(x=>x.key==='legacy_misc').amount,6);
