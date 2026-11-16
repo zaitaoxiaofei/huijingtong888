@@ -1,5 +1,8 @@
 import {financeAiCostPolicy,allocateBillingAiCost} from './finance-ai-cost-policy.js';
 import { billingProfitTotals, fixedAiExpenseTotal } from "../shared/billing-profit.js";
+import {scopedBillingWithdrawal} from '../shared/billing-withdrawal.js';
+import {billingDrilldown,withBillingCostAdjustments} from './billing-drilldown.js';
+import {readBillingProjection,billingProjectionDeltas,billingCostKeys,billingAllocationSale,BILLING_PROJECTION_VERSION} from './billing-ledger-projection.js';
 import { paidPayrollAccruals } from "./finance-payroll-accruals.js";
 import { INVENTORY_CAPITAL_REVIEWS, inventoryCapitalReviewMatches } from '../shared/inventory-capital-review.js';
 import {prepareInventoryInlineMedia} from "./database-inline-media.js";
@@ -28044,6 +28047,7 @@ function sumMonthlyBillingRowsMysql(rows = []) {
     total.manual_expense += Number(row.manual_expense || 0);
     total.salary_expense += Number(row.salary_expense || 0);
     total.net_profit += Number(row.net_profit || 0);
+    for(const key of ['aftersale_fee','legacy_withdrawal_removed','reconciliation_pending_count','income_pending_count'])total[key]=Number(total[key]||0)+Number(row[key]||0);
   }
   total.accrued_profit = rows.reduce((sum, row) => sum + Number(row.accrued_profit ?? 0), 0);
   total.accrued_order_count = rows.reduce((sum, row) => sum + Number(row.accrued_order_count || 0), 0);
@@ -28161,6 +28165,15 @@ async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scop
   };
 }
 
+async function billingWithdrawalAssignmentsMysql(scope){
+ return mysqlQuery(`SELECT ca.company_id,ca.shop_id,DATE_FORMAT(ca.effective_from,'%Y-%m-%d') effective_from,DATE_FORMAT(ca.effective_to,'%Y-%m-%d') effective_to FROM finance_shop_company_assignments ca JOIN finance_companies c ON c.id=ca.company_id JOIN shops s ON s.id=ca.shop_id WHERE ${monthlyFinanceTenantPredicateMysql('ca',scope)} AND ${monthlyFinanceTenantPredicateMysql('c',scope)} AND ${orderTenantPredicateMysql('s',scope)}`);
+}
+function billingExpenseTotalsForMonth(rows,shopId,month){return rows.filter(e=>String(e.shop_id)===String(shopId)&&(!month||String(e.expense_date||e.month_key||'').slice(0,7)===month));}
+function mergeBillingShopsMysql(rows){
+ const groups=new Map();for(const row of rows){const key=Number(row.shop_id),list=groups.get(key)||[];list.push(row);groups.set(key,list);}
+ return [...groups.values()].map(list=>({...list[0],...sumMonthlyBillingRowsMysql(list),...Object.fromEntries(['withdrawal_fee','withdrawal_base','withdrawal_estimate','withdrawal_auto_to_deduct'].map(key=>[key,roundMoneyMysql(list.reduce((n,r)=>n+Number(r[key]||0),0))])),withdrawal_calculated:true,...(list.some(r=>r.net_profit==null)?{net_profit:null,net_profit_margin:null}:{}),shop_id:list[0].shop_id,shop_name:list[0].shop_name}));
+}
+
 async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
   await ensureFinanceCenterSchema();
   const where = ["e.expense_date >= ?", "e.expense_date <= ?", monthlyFinanceTenantPredicateMysql("e", scope),
@@ -28170,7 +28183,7 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
   if (companyId) { where.push("e.company_id = ?"); params.push(companyId); }
   const {rows,paid}=await withMysqlReadSnapshot(async read=>{
     const rows=await read(`
-    SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key, e.category, SUM(e.amount_cny) amount_cny,
+    SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key, e.company_id,e.shop_id,e.category, SUM(e.amount_cny) amount_cny,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN e.amount_cny ELSE 0 END), 0) AS salary_expense,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN 0 ELSE e.amount_cny END), 0) AS manual_expense,
       COALESCE(SUM(CASE WHEN e.category IN ('domestic_shipping','packaging','order_payment') THEN e.amount_cny ELSE 0 END),0) AS order_expense
@@ -28178,15 +28191,15 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
     JOIN finance_companies c ON c.id=e.company_id
     LEFT JOIN shops s ON s.id=e.shop_id
     WHERE ${where.join(" AND ")}
-    GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m'), e.category`, params);
+    GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m'),e.company_id,e.shop_id,e.category`, params);
     return {rows,paid:await paidPayrollAccruals({tenantId:scope.id,legacy:scope.defaultTenant,companyId,shopId,from,to},read)};
   },{interactive:true});
   const months=new Map();
-  for(const row of rows){const current=months.get(row.month_key)||{manual_expense:0,salary_expense:0,order_expense:0,expense_totals:[]};for(const key of ['manual_expense','salary_expense','order_expense'])current[key]=roundMoneyMysql(current[key]+Number(row[key]||0));current.expense_totals.push({category:row.category,amount_cny:Number(row.amount_cny)});months.set(row.month_key,current);}
+  for(const row of rows){const current=months.get(row.month_key)||{manual_expense:0,salary_expense:0,order_expense:0,expense_totals:[]};for(const key of ['manual_expense','salary_expense','order_expense'])current[key]=roundMoneyMysql(current[key]+Number(row[key]||0));current.expense_totals.push({category:row.category,company_id:row.company_id,shop_id:row.shop_id,month_key:row.month_key,amount_cny:Number(row.amount_cny)});months.set(row.month_key,current);}
   for(const wage of paid){
     const month=wage.expense_date.slice(0,7),total=months.get(month)||{salary_expense:0,manual_expense:0,order_expense:0,expense_totals:[]};
     total.salary_expense=roundMoneyMysql(total.salary_expense+wage.amount_cny);total.paid_pending_salary=roundMoneyMysql(Number(total.paid_pending_salary||0)+wage.amount_cny);
-    const category=total.expense_totals.find(row=>row.category==='salary');if(category)category.amount_cny=roundMoneyMysql(category.amount_cny+wage.amount_cny);else total.expense_totals.push({category:'salary',amount_cny:wage.amount_cny});months.set(month,total);
+    total.expense_totals.push({category:'salary',company_id:wage.company_id,shop_id:null,expense_date:wage.expense_date,amount_cny:wage.amount_cny});months.set(month,total);
   }
   return months;
 }
@@ -28198,13 +28211,14 @@ async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMon
   const companyId = requestedCompany && requestedCompany !== "all" ? Number(requestedCompany) : 0;
   if (companyId && (!Number.isSafeInteger(companyId) || !companies.some(c => Number(c.id) === companyId))) throw Object.assign(new Error("公司不存在或不属于当前企业"), { statusCode: 404 });
   if (requestedCompany && requestedCompany !== "all" && !companyId) throw Object.assign(new Error("公司标识无效"), { statusCode: 400 });
-  const [ranking, expenses, ai] = await Promise.all([
+  const [ranking, expenses, ai,projection,withdrawalAssignments] = await Promise.all([
     profitRankingMysql({ dimension: "shop", from, to, shopId, fast: "1" }, tenantId, { groupByMonth: true, companyId }),
     annualBillingExpensesMysql(from, to, shopId, tenantScope, companyId),
-    (includeOverviewAi||aiCostPolicy) ? billingAiUsageMysql(from,to,tenantScope,{groupByMonth:true}).catch(()=>({available:false,months:{}})) : Promise.resolve(null)
+    (includeOverviewAi||aiCostPolicy) ? billingAiUsageMysql(from,to,tenantScope,{groupByMonth:true}).catch(()=>({available:false,months:{}})) : Promise.resolve(null),
+    monthlyBillingProjectionMysql(from,to,shopId,tenantScope,companyId),billingWithdrawalAssignmentsMysql(tenantScope)
   ]);
   const byMonth = new Map();
-  for (const row of ranking.rows) {
+  for (const row of applyBillingProjectionMysql(ranking.rows,projection)) {
     const rows = byMonth.get(row.month_key) || [];
     rows.push(row); byMonth.set(row.month_key, rows);
   }
@@ -28218,7 +28232,8 @@ async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMon
     summary.order_expense = roundMoneyMysql(expense.order_expense);
     summary.ai_fixed_cost=fixedAiExpenseTotal(expense.expense_totals||[]);
     Object.assign(summary,allocateBillingAiCost({policy:aiCostPolicy,usage:ai,from:range.from,to:range.to,companyId,shopId}));
-    Object.assign(summary,billingProfitTotals(summary));
+    Object.assign(summary,scopedBillingWithdrawal(byMonth.get(range.month_key)||[],expense.expense_totals||[],withdrawalAssignments,companyId));
+    Object.assign(summary,billingProfitTotals(summary,expense.expense_totals||[]));
     summary.net_profit_margin = summary.net_profit==null?null:summary.revenue ? summary.net_profit / summary.revenue : 0;
     return { ...range, label: `${Number(range.month_key.slice(5))}月`, summary, expense_totals:expense.expense_totals||[], procurement_inventory: {}, ai_usage: ai ? {...(ai.available?(ai.months[range.month_key]||{request_count:0,cost:0}):{request_count:null,cost:null}),available:ai.available,scope:'enterprise'} : {} };
   });
@@ -28304,6 +28319,87 @@ function monthlyBillingOrderSettlementHavingMysql(settlementState = "") {
   if (normalized === "terminal_estimate") return `NOT (${accrued}) AND ${terminal}`;
   if (normalized === "pending_estimate") return `NOT (${accrued}) AND NOT ${terminal}`;
   return "";
+}
+
+async function monthlyBillingProjectionMysql(from,to,shopId,scope,companyId,includeAll=false){
+ const date=profitOrderedAtUtcRangeMysql('o',from,to);
+ const orderScope=`EXISTS(SELECT 1 FROM shops owned_shop WHERE owned_shop.id=o.shop_id AND ${orderTenantPredicateMysql('owned_shop',scope)})${companyId?' AND '+billingCompanyOrderPredicateMysql('o',companyId,scope):''}${Number(shopId)>0?' AND o.shop_id='+Number(shopId):''}`;
+ const outcomeCte=orderReportOutcomeCtesSql(orderScope,date.whereSql,true);
+ const where=[orderTenantPredicateMysql('s',scope)];const params=[...date.params];
+ if(Number(shopId)>0){where.push('o.shop_id=?');params.push(Number(shopId));}
+ if(companyId)where.push(billingCompanyOrderPredicateMysql('o',companyId,scope));
+ if(!includeAll)where.push(`(outcomes.after_delivery_return=1 OR outcomes.rejected_unclaimed=1 OR outcomes.cancelled_pre_fulfillment=1 OR outcomes.cargo_lost=1 OR (COALESCE(opi.profit_status,oi.settlement_state,'')<>'accrued' AND (COALESCE(opi.other_fee_cny,0)<>0 OR COALESCE(opi.ozon_service_fee_cny,oi.platform_fee_actual,0)<>0)) OR (opi.profit_status='accrued' AND COALESCE(opi.return_loss_cny,0)<>0) OR ${ozonReturnFilterSql({id:scope.id},'aftersale','o')})`);
+ return withMysqlReadSnapshot(async read=>{
+  let itemRows=await read(`${outcomeCte} SELECT o.id order_id,o.shop_id,s.name shop_name,o.posting_number,o.order_number,
+   DATE_FORMAT(CONVERT_TZ(o.ordered_at,'+00:00','+08:00'),'%Y-%m') month_key,o.ordered_at,
+   CASE WHEN outcomes.after_delivery_return=1 THEN 'after_delivery_return' WHEN outcomes.rejected_unclaimed=1 THEN 'rejected_unclaimed' WHEN outcomes.cancelled_pre_fulfillment=1 THEN 'cancelled_pre_fulfillment' WHEN outcomes.cargo_lost=1 THEN 'cargo_lost' ELSE 'active' END outcome_type,
+   oi.id order_item_id,oi.ozon_sku,oi.quantity,oi.sale_price,oi.ozon_name product_name,
+   ${includeAll?"COALESCE(NULLIF(oi.ozon_image_url,''),p.image_url,'') image_url,p.id product_id,p.inventory_number,p.name inventory_name,":"'' image_url,NULL product_id,NULL inventory_number,NULL inventory_name,"}
+   COALESCE(opi.profit_status,oi.settlement_state,'') profit_status,st.formula_version,fx.prices_json frozen_prices,order_quote.rate frozen_order_rate,JSON_OBJECT('estimate',JSON_OBJECT('paymentFee',JSON_EXTRACT(rev.inputs_json,'$.estimate.paymentFee'),'withdrawalFee',JSON_EXTRACT(rev.inputs_json,'$.estimate.withdrawalFee'))) estimate_inputs,
+   COALESCE(opi.purchase_cost_cny,oi.frozen_purchase_cost*oi.quantity,0) purchase_cost,
+   COALESCE(opi.domestic_shipping_cny,oi.frozen_domestic_shipping*oi.quantity,0) domestic_shipping_cost,
+   COALESCE(opi.international_shipping_cny,oi.frozen_international_shipping*oi.quantity,0) international_shipping_cost,
+   COALESCE(opi.packaging_cost_cny,oi.frozen_handling_fee*oi.quantity,0) packaging_cost,
+   COALESCE(opi.commission_fee_cny,oi.estimated_commission,0) commission_fee,COALESCE(opi.ozon_service_fee_cny,oi.platform_fee_actual,0) ozon_service_fee,
+   COALESCE(opi.other_fee_cny,0) other_fee,CASE WHEN outcomes.effective_business_sale=1 THEN COALESCE(opi.advertising_cost_cny,0) ELSE 0 END advertising_cost,
+   CASE WHEN outcomes.effective_business_sale=1 THEN COALESCE(opi.sale_amount_cny,oi.sale_price*oi.quantity,0) ELSE 0 END item_revenue,0 aftersale_fee,COALESCE(opi.return_loss_cny,oi.aftersale_loss,0) saved_aftersale_fee
+   FROM orders o JOIN order_outcomes outcomes ON outcomes.id=o.id JOIN shops s ON s.id=o.shop_id JOIN order_items oi ON oi.order_id=o.id
+   LEFT JOIN order_profit_items opi ON opi.order_item_id=oi.id
+   ${includeAll?`   LEFT JOIN sku_mappings sm ON sm.id=COALESCE(
+    (SELECT old.id FROM sku_mappings old WHERE old.id=oi.sku_mapping_id AND old.shop_id=o.shop_id AND ${orderTenantPredicateMysql('old',scope)} LIMIT 1),
+    (SELECT current.id FROM sku_mappings current WHERE current.shop_id=o.shop_id AND current.ozon_sku=oi.ozon_sku AND current.active=1 AND ${orderTenantPredicateMysql('current',scope)} ORDER BY current.id DESC LIMIT 1))
+   LEFT JOIN products p ON p.id=sm.product_id AND ${orderTenantPredicateMysql('p',scope)}
+`:""}
+   LEFT JOIN order_profit_calc_state st ON st.order_item_id=oi.id AND st.tenant_key=(CASE WHEN s.tenant_id>0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
+   LEFT JOIN order_profit_fx_state fx ON fx.order_id=o.id AND fx.tenant_key=(CASE WHEN s.tenant_id>0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
+   LEFT JOIN order_profit_daily_fx_rates order_quote ON order_quote.id=fx.order_fx_id
+   LEFT JOIN order_profit_calc_revisions rev ON rev.id=st.current_estimate_revision_id AND rev.order_item_id=oi.id AND rev.tenant_key=st.tenant_key
+   WHERE ${where.join(' AND ')} ${date.whereSql} ORDER BY o.id,oi.id`,[...date.params,...params]);
+  const returnRows=await read(`SELECT r.order_id,r.state_json,r.observed_at FROM ozon_return_observations r JOIN orders o ON o.id=r.order_id AND o.shop_id=r.shop_id AND BINARY o.posting_number=BINARY r.posting_number JOIN shops s ON s.id=o.shop_id WHERE r.tenant_id=? AND ${where[0]} ${date.whereSql}${Number(shopId)>0?' AND o.shop_id='+Number(shopId):''}${companyId?' AND '+billingCompanyOrderPredicateMysql('o',companyId,scope):''}`,[scope.id,...date.params]);
+  const enriched=await enrichOrdersWithOzonReturns(itemRows,{id:scope.id,isDefault:scope.defaultTenant},async(_sql,args)=>{const ids=new Set(args.slice(1).map(Number));return returnRows.filter(r=>ids.has(Number(r.order_id)));});
+  itemRows=enriched.map(item=>{
+    const report=officialReturnReportRow(item,{outcome_type:item.outcome_type});return report.official_return_record&&report.outcome_type==='after_delivery_return'?{...item,outcome_type:'after_delivery_return'}:item;
+  });
+  // Batch evidence once per authorized set. The existing reviewed reader still
+  // validates currency, archive identity, parent weights and signed operations.
+  const terminalOrders=[...new Map(itemRows.filter(r=>['rejected_unclaimed','after_delivery_return','cancelled_pre_fulfillment','cargo_lost'].includes(r.outcome_type)||(r.profit_status==='accrued'&&Number(r.saved_aftersale_fee)!==0)).map(r=>[r.order_id,r])).values()];
+  const financeRows=[],siblings=[];
+  const parents=[...new Map(terminalOrders.map(o=>[o.shop_id+':'+(o.order_number||String(o.posting_number).replace(/-[^-]+$/,'')),{shop_id:o.shop_id,parent:o.order_number||String(o.posting_number).replace(/-[^-]+$/,'')}])).values()];
+  for(let index=0;index<terminalOrders.length;index+=400){const selected=terminalOrders.slice(index,index+400);
+   financeRows.push(...await read(`SELECT f.id,f.shop_id,f.operation_id,f.posting_number,f.order_number,f.operation_type,f.operation_type_name,DATE_FORMAT(f.operation_date,'%Y-%m-%d %H:%i:%s') operation_date,f.service_type,f.service_name,f.amount,f.accruals_for_sale,f.sale_commission,f.delivery_charge,f.return_delivery_charge,f.currency_code,f.raw_json,f.amount_cny,f.accruals_for_sale_cny,f.sale_commission_cny,f.delivery_charge_cny,f.return_delivery_charge_cny,f.exchange_rate FROM ozon_finance_items f WHERE ${selected.map(()=>'(f.shop_id=? AND f.posting_number IN (?,?))').join(' OR ')} ORDER BY f.operation_date,f.id`,selected.flatMap(o=>[o.shop_id,o.posting_number,o.order_number||String(o.posting_number).replace(/-[^-]+$/,'')])));
+  }
+  const siblingIds=new Set();
+  for(let index=0;index<parents.length;index+=100){const selected=parents.slice(index,index+100);
+   const ids=await read(selected.flatMap(()=>["SELECT id FROM orders WHERE shop_id=? AND order_number=?","SELECT id FROM orders WHERE shop_id=? AND posting_number LIKE ? ESCAPE '='"]).join(' UNION ALL '),selected.flatMap(o=>[o.shop_id,o.parent,o.shop_id,o.parent.replace(/[=%_]/g,c=>'='+c)+'-%']));for(const row of ids)siblingIds.add(Number(row.id));
+  }
+  const allSiblingIds=[...siblingIds];for(let index=0;index<allSiblingIds.length;index+=1000){const selected=allSiblingIds.slice(index,index+1000);siblings.push(...await read(`SELECT o.id order_id,o.shop_id,o.posting_number,o.order_number,oi.id order_item_id,oi.ozon_sku,oi.quantity,oi.sale_price,st.formula_version,fx.prices_json frozen_prices,order_quote.rate frozen_order_rate FROM orders o JOIN shops s ON s.id=o.shop_id JOIN order_items oi ON oi.order_id=o.id LEFT JOIN order_profit_calc_state st ON st.order_item_id=oi.id AND st.tenant_key=(CASE WHEN s.tenant_id>0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci LEFT JOIN order_profit_fx_state fx ON fx.order_id=o.id AND fx.tenant_key=st.tenant_key LEFT JOIN order_profit_daily_fx_rates order_quote ON order_quote.id=fx.order_fx_id WHERE ${orderTenantPredicateMysql('s',scope)} AND o.id IN (${selected.map(()=>'?').join(',')}) ORDER BY o.id,oi.id`,selected));}
+  const uniqueFinance=[...new Map(financeRows.map(r=>[r.id,r])).values()],uniqueSiblings=[...new Map(siblings.map(r=>[r.order_item_id,{...r,sale_price:billingAllocationSale(r)}])).values()];
+  const fxIds=[...new Set(uniqueFinance.map(r=>{try{return (typeof r.raw_json==='string'?JSON.parse(r.raw_json):r.raw_json)?._erp_fx_archive?.id;}catch{return null;}}).filter(Boolean))],archives=[];
+  for(let index=0;index<fxIds.length;index+=500){const selected=fxIds.slice(index,index+500);archives.push(...await read(`SELECT id,DATE_FORMAT(business_date,'%Y-%m-%d') business_date,DATE_FORMAT(source_date,'%Y-%m-%d') source_date,currency_from,currency_to,source,rate FROM order_profit_daily_fx_rates WHERE id IN (${selected.map(()=>'?').join(',')})`,selected));}
+  const evidenceRead=async(sql,args=[])=>{
+   if(sql.includes('FROM ozon_finance_items'))return uniqueFinance.filter(r=>Number(r.shop_id)===Number(args[0])&&args.slice(1).includes(r.posting_number));
+   if(sql.includes('FROM orders o JOIN shops owned_shop'))return uniqueSiblings.filter(r=>Number(r.shop_id)===Number(args[0])&&(r.order_number===args[1]||r.posting_number.startsWith(args[1]+'-')));
+   if(sql.includes('FROM order_profit_daily_fx_rates'))return archives.filter(r=>args.map(String).includes(String(r.id)));
+   return read(sql,args);
+  };
+  const projection=await readBillingProjection({query:evidenceRead,itemRows,classifyCategory:ozonFinanceCategoryMysql});
+  const adParams=[from,to],adWhere=[orderTenantPredicateMysql('ad_shop',scope)];
+  if(Number(shopId)>0){adWhere.push('ad.shop_id=?');adParams.push(Number(shopId));}
+  if(companyId)adWhere.push(`EXISTS(SELECT 1 FROM finance_shop_company_assignments ca WHERE ca.shop_id=ad.shop_id AND ca.company_id=${companyId} AND ${monthlyFinanceTenantPredicateMysql('ca',scope)} AND ca.effective_from<=ad.date_key AND (ca.effective_to IS NULL OR ca.effective_to>=ad.date_key))`);
+  projection.advertising=await read(`SELECT ad.shop_id,DATE_FORMAT(ad.date_key,'%Y-%m') month_key,SUM(ad.spend_cny) amount FROM ozon_ad_sku_daily ad JOIN shops ad_shop ON ad_shop.id=ad.shop_id WHERE ad.date_key>=? AND ad.date_key<=? AND ${adWhere.join(' AND ')} GROUP BY ad.shop_id,DATE_FORMAT(ad.date_key,'%Y-%m')`,adParams);
+  return projection;
+ },{interactive:true});
+}
+function applyBillingProjectionMysql(rows,projection){
+ const grouped=billingProjectionDeltas(projection);
+ return rows.map(row=>{
+  const additions=[...grouped.values()].filter(x=>Number(x.shop_id)===Number(row.shop_id)&&(!row.month_key||row.month_key===x.month_key));
+  const result={...row,billing_projection_version:BILLING_PROJECTION_VERSION};
+  for(const key of [...billingCostKeys,'revenue','legacy_withdrawal_removed','reconciliation_pending_count','income_pending_count'])result[key]=roundMoneyMysql(Number(row[key]||0)+additions.reduce((n,a)=>n+Number(a[key]||0),0));
+  const ads=(projection.advertising||[]).filter(x=>Number(x.shop_id)===Number(row.shop_id)&&(!row.month_key||x.month_key===row.month_key));
+  if(ads.length){result.advertising_cost=roundMoneyMysql(ads.reduce((n,a)=>n+Number(a.amount||0),0));result.advertising_cost_source='ozon_ad_sku_daily';}
+  return result;
+ });
 }
 
 const BILLING_RECORD_COST_SQL={
@@ -28542,6 +28638,20 @@ async function monthlyBillingOrderTotalMysql(from = "", to = "", shopId = "", op
   return Number(rows?.[0]?.total || 0);
 }
 
+async function billingProcurementDrilldownMysql(query,range,scope){
+ if((query.companyId&&query.companyId!=='all')||(query.company_id&&query.company_id!=='all')||Number(query.shopId||query.shop_id)>0)throw Object.assign(new Error('实际采购按全企业记录，尚无可靠公司或店铺分摊；请切换全部公司、全部店铺后查看。'),{statusCode:400});
+ const rows=await mysqlQuery(`SELECT po.id order_id,po.order_no posting_number,po.purchased_at ordered_at,DATE_FORMAT(CONVERT_TZ(po.purchased_at,'+00:00','+08:00'),'%Y-%m') month_key,
+  poi.id order_item_id,poi.actual_quantity quantity,poi.amount purchase_cost,poi.shipping_amount domestic_shipping_cost,p.id product_id,p.inventory_number,p.name inventory_name,p.name product_name,p.image_url,
+  (SELECT GROUP_CONCAT(DISTINCT sm.ozon_sku ORDER BY sm.ozon_sku SEPARATOR '、') FROM sku_mappings sm JOIN shops sku_shop ON sku_shop.id=sm.shop_id WHERE sm.product_id=p.id AND sm.active=1 AND ${orderTenantPredicateMysql('sm',scope)} AND ${orderTenantPredicateMysql('sku_shop',scope)}) ozon_sku
+ FROM purchase_orders po JOIN purchase_order_items poi ON poi.purchase_order_id=po.id
+ JOIN products p ON p.id=poi.product_id AND ${orderTenantPredicateMysql('p',scope)}
+ WHERE ${orderTenantPredicateMysql('po',scope)} AND ${orderTenantPredicateMysql('poi',scope)} AND po.status IN ('purchased','partial_inbound','inbound_done') AND poi.status<>'cancelled'
+ AND po.purchased_at>=CONVERT_TZ(?,'+08:00','+00:00') AND po.purchased_at<DATE_ADD(CONVERT_TZ(?,'+08:00','+00:00'),INTERVAL 1 DAY)
+ ORDER BY po.id,poi.id`,[range.from+' 00:00:00',range.to+' 00:00:00']);
+ const orders=new Map();for(const row of rows){if(!orders.has(row.order_id))orders.set(row.order_id,{id:row.order_id,shop_id:0,shop_name:'企业采购',posting_number:row.posting_number,ordered_at:row.ordered_at,outcome_type:'procurement',reconciliation_status:'recorded',fee_evidence:[],items:[]});orders.get(row.order_id).items.push({...row,sale_price:0,costs:{purchase_cost:Number(row.purchase_cost),domestic_shipping_cost:Number(row.domestic_shipping_cost)}});}
+ return {...billingDrilldown([...orders.values()],{...query,field:'purchase_cost',groupBy:query.groupBy==='order'?'order':'inventory'}),record_source:'procurement',scope_note:'按采购完成日期统计全企业实际货款和运费；关联SKU仅供查询，不将一笔采购重复分摊给多个SKU。'};
+}
+
 export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);
@@ -28552,10 +28662,15 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
   const month = Math.min(Math.max(Number(query.month || query.selectedMonth || 1), 1), 12);
   const range = billingDateRangeMysql(query, monthRangeMysql(year, month, true));
   const shopId = String(query.shopId || query.shop_id || "all");
+  if(query.recordSource==='procurement')return billingProcurementDrilldownMysql(query,range,tenantScope);
   const page = Math.max(Number(query.page || 1), 1);
-  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 50), 1), 200);
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 200);
   const costField=String(query.field||'');
   if(costField&&!Object.hasOwn(BILLING_RECORD_COST_SQL,costField))throw Object.assign(new Error('费用项目无效'),{statusCode:400});
+  if(query.groupBy||query.outcomeType||query.outcome_type){
+    const [projection,expenses]=await Promise.all([monthlyBillingProjectionMysql(range.from,range.to,shopId,tenantScope,companyId,true),monthlyBillingExpensesMysql(range.from,range.to,shopId,tenantScope,companyId)]);
+    return {...billingDrilldown(withBillingCostAdjustments(projection,expenses.rows),{...query,field:costField||query.metric||'purchase_cost'}),from:range.from,to:range.to};
+  }
   const options = {
     costField,
     tenantScope,
@@ -28600,7 +28715,7 @@ export async function monthlyBillingSourceRecordsMysql(query = {}, tenantId = "a
   const source = String(query.source || "platform");
   if (!["platform", "advertising"].includes(source)) throw Object.assign(new Error("不支持的账单来源"), { statusCode: 400 });
   const page = Math.max(1, Math.floor(Number(query.page) || 1));
-  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(query.pageSize) || 30)));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(query.pageSize) || 20)));
   const ad = source === "advertising";
   const table = ad ? "ozon_ad_sku_daily" : "ozon_finance_items";
   const day = ad ? "f.date_key" : "DATE(CONVERT_TZ(f.operation_date,'+00:00','+08:00'))";
@@ -28621,14 +28736,18 @@ export async function monthlyBillingSourceRecordsMysql(query = {}, tenantId = "a
   const groups = await mysqlQuery(`SELECT ${name} AS item_name, COUNT(*) AS record_count,
     CASE WHEN COUNT(${amount})=COUNT(*) THEN SUM(${amount}) ELSE NULL END AS amount_cny
     ${base} GROUP BY ${name} ORDER BY item_name`, params);
+  const sortField=['amount','count','name'].includes(query.sortBy)?query.sortBy:'amount';
+  const sortDirection=query.sortOrder==='asc'?1:-1;
+  groups.sort((a,b)=>{if(sortField==='name')return String(a.item_name).localeCompare(String(b.item_name))*sortDirection;if(sortField==='count')return (Number(a.record_count)-Number(b.record_count))*sortDirection;if(a.amount_cny==null)return b.amount_cny==null?0:1;if(b.amount_cny==null)return -1;return (Number(a.amount_cny)-Number(b.amount_cny))*sortDirection;});
   const itemName = String(query.itemName || "");
   const filter = itemName ? ` AND ${name}=?` : "";
   const scopedParams = itemName ? [...params, itemName] : params;
+  const recordOrder=sortField==='amount'?`(${amount} IS NULL) ASC,${amount} ${query.sortOrder==='asc'?'ASC':'DESC'},` : '';
   const [totalRow, rows] = await Promise.all([
     mysqlQueryOne(`SELECT COUNT(*) AS total ${base}${filter}`, scopedParams),
     mysqlQuery(`SELECT ${ad ? "f.ozon_sku, f.campaign_id, f.date_key AS record_date, CASE WHEN f.spend_rub!=0 OR f.spend_cny=0 THEN f.spend_rub ELSE NULL END AS original_amount, 'RUB' AS currency_code, '' AS posting_number, '' AS operation_id" : "f.id, f.operation_date AS record_date, f.amount AS original_amount, f.currency_code, f.posting_number, f.operation_id, f.service_type"},
       f.shop_id, s.name AS shop_name, ${name} AS item_name, ${amount} AS amount_cny
-      ${base}${filter} ORDER BY ${ad ? "f.date_key DESC, f.shop_id, f.ozon_sku, f.campaign_id, f.ad_type" : "f.operation_date DESC, f.id DESC"} LIMIT ? OFFSET ?`, [...scopedParams, pageSize, (page - 1) * pageSize])
+      ${base}${filter} ORDER BY ${recordOrder}${ad ? "f.date_key DESC, f.shop_id, f.ozon_sku, f.campaign_id, f.ad_type" : "f.operation_date DESC, f.id DESC"} LIMIT ? OFFSET ?`, [...scopedParams, pageSize, (page - 1) * pageSize])
   ]);
   return { source, groups: groups.map(row => ({ ...row, amount_cny: row.amount_cny == null ? null : roundMoneyMysql(row.amount_cny) })),
     rows: rows.map(row => ({ ...row, record_date: ad ? row.record_date : mysqlDateTimeIso(row.record_date), amount_cny: row.amount_cny == null ? null : roundMoneyMysql(row.amount_cny) })),
@@ -28651,26 +28770,28 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   const aiCostPolicy=await financeAiCostPolicy.readForScope(tenantScope);
   const explicitRange = billingDateRangeMysql(query);
   if (explicitRange) {
-    const [ranking, pendingByShop, expenses, procurementInventory, aiUsage] = await Promise.all([
-      profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId }),
+    const [ranking, pendingByShop, expenses, procurementInventory, aiUsage,projection,withdrawalAssignments] = await Promise.all([
+      profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId,groupByMonth:true }),
       monthlyBillingPendingByShopMysql(explicitRange.from, explicitRange.to, shopId, tenantScope, companyId),
       monthlyBillingExpensesMysql(explicitRange.from, explicitRange.to, shopId, tenantScope, companyId),
       includeAppendices ? monthlyProcurementInventorySummaryMysql(explicitRange.from, explicitRange.to, tenantScope) : Promise.resolve({}),
-      (includeAppendices||aiCostPolicy) ? billingAiUsageMysql(explicitRange.from, explicitRange.to, tenantScope,{groupByMonth:Boolean(aiCostPolicy)}).catch(error=>{if(!aiCostPolicy)throw error;return {available:false,months:{}};}) : Promise.resolve({})
+      (includeAppendices||aiCostPolicy) ? billingAiUsageMysql(explicitRange.from, explicitRange.to, tenantScope,{groupByMonth:Boolean(aiCostPolicy)}).catch(error=>{if(!aiCostPolicy)throw error;return {available:false,months:{}};}) : Promise.resolve({}),
+      monthlyBillingProjectionMysql(explicitRange.from,explicitRange.to,shopId,tenantScope,companyId),billingWithdrawalAssignmentsMysql(tenantScope)
     ]);
-    const shopRows = (ranking.rows || []).map((row) => {
-      const expense = expenses.byShop.get(String(row.shop_id)) || {};
-      const manualExpense = Number(expense.manual_expense || 0);
-      const salaryExpense = Number(expense.salary_expense || 0);
+    const monthlyShopRows = applyBillingProjectionMysql(ranking.rows||[],projection).map((row) => {
+      const monthExpenses=billingExpenseTotalsForMonth(expenses.rows,row.shop_id,row.month_key);
+      const manualExpense=monthExpenses.filter(e=>e.category!=='salary').reduce((n,e)=>n+e.amount_cny,0);
+      const salaryExpense=monthExpenses.filter(e=>e.category==='salary').reduce((n,e)=>n+e.amount_cny,0);
       return enrichMonthlyBillingShopRowMysql({
         ...row,
-        ...(pendingByShop.get(String(row.shop_id)) || {}),
         manual_expense: roundMoneyMysql(manualExpense),
         salary_expense: roundMoneyMysql(salaryExpense),
-        ...billingProfitTotals({...row,manual_expense:manualExpense,salary_expense:salaryExpense},expenses.rows.filter(expense=>String(expense.shop_id)===String(row.shop_id)))
+        ...billingProfitTotals({...row,manual_expense:manualExpense,salary_expense:salaryExpense},billingExpenseTotalsForMonth(expenses.rows,row.shop_id,row.month_key))
       });
     });
+    const shopRows=mergeBillingShopsMysql(monthlyShopRows).map(row=>enrichMonthlyBillingShopRowMysql({...row,...(pendingByShop.get(String(row.shop_id))||{})}));
     const summary = sumMonthlyBillingRowsMysql(shopRows);
+    Object.assign(summary,scopedBillingWithdrawal(applyBillingProjectionMysql(ranking.rows||[],projection),expenses.rows,withdrawalAssignments,companyId));
     summary.manual_expense = expenses.total_manual_expense;
     summary.salary_expense = expenses.total_salary_expense;
     summary.ai_fixed_cost=fixedAiExpenseTotal(expenses.rows);
@@ -28683,7 +28804,7 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
       ...explicitRange,
       label: `${explicitRange.from} 至 ${explicitRange.to}`,
       summary,
-      shops: shopRows,
+      shops: mergeBillingShopsMysql(shopRows),
       expenses: expenses.rows,
       procurement_inventory: procurementInventory,
       ai_usage: aiUsage,
@@ -28709,27 +28830,29 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
 
   const monthRows = await Promise.all(monthRanges.map(async (range) => {
     const includeOrders = (query.includeOrders === "1" || query.include_orders === "1") && range.month_key === selectedMonthKey;
-    const [ranking, pendingByShop, expenses, orders, procurementInventory, aiUsage] = await Promise.all([
-      profitRankingMysql({ dimension: "shop", from: range.from, to: range.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId }),
+    const [ranking, pendingByShop, expenses, orders, procurementInventory, aiUsage,projection,withdrawalAssignments] = await Promise.all([
+      profitRankingMysql({ dimension: "shop", from: range.from, to: range.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId,groupByMonth:true }),
       monthlyBillingPendingByShopMysql(range.from, range.to, shopId, tenantScope, companyId),
       monthlyBillingExpensesMysql(range.from, range.to, shopId, tenantScope, companyId),
       includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId, { tenantScope, companyId }) : Promise.resolve([]),
       includeAppendices ? monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope) : Promise.resolve({}),
-      (includeAppendices||aiCostPolicy) ? billingAiUsageMysql(range.from, range.to, tenantScope,{groupByMonth:Boolean(aiCostPolicy)}).catch(error=>{if(!aiCostPolicy)throw error;return {available:false,months:{}};}) : Promise.resolve({})
+      (includeAppendices||aiCostPolicy) ? billingAiUsageMysql(range.from, range.to, tenantScope,{groupByMonth:Boolean(aiCostPolicy)}).catch(error=>{if(!aiCostPolicy)throw error;return {available:false,months:{}};}) : Promise.resolve({}),
+      monthlyBillingProjectionMysql(range.from,range.to,shopId,tenantScope,companyId),billingWithdrawalAssignmentsMysql(tenantScope)
     ]);
-    const shopRows = (ranking.rows || []).map((row) => {
-      const expense = expenses.byShop.get(String(row.shop_id)) || {};
-      const manualExpense = Number(expense.manual_expense || 0);
-      const salaryExpense = Number(expense.salary_expense || 0);
+    const monthlyShopRows = applyBillingProjectionMysql(ranking.rows||[],projection).map((row) => {
+      const monthExpenses=billingExpenseTotalsForMonth(expenses.rows,row.shop_id,row.month_key);
+      const manualExpense=monthExpenses.filter(e=>e.category!=='salary').reduce((n,e)=>n+e.amount_cny,0);
+      const salaryExpense=monthExpenses.filter(e=>e.category==='salary').reduce((n,e)=>n+e.amount_cny,0);
       return enrichMonthlyBillingShopRowMysql({
         ...row,
-        ...(pendingByShop.get(String(row.shop_id)) || {}),
         manual_expense: roundMoneyMysql(manualExpense),
         salary_expense: roundMoneyMysql(salaryExpense),
-        ...billingProfitTotals({...row,manual_expense:manualExpense,salary_expense:salaryExpense},expenses.rows.filter(expense=>String(expense.shop_id)===String(row.shop_id)))
+        ...billingProfitTotals({...row,manual_expense:manualExpense,salary_expense:salaryExpense},billingExpenseTotalsForMonth(expenses.rows,row.shop_id,row.month_key))
       });
     });
+    const shopRows=mergeBillingShopsMysql(monthlyShopRows).map(row=>enrichMonthlyBillingShopRowMysql({...row,...(pendingByShop.get(String(row.shop_id))||{})}));
     const summary = sumMonthlyBillingRowsMysql(shopRows);
+    Object.assign(summary,scopedBillingWithdrawal(applyBillingProjectionMysql(ranking.rows||[],projection),expenses.rows,withdrawalAssignments,companyId));
     summary.manual_expense = expenses.total_manual_expense;
     summary.salary_expense = expenses.total_salary_expense;
     summary.ai_fixed_cost=fixedAiExpenseTotal(expenses.rows);
@@ -28742,7 +28865,7 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
       ...range,
       label: `${Number(range.month_key.slice(5, 7))}月`,
       summary,
-      shops: shopRows,
+      shops: mergeBillingShopsMysql(shopRows),
       expenses: expenses.rows,
       procurement_inventory: procurementInventory,
       ai_usage: aiUsage,

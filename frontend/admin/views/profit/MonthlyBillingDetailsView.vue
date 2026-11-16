@@ -44,7 +44,16 @@ const parseAmountInput=value=>String(value??'').replace(/,/g,'');
 const entryProgress=computed(()=>Number(selectedSummary.value.order_count)>0?Number(selectedSummary.value.accrued_order_count||0)/Number(selectedSummary.value.order_count):0);
 const expenseDialog = ref(false);
 const expenseDrawer = ref(false);
+const evidenceOpen=ref(false),evidenceRows=ref([]),evidenceLoading=ref(false),evidenceError=ref(''),evidencePage=ref(1),evidencePageSize=ref(20);
+let evidenceController;
+async function showEvidence(row){evidenceController?.abort();evidenceController=new AbortController();const signal=evidenceController.signal,scope=currentApiCacheScope();evidenceRows.value=row.fee_evidence||[];evidenceError.value='';evidencePage.value=1;evidenceLoading.value=false;evidenceOpen.value=true;if(evidenceRows.value.length)return;evidenceLoading.value=true;
+ try{const result=await apiClient.post('/api/finance-center/ozon-posting-accruals',{shop_id:row.shop_id,order_ids:[row.order_id]},{signal});if(signal.aborted||scope!==currentApiCacheScope())return;evidenceRows.value=(result.rows||[]).flatMap(p=>(p.accruals||[]).map(r=>({operation_date:r.accrual_date,service_name:r.type_name||r.type_id,operation_id:'官方接口未提供流水ID',posting_number:p.posting_number,currency_code:r.accrued.currency,amount:Number(r.accrued.amount),amount_cny:null,source_endpoint:result.source_endpoint})));if(!evidenceRows.value.length)evidenceError.value='官方子单接口未返回费用；不代表整单费用为0，仍需核对母单和按日账单。';}catch(error){if(!signal.aborted&&scope===currentApiCacheScope())evidenceError.value=error.message||'官方账单暂未读取';}finally{if(evidenceController?.signal===signal)evidenceLoading.value=false;}
+}
+function drillOrders(row){Object.assign(orderRecords,{groupBy:"order",page:1,productId:row.product_id||"",sku:row.product_id?"":row.ozon_sku,skuShopId:row.shop_id});loadOrderRecords();}
+function clearDrill(){Object.assign(orderRecords,{productId:"",sku:"",skuShopId:"",page:1});loadOrderRecords();}
+const withdrawalOpen=ref(false);
 const expenseCategoryFilter = ref("");
+const expensePage=ref(1),expensePageSize=ref(20);
 const capitalDrawer = ref(false);
 const shopsOpen = ref(false), aiOpen = ref(false), settlementOpen = ref(false), payrollOpen = ref(false);
 const payrollRows = ref([]), payrollLoading = ref(false), payrollError = ref(''), payrollMonth = ref('period');
@@ -66,8 +75,8 @@ async function loadPayroll(signal) {
 }
 
 const groupNames = { goods:'商品成本', logistics:'物流费用', platform:'平台费用', operating:'日常经营', personnel:'人员费用', funds:'支付费用' };
-const itemNames = {purchase_cost:'采购成本',international_shipping_cost:'跨境配送',commission_fee:'佣金',ozon_service_fee:'服务费',advertising_cost:'广告',packaging_cost:'包装',ai_subscription:'AI 订阅',other_fee:'支付手续费'};
-const inlineItems = group => group.children.filter(item => item.source !== 'expenses' || item.amount !== 0);
+const itemNames = {purchase_cost:'采购成本',international_shipping_cost:'跨境配送',commission_fee:'佣金',ozon_service_fee:'服务费',advertising_cost:'广告',packaging_cost:'包装',ai_subscription:'AI 订阅',other_fee:'Ozon收单费'};
+const inlineItems = group => group.children.filter(item => item.source !== 'expenses' || item.amount !== 0 || item.key === 'fbp_stocking_shipping');
 function toolbarCommand(command) {
   if(command==='overview') router.push('/finance-center');
   if(command==='ai') aiOpen.value=true;
@@ -82,7 +91,7 @@ const sourceDrawer = ref(false);
 const sourceKind = ref("platform");
 const orderRecordDrawer = ref(false);
 const recordItem = ref(null);
-const orderRecords = reactive({ loading: false, error: "", rows: [], total: 0, page: 1, keyword: "", outcomeType:"" });
+const orderRecords = reactive({ loading: false, error: "", rows: [], total: 0, page: 1, keyword: "", outcomeType:"",groupBy:"order",pageSize:20,sortBy:"amount",sortOrder:"desc",summary:{},productId:"",sku:"",skuShopId:"",recordSource:"orders" });
 let recordController;
 const recordCache=new Map();
 const fastCostFields=new Set(['purchase_cost','domestic_shipping_cost','international_shipping_cost','packaging_cost','commission_fee','ozon_service_fee','other_fee']);
@@ -116,7 +125,7 @@ const unclassifiedDifference = computed(() => selectedSummary.value.net_profit==
 function openSource(source = "platform") { sourceKind.value = source; sourceDrawer.value = true; }
 async function loadOrderRecords() {
   recordController?.abort();recordController=new AbortController();const signal=recordController.signal,scope=currentApiCacheScope();
-  const params=new URLSearchParams({...sourceFilters.value,page:orderRecords.page,pageSize:30,keyword:orderRecords.keyword,outcomeType:orderRecords.outcomeType,field:fastCostFields.has(recordItem.value?.key)?recordItem.value.key:''});
+  const params=new URLSearchParams({...sourceFilters.value,page:orderRecords.page,pageSize:orderRecords.pageSize,recordSource:orderRecords.recordSource,groupBy:orderRecords.groupBy,metric:recordItem.value?.key||'',sortBy:orderRecords.sortBy,sortOrder:orderRecords.sortOrder,productId:orderRecords.productId,sku:orderRecords.sku,skuShopId:orderRecords.skuShopId,keyword:orderRecords.keyword,outcomeType:orderRecords.outcomeType,field:fastCostFields.has(recordItem.value?.key)?recordItem.value.key:''});
   const key=scope+':'+params,cached=recordCache.get(key);
   orderRecords.error='';orderRecords.rows=[];
   if(cached&&Date.now()-cached.at<15000){Object.assign(orderRecords,{...cached.data,loading:false});return;}
@@ -124,7 +133,7 @@ async function loadOrderRecords() {
   try{
     const result=await apiClient.get('/api/monthly-billing-orders?'+params,{signal,noCache:true});
     if(!signal.aborted&&scope===currentApiCacheScope()){
-      const data={rows:(result.rows||[]).map(row=>({...row,recognized_loss:Math.max(0,-Number(row.profit||0))})),total:Number(result.total||0)};
+      const data={rows:(result.rows||[]).map(row=>({...row,recognized_loss:row.recognized_loss??Math.max(0,-Number(row.profit||0))})),total:Number(result.total||0),summary:result.summary||{}};
       Object.assign(orderRecords,data);recordCache.set(key,{at:Date.now(),data});if(recordCache.size>8)recordCache.delete(recordCache.keys().next().value);
     }
   }catch(error){if(!signal.aborted&&scope===currentApiCacheScope())orderRecords.error=error.message||'订单明细读取失败';}
@@ -133,14 +142,16 @@ async function loadOrderRecords() {
 
 function showGroupItem(item) {
   if(item.source==='ai_usage'){aiOpen.value=true;return;}
+  if (item.source === 'withdrawal') {withdrawalOpen.value=true;return;}
+  if (item.source === 'aftersale') return showLossRecords('returns');
   if (item.source === "expenses") return showExpenses(item.key);
   if (item.source === "advertising") return openSource("advertising");
   if (item.source === "unavailable") return openSource();
-  orderRecords.outcomeType=""; recordItem.value = item; orderRecords.page = 1; orderRecords.keyword = ""; orderRecords.rows = []; orderRecordDrawer.value = true; loadOrderRecords();
+  Object.assign(orderRecords,{outcomeType:"",recordSource:"orders",groupBy:item.key==='purchase_cost'?'inventory':'order',productId:"",sku:"",skuShopId:"",summary:{}}); recordItem.value = item; orderRecords.page = 1; orderRecords.keyword = ""; orderRecords.rows = []; orderRecordDrawer.value = true; loadOrderRecords();
 }
 function showLossRecords(outcomeType) {
-  recordItem.value={key:'recognized_loss',label:outcomeType==='returns'?'退货 / 拒收损失':'取消损失'};
-  orderRecords.outcomeType=outcomeType;orderRecords.page=1;orderRecords.keyword='';orderRecords.rows=[];orderRecordDrawer.value=true;loadOrderRecords();
+  recordItem.value={key:'recognized_loss',label:outcomeType==='returns'?'退货 / 拒收':'取消订单'};
+  Object.assign(orderRecords,{outcomeType,sortBy:outcomeType==='returns'?'quantity':'amount',sortOrder:"desc",recordSource:"orders",groupBy:"inventory",productId:"",sku:"",skuShopId:"",summary:{}});orderRecords.page=1;orderRecords.keyword='';orderRecords.rows=[];orderRecordDrawer.value=true;loadOrderRecords();
 }
 const shopRows = computed(() => (state.month?.shops || []).map(row => {
   const groups = buildBillingGroups(row, expenseRows.value.filter(expense => String(expense.shop_id || "") === String(row.shop_id)));
@@ -149,28 +160,28 @@ const shopRows = computed(() => (state.month?.shops || []).map(row => {
 }));
 const expenseRows = computed(() => state.month?.expenses || []);
 const expenseBreakdown = computed(() => summarizeBillingExpenses(expenseRows.value));
-const correctionDialog=ref(false),correctionSaving=ref(false),correctionForm=reactive({order_id:null,field:'',company_id:'',base:0,amount:0,revision:0,reason:''});
-const editableOrderField = computed(()=>['domestic_shipping_cost','packaging_cost','other_fee'].includes(recordItem.value?.key));
+const correctionDialog=ref(false),correctionSaving=ref(false),correctionForm=reactive({order_id:null,field:'',company_id:'',base:0,amount:0,revision:0,reason:'',projection_delta:0});
+const editableOrderField = computed(()=>['domestic_shipping_cost','packaging_cost'].includes(recordItem.value?.key));
 const editableExpenseCategory = computed(()=>recordItem.value?.key==='domestic_shipping_cost'?'domestic_shipping':recordItem.value?.key==='packaging_cost'?'packaging':recordItem.value?.key==='other_fee'?'order_payment':'other');
 function orderAdjustment(row) { return expenseRows.value.find(e=>e.source_type==='billing_cost_adjustment'&&Number(e.cost_order_id)===Number(row.order_id)&&e.cost_field===recordItem.value?.key); }
-function orderCost(row) {return Math.round((Number(row[recordItem.value?.key]||0)+Number(orderAdjustment(row)?.amount_cny||0))*100)/100;}
+function orderCost(row) {return Math.round((Number(row.billing_costs?.[recordItem.value?.key]??row[recordItem.value?.key]??0)+(row.adjustments_included?0:Number(orderAdjustment(row)?.amount_cny||0)))*100)/100;}
 function openCostCorrection(row,remove=false) {
   const adjustment=orderAdjustment(row);
-  Object.assign(correctionForm,{order_id:row.order_id,field:recordItem.value.key,company_id:String(adjustment?.company_id||defaultCompanyId(row.shop_id)),base:Number(row[recordItem.value.key]||0),amount:remove?0:orderCost(row),revision:Number(adjustment?.cost_revision||0),reason:remove?'移除该笔账单费用':''});
+  Object.assign(correctionForm,{order_id:row.order_id,field:recordItem.value.key,company_id:String(adjustment?.company_id||defaultCompanyId(row.shop_id)),base:Number(row[recordItem.value.key]||0),projection_delta:Number(row.billing_costs?.[recordItem.value.key]??row[recordItem.value.key]??0)-Number(row[recordItem.value.key]||0)-(row.adjustments_included?Number(adjustment?.amount_cny||0):0),amount:remove?0:orderCost(row),revision:Number(adjustment?.cost_revision||0),reason:remove?'移除该笔账单费用':''});
   correctionDialog.value=true;
 }
 async function saveCostCorrection(action='save') {
   correctionSaving.value=true;
-  try{await apiClient.post('/api/finance-submissions/billing-cost',{order_id:correctionForm.order_id,field:correctionForm.field,company_id:Number(correctionForm.company_id),expected_base:correctionForm.base,expected_revision:correctionForm.revision,amount:correctionForm.amount,reason:correctionForm.reason,action});correctionDialog.value=false;ElMessage.success('费用已更新');await loadData();await loadOrderRecords();}catch(error){ElMessage.error(error.message||'费用保存失败');}finally{correctionSaving.value=false;}
+  try{await apiClient.post('/api/finance-submissions/billing-cost',{order_id:correctionForm.order_id,field:correctionForm.field,company_id:Number(correctionForm.company_id),expected_base:correctionForm.base,expected_revision:correctionForm.revision,amount:correctionForm.amount-Number(correctionForm.projection_delta||0),reason:correctionForm.reason,action});correctionDialog.value=false;ElMessage.success('费用已更新');await loadData();await loadOrderRecords();}catch(error){ElMessage.error(error.message||'费用保存失败');}finally{correctionSaving.value=false;}
 }
 function editExpense(row) {
   if(row.source_type==='payroll_void'){ElMessage.info('这是已作废工资的审计冲销，请在工资管理查看原批次');return;}
-  if(row.source_type==='billing_cost_adjustment') { Object.assign(correctionForm,{order_id:row.cost_order_id,field:row.cost_field,company_id:String(row.company_id),base:Number(row.cost_base),amount:Number(row.cost_base)+Number(row.amount_cny),revision:Number(row.cost_revision),reason:''});correctionDialog.value=true;return; }
+  if(row.source_type==='billing_cost_adjustment') { Object.assign(correctionForm,{order_id:row.cost_order_id,field:row.cost_field,company_id:String(row.company_id),base:Number(row.cost_base),amount:Number(row.cost_base)+Number(row.amount_cny),revision:Number(row.cost_revision),projection_delta:0,reason:''});correctionDialog.value=true;return; }
   if(row.source_type==='finance_submission') {router.push({path:row.category==='salary'?'/finance/payroll':'/finance/reimbursements',query:{companyId:String(row.company_id),month:String(row.expense_date).slice(0,7)}});return;}
   openExpense(row);
 }
 const visibleExpenseRows = computed(() => expenseRows.value.filter((row) => !expenseCategoryFilter.value || (row.category || "other") === expenseCategoryFilter.value));
-function showExpenses(category = "") { expenseCategoryFilter.value = category; expenseDrawer.value = true; }
+function showExpenses(category = "") { expenseCategoryFilter.value = category;expensePage.value=1; expenseDrawer.value = true; }
 const aiSubscription = computed(() => expenseBreakdown.value.find((item) => item.value === "ai_subscription")?.amount || 0);
 
 function formatAiMoney(value) {
@@ -386,9 +397,9 @@ watch(
   }
 );
 watch(sourceFilters, () => { if (orderRecordDrawer.value) { orderRecords.page = 1; loadOrderRecords(); } });
-watch(()=>currentApiCacheScope(),()=>{recordCache.clear();recordController?.abort();abortController?.abort();orderRecords.rows=[];payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';loadData();});
+watch(()=>currentApiCacheScope(),()=>{recordCache.clear();evidenceController?.abort();evidenceRows.value=[];evidenceOpen.value=false;recordController?.abort();abortController?.abort();Object.assign(orderRecords,{rows:[],summary:{},total:0,productId:"",sku:"",skuShopId:""});payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';state.shopId='all';loadData();});
 window.addEventListener("erp:finance-changed",loadData);
-onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData); abortController?.abort(); recordController?.abort(); recordCache.clear(); });
+onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData);evidenceController?.abort(); abortController?.abort(); recordController?.abort(); recordCache.clear(); });
 </script>
 
 <template>
@@ -405,6 +416,7 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
       <div class="toolbar-links"><el-button :icon="Plus" @click="openExpense(null,'other')">录入费用</el-button><el-dropdown @command="toolbarCommand"><el-button>更多 ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="overview">年度总览</el-dropdown-item><el-dropdown-item command="capital">采购与库存</el-dropdown-item><el-dropdown-item command="ai">AI 用量</el-dropdown-item><el-dropdown-item command="payroll">工资归档</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
     </section>
     <section v-loading="state.loading" class="billing-overview">
+      <el-alert v-if="selectedSummary.income_pending_count" :title="selectedSummary.income_pending_count+'单已收到官方退货状态，但退款收入账单尚未对齐；净利润暂标待核定。'" type="warning" :closable="false"/>
       <div class="summary-grid">
         <button class="summary-card interactive" @click="openOrderDetails()"><BillingMetricLabel label="订单" :hint="billingMetrics.order_count.hint"/><strong>{{formatInteger(selectedSummary.order_count)}}</strong><small>查看订单 →</small></button>
         <button class="summary-card interactive" @click="showGroupItem(incomeGroup.children[0])"><BillingMetricLabel label="营业额" :hint="billingMetrics.revenue.hint"/><strong>¥{{formatMoney(selectedSummary.revenue)}}</strong><small>查看收入 →</small></button>
@@ -437,6 +449,12 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
       </div>
     </section>
     <FinanceImportPanel v-if="reviewSubmissionId" kind="payroll" :submission-id="reviewSubmissionId" @closed="reviewSubmissionId=null" @changed="loadData"/>
+    <el-dialog v-model="withdrawalOpen" title="提现手续费" width="min(92vw,680px)" destroy-on-close>
+      <p>按公司和月份汇总；平台回款余值 = 营业额 − 佣金 − 平台物流/配送 − 服务费 − Ozon收单费 − 广告 − 平台售后费用。</p>
+      <p>回款基数 <strong>¥{{formatMoney(selectedSummary.withdrawal_base)}}</strong> × 1.2% = <strong>¥{{formatMoney(selectedSummary.withdrawal_estimate)}}</strong></p>
+      <p>本期计费 ¥{{formatMoney(selectedSummary.withdrawal_fee)}}（{{selectedSummary.withdrawal_source!=='estimated'?'已登记实际费用，替换估算':'按1.2%估算'}}）。采购、国内运费、包装、工资不进入提现基数；旧预估提现费已从可拆分的订单混合手续费中移出。</p>
+      <el-button type="primary" @click="openExpense(null,'withdrawal')">登记实际提现费</el-button><el-button @click="showExpenses('withdrawal')">实际费用记录</el-button>
+    </el-dialog>
     <el-dialog v-model="payrollOpen" title="工资明细" width="min(96vw, 1120px)" destroy-on-close>
       <p class="payroll-hint">工资按所选公司和月份展示；账单支出按实际记账日期统计。公司共用工资不自动分摊到店铺。</p>
       <el-alert v-if="payrollError" :title="payrollError" type="warning" :closable="false"/>
@@ -520,7 +538,7 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
           <template #default="{ row }">{{ formatMoney(row.grouped_expense_total) }}</template>
         </el-table-column>
         <el-table-column prop="net_profit" :label="billingMetrics.net_profit.label" min-width="118" align="right"><template #header><BillingMetricLabel metric="net_profit" /></template>
-          <template #default="{ row }"><strong :class="{ 'negative-money': Number(row.net_profit || 0) < 0 }">{{ formatMoney(row.net_profit) }}</strong></template>
+          <template #default="{ row }"><strong :class="{ 'negative-money': Number(row.net_profit || 0) < 0 }">{{ row.net_profit==null?'待核定':formatMoney(row.net_profit) }}</strong></template>
         </el-table-column>
         <el-table-column :label="billingMetrics.net_profit_margin.label" width="106" align="right"><template #header><BillingMetricLabel metric="net_profit_margin" /></template>
           <template #default="{ row }">{{ formatRatio(row.revenue ? Number(row.net_profit || 0) / Number(row.revenue) : 0) }}</template>
@@ -582,26 +600,45 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
 
     </el-dialog>
 
-    <el-drawer v-model="orderRecordDrawer" :title="(recordItem?.label || '') + ' · 订单记录'" size="min(100%, 1060px)" destroy-on-close @closed="recordController?.abort()">
+    <el-drawer v-model="orderRecordDrawer" :title="(recordItem?.label || '') + '明细'" size="min(100%, 1060px)" destroy-on-close @closed="recordController?.abort()">
       <div v-loading="orderRecords.loading" class="group-detail">
         <div v-if="editableOrderField" class="drawer-toolbar"><el-button type="primary" @click="openExpense(null,editableExpenseCategory)">新增费用</el-button><el-button @click="showExpenses(editableExpenseCategory)">补充与更正记录</el-button></div>
-        <p>{{orderRecords.outcomeType?'按下单日期筛选，损失取订单记录的负利润金额；仅核对，不作为额外费用叠加。':'按下单日期筛选。订单来源金额保留，国内运费、包装及订单手续费可记录更正差额。'}}</p>
-        <el-input v-model="orderRecords.keyword" clearable placeholder="搜索订单号、店铺或状态" @change="orderRecords.page = 1; loadOrderRecords()" />
+        <el-radio-group v-if="recordItem?.key==='purchase_cost'" v-model="orderRecords.recordSource" @change="orderRecords.page=1;orderRecords.productId='';orderRecords.sku='';orderRecords.groupBy='inventory';loadOrderRecords()"><el-radio-button value="orders">订单商品成本</el-radio-button><el-radio-button value="procurement" :disabled="state.companyId!=='all'||state.shopId!=='all'">实际采购支出</el-radio-button></el-radio-group>
+        <p v-if="orderRecords.recordSource==='procurement'">按采购完成日期统计全企业实际采购；关联SKU仅用于查询，不重复分摊采购数量。切换公司或店铺时请使用订单商品成本。</p>
+        <p v-else>{{orderRecords.outcomeType?'按下单日期统计同一批订单；损益按关联订单费用分摊，保留未核定的预估成本。官方缺项标为待核对，冲回保留负数，不再重复扣损失总额。':recordItem?.key==='purchase_cost'?'这里统计订单消耗的商品成本，不是全部采购付款；支持按库存或SKU汇总。':'来源金额保留原订单记录，账单金额体现官方冲回及人工更正。'}}</p>
+        <div class="drawer-toolbar"><el-select v-model="orderRecords.groupBy" aria-label="汇总方式" style="width:150px" @change="orderRecords.page=1;loadOrderRecords()"><el-option label="按库存汇总" value="inventory"/><el-option v-if="orderRecords.recordSource!=='procurement'" label="按SKU汇总" value="sku"/><el-option label="按订单查看" value="order"/></el-select><el-select v-model="orderRecords.sortBy" aria-label="排序字段" style="width:130px" @change="orderRecords.page=1;loadOrderRecords()"><el-option :label="orderRecords.outcomeType?'净损失':'金额'" value="amount"/><el-option label="订单数" value="order_count"/><el-option :label="orderRecords.outcomeType==='returns'?'退货件数':'件数'" value="quantity"/><el-option v-if="orderRecords.outcomeType" :label="orderRecords.outcomeType==='returns'?'退货率':'取消率'" value="rate"/></el-select><el-select v-model="orderRecords.sortOrder" aria-label="排序方向" style="width:100px" @change="orderRecords.page=1;loadOrderRecords()"><el-option label="从高到低" value="desc"/><el-option label="从低到高" value="asc"/></el-select><el-button v-if="orderRecords.productId||orderRecords.sku" @click="clearDrill">清除商品筛选</el-button></div>
+        <div v-if="orderRecords.outcomeType||recordItem?.key==='purchase_cost'" class="drill-summary">
+          <div><span>订单 / 件数</span><strong>{{formatInteger(orderRecords.summary.order_count)}} / {{orderRecords.summary.quantity==null?'待核实':formatInteger(orderRecords.summary.quantity)}}</strong></div>
+          <div><span>{{orderRecords.outcomeType?'原订单金额':orderRecords.recordSource==='procurement'?'实际采购货款':'采购成本'}}</span><strong>¥{{formatMoney(orderRecords.outcomeType?orderRecords.summary.order_amount:orderRecords.summary.amount)}}</strong></div>
+          <div v-if="orderRecords.recordSource==='procurement'"><span>采购运费</span><strong>¥{{formatMoney(orderRecords.summary.logistics_loss)}}</strong></div>
+          <template v-if="orderRecords.outcomeType"><div><span>净损益</span><strong>¥{{formatMoney(orderRecords.summary.net_profit)}}</strong></div><div><span>货值成本</span><strong>¥{{formatMoney(orderRecords.summary.goods_loss)}}</strong></div><div><span>物流及退货费</span><strong>¥{{formatMoney(orderRecords.summary.logistics_loss)}}</strong></div><div><span>佣金净扣款</span><strong>¥{{formatMoney(orderRecords.summary.commission_loss)}}</strong></div></template>
+        </div>
+        <el-alert v-if="orderRecords.outcomeType&&orderRecords.summary.pending_count" :title="orderRecords.summary.pending_count+'单的官方费用尚未齐全，仍含预估；未把缺项视为0。货值是否追回仍需核对。'" type="warning" :closable="false"/>
+        <el-input v-model="orderRecords.keyword" clearable placeholder="搜索订单号、SKU或库存" @change="orderRecords.page = 1; loadOrderRecords()" />
         <el-alert v-if="orderRecords.error" :title="orderRecords.error" type="error" :closable="false" />
         <el-table :data="orderRecords.rows" stripe border>
-          <el-table-column label="下单日期" width="115"><template #default="{ row }">{{ shanghaiDateText(row.ordered_at) }}</template></el-table-column>
-          <el-table-column prop="posting_number" label="订单号" min-width="175" />
-          <el-table-column prop="shop_name" label="店铺" min-width="130" />
-          <el-table-column v-if="!isCostRecord" prop="product_name" label="商品" min-width="200" />
-          <el-table-column label="结算状态" width="110"><template #default="{ row }">{{ row.settlement_state === 'finance_accrued' ? '已结算' : '预估 / 待核实' }}</template></el-table-column>
-          <el-table-column :label="editableOrderField ? '来源金额（CNY）' : recordItem?.label + '（CNY）'" min-width="160" align="right"><template #default="{ row }">{{ formatMoney(row[recordItem?.key]) }}</template></el-table-column>
-          <el-table-column v-if="editableOrderField" label="账单金额" width="130" align="right"><template #default="{row}">{{formatMoney(orderCost(row))}}</template></el-table-column>
-          <el-table-column v-if="editableOrderField" label="操作" width="150" fixed="right"><template #default="{row}"><el-button link type="primary"  :aria-label="`编辑${row.posting_number}费用`" @click="openCostCorrection(row)">编辑</el-button><el-button link type="danger" :aria-label="`删除${row.posting_number}费用`" @click="openCostCorrection(row,true)">删除</el-button></template></el-table-column>
+          <el-table-column v-if="orderRecords.outcomeType||recordItem?.key==='purchase_cost'" label="图片" width="85"><template #default="{row}"><el-image v-if="row.image_url" :src="row.image_url" :preview-src-list="[row.image_url]" preview-teleported fit="cover" style="width:64px;height:84px"/><span v-else>无图</span></template></el-table-column>
+          <el-table-column v-if="orderRecords.groupBy==='order'" label="下单日期" width="115"><template #default="{row}">{{shanghaiDateText(row.ordered_at)}}</template></el-table-column>
+          <el-table-column v-if="orderRecords.groupBy==='order'" prop="posting_number" label="订单号" min-width="175"/>
+          <el-table-column v-if="orderRecords.outcomeType||recordItem?.key==='purchase_cost'||orderRecords.groupBy!=='order'" label="商品 / 库存" min-width="210"><template #default="{row}"><strong>{{row.inventory_name||row.product_name||'未绑定库存'}}</strong><div>库存ID：{{row.inventory_number||row.product_id||'未绑定'}}</div><small>SKU：{{row.ozon_skus||row.ozon_sku||'-'}}</small></template></el-table-column>
+          <el-table-column v-if="orderRecords.groupBy!=='inventory'" prop="shop_name" label="店铺" min-width="120"/>
+          <el-table-column v-if="orderRecords.groupBy!=='order'" prop="order_count" :label="orderRecords.outcomeType==='returns'?'退货单数':'订单数'" width="90"/>
+          <el-table-column v-if="orderRecords.outcomeType||recordItem?.key==='purchase_cost'" prop="quantity" :label="orderRecords.outcomeType==='returns'?'退货件数':'件数'" width="90"><template #default="{row}">{{row.quantity==null?'待核实':formatInteger(row.quantity)}}</template></el-table-column>
+          <el-table-column v-if="orderRecords.outcomeType&&orderRecords.groupBy!=='order'" :label="orderRecords.outcomeType==='returns'?'退货率':'取消率'" width="130"><template #header><BillingMetricLabel :label="orderRecords.outcomeType==='returns'?'退货率':'取消率'" hint="件数口径：该库存退货或取消件数÷同一筛选期间该库存全部下单件数。下方另列订单数；近期结果尚未完整。"/></template><template #default="{row}">{{row.rate==null?'待核实':formatRatio(row.rate)}}<small> / {{formatInteger(row.base_quantity)}}件</small><small>订单：{{row.order_count}} / {{row.base_order_count}}</small></template></el-table-column>
+          <el-table-column v-if="recordItem?.key==='other_fee'" label="Ozon项目" min-width="200"><template #default="{row}">{{row.fee_evidence?.filter(r=>r.category==='collecting_fee').map(r=>r.service_name).filter((v,i,a)=>a.indexOf(v)===i).join('、')||'收单费预估，待官方核对'}}<small>Acquiring / MarketplaceRedistributionOfAcquiringOperation</small></template></el-table-column>
+          <el-table-column v-if="orderRecords.groupBy==='order'" label="费用依据" width="130"><template #default="{row}">{{row.reconciliation_status==='official'?'官方净额':row.reconciliation_status==='recorded'?'已入账':row.reconciliation_status==='partial'?'部分官方 / 待核对':'订单预估 / 待核对'}}</template></el-table-column>
+          <el-table-column v-if="orderRecords.groupBy==='order'&&isCostRecord&&orderRecords.recordSource!=='procurement'" label="原订单成本" width="120" align="right"><template #default="{row}">{{formatMoney(row[recordItem?.key])}}</template></el-table-column>
+          <el-table-column :label="orderRecords.outcomeType?'分摊净损失（负数为收益）':'账单金额（CNY）'" min-width="150" align="right"><template #default="{row}">{{formatMoney(orderRecords.groupBy==='order'&&editableOrderField?orderCost(row):row.amount)}}</template></el-table-column>
+          <el-table-column label="操作" min-width="160" fixed="right"><template #default="{row}"><el-button v-if="orderRecords.groupBy!=='order'" link type="primary" @click="drillOrders(row)">看订单</el-button><template v-else><el-button v-if="orderRecords.recordSource!=='procurement'" link type="primary" @click="showEvidence(row)">核对账单</el-button><template v-if="editableOrderField&&!orderRecords.outcomeType"><el-button link type="primary" @click="openCostCorrection(row)">编辑</el-button><el-button link type="danger" @click="openCostCorrection(row,true)">删除</el-button></template></template></template></el-table-column>
         </el-table>
-        <el-pagination v-model:current-page="orderRecords.page" :page-size="30" :total="orderRecords.total" layout="total, prev, pager, next" @current-change="loadOrderRecords" />
+        <el-pagination v-model:current-page="orderRecords.page" v-model:page-size="orderRecords.pageSize" :page-sizes="[20,50,100]" :total="orderRecords.total" layout="total, sizes, prev, pager, next" @size-change="orderRecords.page=1;loadOrderRecords()" @current-change="loadOrderRecords" />
       </div>
     </el-drawer>
 
+    <el-dialog v-model="evidenceOpen" @closed="evidenceController?.abort()" title="官方账单依据" width="min(96vw,1200px)" destroy-on-close>
+      <p>Ozon原始账单按操作日保留正负：负数是扣款，正数是冲回或入账。母单费用按原订单权重分摊；缺少其他项目不代表其费用为0。</p>
+      <el-alert v-if="evidenceError" :title="evidenceError" type="warning" :closable="false"/><el-table v-loading="evidenceLoading" :data="evidenceRows.slice((evidencePage-1)*evidencePageSize,evidencePage*evidencePageSize)" border><el-table-column prop="operation_date" label="账单日期" width="115"><template #default="{row}">{{shanghaiDateText(row.operation_date)}}</template></el-table-column><el-table-column prop="service_name" label="Ozon原始项目" min-width="150"/><el-table-column prop="operation_id" label="账单流水号" min-width="220"/><el-table-column prop="posting_number" label="关联货件 / 母单" min-width="170"/><el-table-column label="原币金额" min-width="130"><template #default="{row}">{{formatMoney(row.amount)}} {{row.currency_code}}</template></el-table-column><el-table-column label="人民币净额" min-width="120"><template #default="{row}">{{row.amount_cny==null?'未换算':formatMoney(row.amount_cny)}}</template></el-table-column><el-table-column prop="source_endpoint" label="来源接口" min-width="240"/></el-table><el-pagination v-model:current-page="evidencePage" v-model:page-size="evidencePageSize" :page-sizes="[20,50,100]" :total="evidenceRows.length" layout="total, sizes, prev, pager, next"/>
+    </el-dialog>
     <el-drawer v-model="sourceDrawer" :title="sourceKind === 'advertising' ? '广告费用明细' : 'Ozon 原始账单明细'" size="min(100%, 1160px)" destroy-on-close>
       <BillingSourceRecords v-if="sourceDrawer" :filters="sourceFilters" :source="sourceKind" />
       <el-button v-if="sourceKind === 'advertising'" style="margin-top:16px" @click="showGroupItem({ key: 'advertising_cost', label: '订单广告成本', source: 'orders' })">查看订单广告成本（报表无金额时的回退值）</el-button>
@@ -613,7 +650,7 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
         <el-button type="primary" :icon="Plus" @click="openExpense(null, expenseCategoryFilter || 'other')">新增费用</el-button>
       </div>
       <el-button v-if="expenseCategoryFilter" link type="primary" @click="expenseCategoryFilter = ''">查看全部费用</el-button>
-      <el-table :data="visibleExpenseRows" stripe border>
+      <el-table :data="visibleExpenseRows.slice((expensePage-1)*expensePageSize,expensePage*expensePageSize)" stripe border>
         <el-table-column prop="expense_date" label="时间" width="112">
           <template #default="{ row }">{{ shanghaiDateText(row.expense_date) }}</template>
         </el-table-column>
@@ -642,6 +679,7 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination v-model:current-page="expensePage" v-model:page-size="expensePageSize" :page-sizes="[20,50,100]" :total="visibleExpenseRows.length" layout="total, sizes, prev, pager, next"/>
     </el-drawer>
 
     <el-dialog v-model="correctionDialog" title="更正费用" width="min(94vw,520px)" :close-on-click-modal="!correctionSaving">
@@ -653,7 +691,7 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
       <el-form label-position="top">
         <div class="expense-form-grid">
           <el-form-item label="项目/费用名称" class="wide-field">
-            <el-input v-model="expenseForm.description" placeholder="例如：GPT Pro订阅、水电费、团建、餐补" />
+            <el-input v-model="expenseForm.description" :placeholder="expenseForm.category==='fbp_stocking_shipping'?'例如：11月16日FBP备货快递费，可备注批次或运单号':'例如：GPT Pro订阅、水电费、团建、餐补'" />
           </el-form-item>
           <el-form-item label="费用类型">
             <el-select v-model="expenseForm.category">
@@ -816,3 +854,5 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
 <style scoped>.loss-review{display:flex;align-items:center;gap:24px;padding:16px 4px 0;flex-wrap:wrap}.loss-review small{color:var(--el-text-color-secondary)}</style>
 
 <style scoped>.billing-toolbar .year-input{width:110px;flex:0 0 110px}.billing-toolbar .month-input{width:90px;flex:0 0 90px}.billing-toolbar .company-input{width:155px}.billing-toolbar .shop-input{width:145px}.billing-toolbar :deep(.el-date-editor--daterange){width:250px;max-width:250px;flex:0 0 250px}</style>
+
+<style scoped>.drill-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}.drill-summary>div{padding:12px;background:var(--el-fill-color-light);border-radius:6px}.drill-summary span{display:block;font-size:12px;color:var(--el-text-color-secondary)}.drill-summary strong{display:block;margin-top:6px;font-size:18px}</style>

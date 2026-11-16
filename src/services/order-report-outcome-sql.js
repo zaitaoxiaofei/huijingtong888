@@ -4,7 +4,7 @@ import { buildOrderOutcomeSql as buildBaseOrderOutcomeSql } from './profit-formu
 // Reuse the published expressions unchanged. Materialize their shared parts
 // before the reporting predicates expand them for every order/item/aggregate.
 // GROUP BY keeps MySQL from merging these stages and expanding them again.
-export function orderReportOutcomeCtesSql(orderScope, dateWhereSql = '') {
+export function orderReportOutcomeCtesSql(orderScope, dateWhereSql = '', includeTerminal = false) {
   const base = buildBaseOrderOutcomeSql('o', 'mysql');
   const current = buildOrderOutcomeSql('o', 'mysql');
   const references = [];
@@ -39,7 +39,9 @@ export function orderReportOutcomeCtesSql(orderScope, dateWhereSql = '') {
       SELECT o.id,
         CASE WHEN ${effectiveSale} THEN 1 ELSE 0 END AS effective_business_sale,
         CASE WHEN ${rejected} THEN 1 ELSE 0 END AS rejected_unclaimed,
-        CASE WHEN ${returned} THEN 1 ELSE 0 END AS after_delivery_return
+        CASE WHEN ${returned} THEN 1 ELSE 0 END AS after_delivery_return${includeTerminal?`,
+        CASE WHEN ${substitute(current.cancelledPreFulfillment)} THEN 1 ELSE 0 END AS cancelled_pre_fulfillment,
+        CASE WHEN ${substitute(current.cargoLost)} THEN 1 ELSE 0 END AS cargo_lost`:''}
       FROM report_order_terminal o GROUP BY o.id
     )`;
 }

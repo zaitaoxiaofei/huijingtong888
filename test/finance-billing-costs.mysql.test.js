@@ -25,10 +25,15 @@ test('billing cost CRUD preserves source costs, isolates tenants, rejects stale 
   await s.save({...body,expected_revision:2,action:'restore',reason:'删除更正，恢复来源'},owner);assert.equal((await q("SELECT COUNT(*) n FROM finance_expenses WHERE source_type='billing_cost_adjustment'"))[0].n,0);
   assert.equal((await q('SELECT COUNT(*) n FROM finance_billing_cost_revisions'))[0].n,3);assert.equal(Number((await q('SELECT frozen_domestic_shipping amount FROM order_items WHERE id=20'))[0].amount),5);
   const results=await Promise.allSettled([s.save(body,owner),s.save({...body,amount:7},owner)]);assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
-  for(const category of ['domestic_shipping','packaging','ai_subscription','rent','utilities','office','bank','withdrawal']){
+  for(const category of ['fbp_stocking_shipping','domestic_shipping','packaging','ai_subscription','rent','utilities','office','bank','withdrawal']){
     const created=await saveFinanceExpense({company_id:20,expense_date:'2026-10-03',category,description:'费用CRUD验证',original_amount:10,amount_cny:10},10,'2');
     await saveFinanceExpense({id:created.id,company_id:20,expense_date:'2026-10-03',category,description:'修改后',original_amount:12,amount_cny:12},10,'2');
     assert.equal(Number((await q('SELECT amount_cny FROM finance_expenses WHERE id=?',[created.id]))[0].amount_cny),12);
+    if(category==='fbp_stocking_shipping'){
+      assert.equal((await q('SELECT category FROM finance_expenses WHERE id=?',[created.id]))[0].category,category);
+      await assert.rejects(saveFinanceExpense({id:created.id,company_id:30,expense_date:'2026-10-03',category,original_amount:99},10,'3'),{statusCode:404});
+      await assert.rejects(deleteFinanceExpense(created.id,'3'),{statusCode:404});
+    }
     await deleteFinanceExpense(created.id,'2');assert.equal((await q('SELECT COUNT(*) n FROM finance_expenses WHERE id=?',[created.id]))[0].n,0);
   }
   const orderFee=await s.save({...body,field:'other_fee',expected_base:0,amount:2},owner);assert.equal(orderFee.delta,2);

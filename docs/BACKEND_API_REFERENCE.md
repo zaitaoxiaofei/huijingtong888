@@ -2651,7 +2651,7 @@ Read an owned authorized Ozon shop's official monthly order realization report w
 
 #### `GET /api/monthly-billing-details`
 
-Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Unconfirmed unpaid payroll and loss reference totals are not extra deductions; paid pending payroll is recognized once and approval replaces its reporting accrual. An explicitly configured AI company policy selects reporting version revenue-less-recorded-costs-ai-v2 and deducts allocated metered cost once; unavailable usage leaves net_profit unknown. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeOverviewAi=1 opts into two grouped enterprise-wide AI queries, with available=false on read failure; AI is charged only to its configured company, not individual shops; policy and fixed AI cost metadata are included in the summary. Grouped months include expense_totals by category for the same monthly cost breakdown. includeAppendices=0 skips procurement/current-inventory appendices; a configured AI cost policy still reads grouped usage to preserve the same net profit. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
+Reporting projection official-net-fees-and-withdrawal-v2 reconciles signed official terminal-order fees against complete child/parent history at archived operation-day FX; only observed categories replace estimates, missing categories remain pending. Explicit aftersale fees are deducted once; loss reference totals are not extra deductions. Frozen estimate withdrawal is split out before adding 1.2% of nonnegative platform-net receipts, excluding purchase, domestic shipping, packaging and payroll. Recorded withdrawal replaces only its own company/month estimate. Advertising report zero is authoritative, and report totals replace order advertising estimates. returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Unconfirmed unpaid payroll and loss reference totals are not extra deductions; paid pending payroll is recognized once and approval replaces its reporting accrual. An explicitly configured AI company policy selects reporting version official-net-fees-and-withdrawal-ai-v3 and deducts allocated metered cost once; unavailable usage leaves net_profit unknown. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeOverviewAi=1 opts into two grouped enterprise-wide AI queries, with available=false on read failure; AI is charged only to its configured company, not individual shops; policy and fixed AI cost metadata are included in the summary. Grouped months include expense_totals by category for the same monthly cost breakdown. includeAppendices=0 skips procurement/current-inventory appendices; a configured AI cost policy still reads grouped usage to preserve the same net profit. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Query parameters:
@@ -2673,6 +2673,34 @@ Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item
   - `403` `application/json` -> `ErrorResponse`
   - `404` `application/json` -> `ErrorResponse`
 
+#### `GET /api/monthly-billing-orders`
+
+Read current-enterprise billing drilldowns. groupBy=inventory/sku/order returns whole-filter summaries before sorting/pagination and same-cohort piece rates (returned quantity / placed quantity), plus separate order rates; independent official SKU return observations override legacy order-level quantity, with duplicate return IDs counted once. Unknown quantity remains null and unknown inventory stays distinct by shop/SKU. Signed official fee evidence includes original service names, operation IDs, source endpoint and parent allocation. Historical costs stay available separately from billing_costs. recordSource=procurement reports owned completed purchases by inventory/purchase order without inventing SKU/company allocation; company/shop filters on actual purchases return 400. Published historical order profits are never rewritten. A confirmed official return without matching refund-income evidence makes net_profit unknown rather than retaining unverified revenue as final profit.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Query parameters:
+  - `from` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `to` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `shopId` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `companyId` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `field` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `metric` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `outcomeType` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `groupBy` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `recordSource` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `productId` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `sku` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `skuShopId` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `keyword` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `sortBy` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `sortOrder` (`string`, optional): Scoped billing filter; outcomeType returns or cancelled_pre_fulfillment; groupBy inventory, sku or order; sortBy amount, order_count, quantity or rate; recordSource orders or procurement.
+  - `page` (`integer`, optional): One-based page.
+  - `pageSize` (`integer`, optional): Defaults to 20; UI choices 20/50/100.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 #### `GET /api/monthly-billing-source-records`
 
 Read current-enterprise Ozon ledger or advertising records for billing drilldowns. Read-only, with per-project totals and paginated original records. Company assignments apply on each record's Beijing date. Original signed ledger amounts are evidence, not extra costs or income added to order profit; unavailable currency conversion remains null.
@@ -2686,7 +2714,9 @@ Read current-enterprise Ozon ledger or advertising records for billing drilldown
   - `source` (`string`, optional): platform or advertising; default platform.
   - `itemName` (`string`, optional): Exact original project name to filter records.
   - `page` (`integer`, optional): One-based page.
-  - `pageSize` (`integer`, optional): Page size, at most 100.
+  - `sortBy` (`string`, optional): amount, count or name; grouped totals sort before pagination.
+  - `sortOrder` (`string`, optional): desc (default) or asc.
+  - `pageSize` (`integer`, optional): Defaults to 20, at most 100.
 - Responses:
   - `200` `application/json` -> `object`
   - `400` `application/json` -> `ErrorResponse`

@@ -379,6 +379,75 @@ test('monthly billing reads only the current enterprise, including every financi
       await assert.rejects(monthlyBillingOrderDetailsMysql({...range,field:'__proto__'},'2'),{statusCode:400});
       await assert.rejects(monthlyBillingOrderDetailsMysql({...range,field:'other_fee',companyId:3},'2'),{statusCode:404});
     });
+    await t.test('FBP stocking freight CRUD updates monthly and annual net profit without changing order profit or foreign reports',async()=>{
+      const {saveFinanceExpense,deleteFinanceExpense}=await import('../src/services/finance-center.js');
+      const filters={from:'2026-05-01',to:'2026-05-31',companyId:2,includeAppendices:'0'},read=()=>monthlyBillingDetailsMysql(filters,'2');
+      const baseline=(await read()).selected.summary;
+      const body={company_id:2,expense_date:'2026-05-10',category:'fbp_stocking_shipping',description:'FBP备货快递费',original_amount:18.2,amount_cny:18.2};
+      const created=await saveFinanceExpense(body,2,'2');
+      let selected=(await read()).selected;assert.equal(selected.summary.order_profit,baseline.order_profit);assert.equal(selected.summary.net_profit,baseline.net_profit-18.2);
+      assert.equal(selected.expenses.filter(r=>r.category==='fbp_stocking_shipping').length,1);
+      const annual=await monthlyBillingDetailsMysql({year:2026,fromMonth:5,toMonth:5,companyId:2,overviewOnly:'1'},'2');assert.equal(annual.selected.summary.net_profit,selected.summary.net_profit);assert.equal(annual.selected.expense_totals.find(r=>r.category==='fbp_stocking_shipping').amount_cny,18.2);
+      assert.equal((await monthlyBillingDetailsMysql({...filters,shopId:20},'2')).selected.summary.net_profit,baseline.net_profit);
+      assert.equal((await monthlyBillingDetailsMysql({...filters,companyId:3},'3')).selected.expenses.some(r=>r.category==='fbp_stocking_shipping'),false);
+      await saveFinanceExpense({...body,id:created.id,original_amount:20.3,amount_cny:20.3},2,'2');assert.equal((await read()).selected.summary.net_profit,baseline.net_profit-20.3);
+      await deleteFinanceExpense(created.id,'2');assert.equal((await read()).selected.summary.net_profit,baseline.net_profit);
+    });
+    await t.test('actual procurement groups stock once and does not pretend company or SKU allocation exists',async()=>{
+      const filters={from:'2026-10-01',to:'2026-10-31',recordSource:'procurement',groupBy:'inventory'};
+      // Restore an owned product binding only for this independent purchasing projection.
+      const result=await monthlyBillingOrderDetailsMysql(filters,'2');assert.equal(result.record_source,'procurement');assert.equal(result.summary.quantity,20);assert.equal(result.summary.amount,40);assert.ok(!JSON.stringify(result).includes('B secret'));
+      await assert.rejects(monthlyBillingOrderDetailsMysql({...filters,companyId:2},'2'),{statusCode:400});
+      await assert.rejects(monthlyBillingOrderDetailsMysql({...filters,shopId:20},'2'),{statusCode:400});
+    });
+    await t.test('official refund and cancellation reversals replace estimates across finance dates without changing saved profits',async()=>{
+      await q('UPDATE sku_mappings SET product_id=20 WHERE id=20');
+      await q("INSERT INTO orders(id,shop_id,posting_number,order_number,status,tracking_stage,ordered_at) VALUES(900,20,'RETURN-1','RETURN','cancelled','returned','2026-04-10'),(901,20,'CANCEL-1','CANCEL','cancelled','cancelled','2026-04-10')");
+      await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(900,900,20,'same-sku',1,100),(901,901,20,'same-sku',1,100)");
+      await q("INSERT INTO order_profit_items(order_item_id,purchase_cost_cny,domestic_shipping_cny,international_shipping_cny,commission_fee_cny,other_fee_cny,net_profit_cny,profit_status) VALUES(900,20,3,30,12,3,-68,'estimated'),(901,0,0,0,0,3,-3,'estimated')");
+      let i=0;
+      for(const [posting,type,amount,date] of [['RETURN-1','MarketplaceRedistributionOfAcquiringOperation',-5,'2026-04-11'],['RETURN-1','MarketplaceRedistributionOfAcquiringOperation',5,'2026-05-01'],['RETURN-1','delivery_charge',-10,'2026-04-11'],['RETURN-1','delivery_charge',2,'2026-05-01'],['RETURN-1','agencyfeeaggregator3plglobal',0,'2026-05-01'],['RETURN-1','sale_commission',-12,'2026-04-11'],['RETURN-1','sale_commission',12,'2026-05-01'],['RETURN-1','return_delivery_charge',-4,'2026-05-01'],['CANCEL-1','MarketplaceRedistributionOfAcquiringOperation',-5,'2026-04-11'],['CANCEL-1','MarketplaceRedistributionOfAcquiringOperation',5,'2026-05-01']]){
+        await q("INSERT INTO ozon_finance_items(shop_id,posting_number,operation_id,operation_date,service_type,service_name,amount,amount_cny,currency_code,exchange_rate,accruals_for_sale,accruals_for_sale_cny,sale_commission,sale_commission_cny,delivery_charge,delivery_charge_cny,return_delivery_charge,return_delivery_charge_cny,raw_json) VALUES(20,?,?,?,?,'官方费用',?,?,'CNY',1,0,0,0,0,0,0,0,0,'{}')",[posting,'refund-proof-'+(++i),date,type,amount,amount]);
+      }
+      const filters={from:'2026-04-01',to:'2026-04-30',companyId:2,includeAppendices:'0'};
+      const r=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;assert.equal(r.purchase_cost,20);assert.equal(r.international_shipping_cost,8);assert.equal(r.commission_fee,0);assert.equal(r.other_fee,0);assert.equal(r.aftersale_fee,4);assert.equal(r.net_profit,-35);assert.equal(r.withdrawal_fee,0);
+      const annual=await monthlyBillingDetailsMysql({year:2026,fromMonth:4,toMonth:4,companyId:2,overviewOnly:'1'},'2');assert.equal(annual.selected.summary.net_profit,r.net_profit);
+      const detail=await monthlyBillingOrderDetailsMysql({...filters,outcomeType:'returns',groupBy:'inventory'},'2');assert.equal(detail.rows.length,1);assert.equal(detail.summary.net_profit,-35);assert.equal(detail.rows[0].inventory_name,'Product 20');assert.equal(detail.rows[0].rate,.5);
+      const proof=await monthlyBillingOrderDetailsMysql({...filters,outcomeType:'returns',groupBy:'order'},'2');assert.equal(proof.rows[0].fee_evidence.length,8);assert.equal(proof.rows[0].billing_costs.other_fee,0);
+      assert.equal((await monthlyBillingOrderDetailsMysql({...filters,shopId:30,outcomeType:'returns',groupBy:'inventory'},'2')).total,0);
+      assert.equal(Number((await q('SELECT net_profit_cny FROM order_profit_items WHERE order_item_id=900'))[0].net_profit_cny),-68);
+      await q('DELETE FROM ozon_finance_items WHERE operation_id LIKE ?',['refund-proof-%']);await q('DELETE FROM order_profit_items WHERE order_item_id IN (900,901)');await q('DELETE FROM order_items WHERE id IN (900,901)');await q('DELETE FROM orders WHERE id IN (900,901)');await q('UPDATE sku_mappings SET product_id=30 WHERE id=20');
+    });
+    await t.test('zero monthly advertising report replaces estimated ads and withdrawal uses the same month totals',async()=>{
+      await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(910,20,'AD-ZERO','delivered','delivered','2026-03-10')");
+      await q("INSERT INTO order_items(id,order_id,ozon_sku,quantity,sale_price) VALUES(910,910,'AD-ZERO',1,100)");
+      await q("INSERT INTO order_profit_items(order_item_id,sale_amount_cny,advertising_cost_cny,profit_status) VALUES(910,100,9,'estimated')");
+      await q("INSERT INTO ozon_ad_sku_daily(shop_id,ozon_sku,date_key,spend_cny) VALUES(20,'AD-ZERO','2026-03-10',0)");
+      const filters={from:'2026-03-01',to:'2026-03-31',companyId:2,includeAppendices:'0'};const result=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;
+      assert.equal(result.advertising_cost,0);assert.equal(result.withdrawal_base,100);assert.equal(result.withdrawal_fee,1.2);assert.equal(result.net_profit,98.8);
+      const annual=await monthlyBillingDetailsMysql({year:2026,fromMonth:3,toMonth:3,companyId:2,overviewOnly:'1'},'2');assert.equal(annual.selected.summary.net_profit,98.8);
+      await q("DELETE FROM ozon_ad_sku_daily WHERE ozon_sku='AD-ZERO'");await q('DELETE FROM order_profit_items WHERE order_item_id=910');await q('DELETE FROM order_items WHERE id=910');await q('DELETE FROM orders WHERE id=910');
+    });
+    await t.test('advertising amount and count sorting happen before row pagination',async()=>{
+      for(const [shop,campaign,sku,amount,day] of [[20,'小额多笔','SORT1',1,'2026-07-01'],[20,'小额多笔','SORT1',1,'2026-07-02'],[20,'小额多笔','SORT1',1,'2026-07-03'],[20,'大额少笔','SORT2',9,'2026-07-01'],[30,'B secret','SORT3',99,'2026-07-01']])await q('INSERT INTO ozon_ad_sku_daily(shop_id,campaign_name,ozon_sku,spend_cny,date_key) VALUES(?,?,?,?,?)',[shop,campaign,sku,amount,day]);
+      const query={from:'2026-07-01',to:'2026-07-31',source:'advertising',companyId:2,pageSize:1};
+      const byAmount=await monthlyBillingSourceRecordsMysql({...query,sortBy:'amount',sortOrder:'desc'},'2');assert.equal(byAmount.groups[0].amount_cny,9);assert.equal(byAmount.rows[0].amount_cny,9);assert.equal(byAmount.total,4);assert.ok(!JSON.stringify(byAmount).includes('B secret'));
+      const byCount=await monthlyBillingSourceRecordsMysql({...query,sortBy:'count',sortOrder:'desc'},'2');assert.equal(byCount.groups[0].record_count,3);
+      await q("DELETE FROM ozon_ad_sku_daily WHERE date_key>='2026-07-01' AND date_key<='2026-07-31'");
+    });
+    await t.test('independent official SKU returns drive inventory piece rates without returning unrelated items or fabricating refund income',async()=>{
+      await q('UPDATE sku_mappings SET product_id=20 WHERE id=20');
+      await q("INSERT INTO products(id,tenant_id,name,code) VALUES(921,2,'未退商品','P-921')");await q("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku) VALUES(921,2,20,921,'NOT-RETURN')");
+      await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(920,20,'PARTIAL-RETURN','delivered','delivered','2026-02-10')");
+      await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(920,920,20,'same-sku',2,100),(921,920,921,'NOT-RETURN',1,50)");
+      await q("INSERT INTO order_profit_items(order_item_id,sale_amount_cny,purchase_cost_cny,profit_status) VALUES(920,200,40,'estimated'),(921,50,10,'estimated')");
+      const record={return_id:'9201',posting_number:'PARTIAL-RETURN',state:{state:'MoneyReturned'},product:{sku:'same-sku',quantity:1}};
+      for(const endpoint of ['/v2/returns/rfbs/list','/v1/returns/list'])await q("INSERT INTO ozon_return_observations(tenant_id,shop_id,order_id,source_endpoint,return_id,posting_number,official_state,state_json,observed_at) VALUES(2,20,920,?,'9201','PARTIAL-RETURN','MoneyReturned',?,NOW())",[endpoint,JSON.stringify({...record,source_endpoint:endpoint})]);
+      const filters={from:'2026-02-01',to:'2026-02-28',companyId:2,includeAppendices:'0'};
+      const detail=await monthlyBillingOrderDetailsMysql({...filters,outcomeType:'returns',groupBy:'inventory',sortBy:'quantity'},'2');assert.equal(detail.total,1);assert.equal(detail.rows[0].quantity,1);assert.equal(detail.rows[0].base_quantity,2);assert.equal(detail.rows[0].rate,.5);assert.equal(detail.rows[0].order_count,1);assert.equal(detail.rows[0].inventory_name,'Product 20');
+      const statement=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;assert.equal(statement.income_pending_count,1);assert.equal(statement.net_profit,null);
+      await q('DELETE FROM ozon_return_observations WHERE order_id=920');await q('DELETE FROM order_profit_items WHERE order_item_id IN (920,921)');await q('DELETE FROM order_items WHERE order_id=920');await q('DELETE FROM orders WHERE id=920');await q('DELETE FROM sku_mappings WHERE id=921');await q('DELETE FROM products WHERE id=921');await q('UPDATE sku_mappings SET product_id=30 WHERE id=20');
+    });
     await t.test('paid pending payroll is recognized once per company and month, including concurrent approval',async()=>{
       const {createFinanceSubmissions}=await import('../src/services/finance-submissions.js');
       const {paidPayrollAccruals}=await import('../src/services/finance-payroll-accruals.js');
