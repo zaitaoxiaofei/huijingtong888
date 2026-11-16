@@ -26,3 +26,9 @@ test("JSON archive keys and enterprise namespaces cannot escape their boundary",
   const {client}=store();await assert.rejects(archivePrivateJson("{}",{namespace:"listing-drafts/../finance",client}),/Invalid/);
   await assert.rejects(readPrivateJson({objectKey:"private-finance/file.json.gz",sha256:"a".repeat(64)},{client}),/Invalid/);
 });
+test('large legacy template originals and media-only recovery fields archive beyond the old 8MiB limit',async()=>{
+  const {client}=store(),text=JSON.stringify({attributes:'原文'.repeat(1500000)});
+  assert(Buffer.byteLength(text)>8*1024*1024);
+  const saved=await archivePrivateJson(text,{namespace:'listing-templates/2',client});assert.equal(await readPrivateJson(saved,{client}),text);
+  const media=await archivePrivateJson('{"image_url":"data:image/png;base64,AAAA"}',{namespace:'inventory-media/admin',client});assert.match(media.objectKey,/inventory-media\/admin\//);
+});

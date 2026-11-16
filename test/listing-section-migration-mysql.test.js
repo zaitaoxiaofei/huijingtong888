@@ -1,0 +1,50 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {createTenantMysqlFixture} from './helpers/tenant-mysql-fixture.js';
+import {auditListingSections,applyListingSections,restoreListingSections} from '../src/services/listing-section-migration.js';
+import {jsonArchiveHash} from '../src/services/private-json-archive.js';
+import {listingStoredJsonText} from '../src/services/listing-json-sections.js';
+
+test('real MySQL section migration preserves SQL projections, readers, tenants, edit guards and original-byte recovery',{skip:!process.env.TENANT_TEST_MYSQL_SOCKET},async()=>{
+ const fixture=await createTenantMysqlFixture('section_store');let close;
+ try{
+  fixture.useEnvironment();const pool=await import('../src/mysql-pool.js');close=pool.closeMysqlPool;
+  const query=async(sql,p=[])=>(await fixture.connection.query(sql,p))[0];
+  await query("CREATE TABLE listing_drafts(id BIGINT PRIMARY KEY AUTO_INCREMENT,tenant_id VARCHAR(80),status VARCHAR(20),manual_facts_json LONGTEXT,ai_payload_json LONGTEXT,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)");
+  const attrs=Array.from({length:80},(_,i)=>({attribute_id:i+1,value:'手工值',raw:{values:'保留所有原文'.repeat(300)}}));
+  const facts={asset_variant_id:17,user_facts:{source_product_id:23},attributes:attrs,variants:[{images:[],images_manually_edited:true,price:7000,attributes:attrs}]};
+  const original=JSON.stringify(facts,null,1),archives=new Map();
+  for(const tenant of ['2','3'])await query("INSERT INTO listing_drafts(tenant_id,status,manual_facts_json,ai_payload_json,updated_at) VALUES(?,'draft',?,'{}','2026-01-02 03:04:05')",[tenant,original]);
+  const plan=await auditListingSections(query,{tenantId:'2',table:'listing_drafts'});assert.equal(plan.items.length,1);
+  const transaction=async work=>{await fixture.connection.beginTransaction();try{const value=await work(query);await fixture.connection.commit();return value;}catch(e){await fixture.connection.rollback();throw e;}};
+  await assert.rejects(applyListingSections({query,transaction,plan,archive:async()=>{throw Error('OSS unavailable');}}),/OSS unavailable/);
+  assert.equal((await query('SELECT manual_facts_json FROM listing_drafts WHERE id=1'))[0].manual_facts_json,original);
+  const archive=async(text,{namespace})=>{const ref={objectKey:`database-archives/${namespace}/${jsonArchiveHash(text)}.json.gz`,sha256:jsonArchiveHash(text)};archives.set(ref.objectKey,text);return ref;};
+  await assert.rejects(applyListingSections({query,transaction,plan,archive,beforeUpdate:async()=>{throw Error('Recovery journal fsync failed');}}),/fsync/);
+  assert.equal((await query('SELECT manual_facts_json FROM listing_drafts WHERE id=1'))[0].manual_facts_json,original);
+  const sequence=[];
+  const report=await applyListingSections({query,transaction,plan,archive,beforeUpdate:async()=>sequence.push('journal'),afterUpdate:async()=>sequence.push('committed')});
+  assert.deepEqual(sequence,['journal','committed']);assert.equal(report.updated.length,1);
+  const [raw]=await query("SELECT manual_facts_json,DATE_FORMAT(updated_at,'%Y-%m-%d %H:%i:%s') AS changed,JSON_LENGTH(manual_facts_json,'$.variants') AS variants,JSON_EXTRACT(manual_facts_json,'$.asset_variant_id') AS asset FROM listing_drafts WHERE id=1");
+  assert(raw.manual_facts_json.includes('_erp_listing_sections_v1'));assert.equal(raw.changed,'2026-01-02 03:04:05');assert.equal(Number(raw.variants),1);assert.equal(Number(raw.asset),17);
+  const [read]=await pool.mysqlQuery('SELECT manual_facts_json AS alias FROM listing_drafts WHERE id=1');assert.deepEqual(JSON.parse(read.alias),facts);
+  assert.equal(listingStoredJsonText(read,'alias'),raw.manual_facts_json);
+  const cas=await pool.mysqlExecute('UPDATE listing_drafts SET updated_at=updated_at WHERE id=1 AND manual_facts_json <=> ?',[listingStoredJsonText(read,'alias')]);assert.equal(cas.affectedRows,1,'CAS compares the stored representation instead of the API-decoded JSON');
+  await pool.withMysqlReadSnapshot(async q=>assert.deepEqual(JSON.parse((await q('SELECT manual_facts_json FROM listing_drafts WHERE id=1'))[0].manual_facts_json),facts));
+  await pool.withMysqlTransaction(async c=>assert.deepEqual(JSON.parse((await c.execute('SELECT manual_facts_json FROM listing_drafts WHERE id=1'))[0][0].manual_facts_json),facts));
+  assert.equal((await query('SELECT manual_facts_json FROM listing_drafts WHERE id=2'))[0].manual_facts_json,original);
+  await assert.rejects(applyListingSections({query,transaction,plan:{...plan,tenant_id:'3'},archive}),/Invalid reviewed/);
+  assert.equal((await restoreListingSections({query,transaction,report,read:ref=>archives.get(ref.objectKey)})).restored,1);
+  assert.equal((await query('SELECT manual_facts_json FROM listing_drafts WHERE id=1'))[0].manual_facts_json,original);
+  const compactAgain=await applyListingSections({query,transaction,plan,archive});await query("UPDATE listing_drafts SET manual_facts_json='{}' WHERE id=1");
+  await assert.rejects(restoreListingSections({query,transaction,report:compactAgain,read:ref=>archives.get(ref.objectKey)}),/edited since/);
+  assert.equal((await applyListingSections({query,transaction,plan,archive})).retained[0].reason,'source_changed');
+  await query("CREATE TABLE listing_category_templates(id BIGINT PRIMARY KEY AUTO_INCREMENT,tenant_id VARCHAR(80),status VARCHAR(20),attributes_json LONGTEXT,editable_payload_json LONGTEXT,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)");
+  const editable={title:'Template',attributes:attrs,variants:[{attributes:attrs,images:['https://example.com/current.png']}]};
+  await query("INSERT INTO listing_category_templates(tenant_id,status,attributes_json,editable_payload_json) VALUES('2','active',?,?)",[JSON.stringify(attrs),JSON.stringify(editable)]);
+  const templates=await auditListingSections(query,{tenantId:'2',table:'listing_category_templates'});assert.equal(templates.items.length,2);
+  const compacted=await applyListingSections({query,transaction,plan:templates,archive});assert.equal(compacted.updated.length,2);
+  const [shape]=await query("SELECT JSON_TYPE(attributes_json) AS kind,JSON_LENGTH(attributes_json) AS count,attributes_json LIKE '%手工值%' AS matches FROM listing_category_templates WHERE id=1");assert.equal(shape.kind,'ARRAY');assert.equal(Number(shape.count),80);assert.equal(Number(shape.matches),1);
+  const [template]=await pool.mysqlQuery('SELECT attributes_json,editable_payload_json FROM listing_category_templates WHERE id=1');assert.deepEqual(JSON.parse(template.attributes_json),attrs);assert.deepEqual(JSON.parse(template.editable_payload_json),editable);
+  assert.equal((await restoreListingSections({query,transaction,report:compacted,read:ref=>archives.get(ref.objectKey)})).restored,2);
+ }finally{await close?.();await fixture.cleanup();}
+});

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {decodeFrozenContentStorage} from "./listing-frozen-codec.js";
+import {decodeListingJsonSections} from "./listing-json-sections.js";
 
 export const AI_MEDIA_RETENTION_DAYS = 7;
 export const AI_MEDIA_RETENTION_FORMAT = "ai-media-retention-v1";
@@ -341,6 +342,14 @@ async function scanReferences(query, tables, { excludeRows, cutoff, maxScanRows,
             value = field.__retention_value;
           }
           if (value == null || value === "") continue;
+          try {
+            value = decodeListingJsonSections(value);
+            if (typeof value === "string" && Buffer.byteLength(value) > MAX_SINGLE_REFERENCE_BYTES) {
+              warnings.push(`${table}:${row.id ?? "composite"}:expanded_listing_reference_byte_bound`); continue;
+            }
+          } catch {
+            warnings.push(`${table}:${row.id ?? "composite"}:invalid_listing_section_content`); continue;
+          }
           let referenceValue = value;
           if (/json$/i.test(column.column_name) && typeof value === "string") {
             try { referenceValue = JSON.parse(value); } catch {

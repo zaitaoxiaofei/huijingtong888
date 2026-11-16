@@ -1,3 +1,4 @@
+import {encodeListingJsonForWrite} from "./listing-json-sections.js";
 import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
@@ -3734,10 +3735,10 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     `, assetTenantParams([
       templatePayload.category_name || ozonCategoryName,
       JSON.stringify(compactAssetVariantSourceProvenance(templatePayload.source_raw || sourceRaw)),
-      JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload)),
+      encodeListingJsonForWrite(JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload))),
       templatePayload.title || editablePayload.title,
       templatePayload.description || editablePayload.description,
-      JSON.stringify(templatePayload.attributes || attributes),
+      encodeListingJsonForWrite(JSON.stringify(templatePayload.attributes || attributes)),
       JSON.stringify(templatePayload.images || images),
       Number(rows[0].id)
     ], 7));
@@ -3754,10 +3755,10 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     templatePayload.category_name || ozonCategoryName,
     name,
     JSON.stringify(compactAssetVariantSourceProvenance(templatePayload.source_raw || sourceRaw)),
-    JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload)),
+    encodeListingJsonForWrite(JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload))),
     templatePayload.title || editablePayload.title,
     templatePayload.description || editablePayload.description,
-    JSON.stringify(templatePayload.attributes || attributes),
+    encodeListingJsonForWrite(JSON.stringify(templatePayload.attributes || attributes)),
     JSON.stringify(templatePayload.images || images),
     personId(session)
   ], 0));
@@ -3803,7 +3804,7 @@ async function insertListingDraftFromPackage(connection, templateId, variant, im
     variant.color || "",
     variant.material_text || "",
     assetVariantQuantity(variant.quantity_text, variant),
-    JSON.stringify(manualFacts),
+    encodeListingJsonForWrite(JSON.stringify(manualFacts)),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text, videos }),
     personId(session)
   ], 0));
@@ -4004,10 +4005,10 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
       type_id: typeId || "",
       category_name: ozonCategoryName
     }),
-    JSON.stringify(editablePayload),
+    encodeListingJsonForWrite(JSON.stringify(editablePayload)),
     editablePayload.title,
     editablePayload.description,
-    JSON.stringify(editablePayload.attributes),
+    encodeListingJsonForWrite(JSON.stringify(editablePayload.attributes)),
     personId(session)
   ], 0));
   return Number(result.insertId);
@@ -4051,7 +4052,7 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     variant.color || "",
     variant.material_text || "",
     Number(String(variant.quantity_text || "").match(/\d+/)?.[0] || 1),
-    JSON.stringify(manualFacts),
+    encodeListingJsonForWrite(JSON.stringify(manualFacts)),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text }),
     personId(session)
   ], 0));

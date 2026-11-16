@@ -1,3 +1,4 @@
+import {decodeListingMysqlResult,listingStorageReadConnection} from "./services/listing-json-sections.js";
 import mysql from "mysql2/promise";
 import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits, waitForMysqlInteractiveReads, withMysqlBackgroundReadAdmission, withMysqlInteractiveRead } from "./mysql-workload.js";
 import { config } from "./config.js";
@@ -181,7 +182,7 @@ async function runMysqlQuery(sql, params) {
   try {
     await ensureMysqlSessionUtc(connection);
     await waitForMysqlInteractiveReads();
-    const [rows] = await connection.query(sql, params);
+    const [rows] = decodeListingMysqlResult(await connection.query(sql, params));
     return rows;
   } finally {
     releaseMysqlConnection(connection);
@@ -205,7 +206,7 @@ async function runMysqlReadSnapshot(operation) {
     await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
     await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
     started = true;
-    const value = await operation(async (sql, params = []) => (await connection.query(sql, params))[0]);
+    const value = await operation(async (sql, params = []) => decodeListingMysqlResult(await connection.query(sql, params))[0]);
     finalizing = true;
     await connection.rollback();
     return value;
@@ -249,7 +250,7 @@ export async function mysqlExecuteReadCommitted(sql, params = []) {
         try {
           await connection.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
           await connection.beginTransaction();
-          const [result] = await connection.execute(sql, params);
+          const [result] = decodeListingMysqlResult(await connection.execute(sql, params));
           await connection.commit();
           return result;
         } catch (error) {
@@ -271,7 +272,7 @@ export async function executeMysqlStatementWithRetry(connection, sql, params = [
   const sleepImpl = options.sleepImpl || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const [result] = await connection.execute(sql, params);
+      const [result] = decodeListingMysqlResult(await connection.execute(sql, params));
       return result;
     } catch (error) {
       if (error?.code !== "ER_LOCK_DEADLOCK" || attempt >= maxAttempts) throw error;
@@ -298,7 +299,7 @@ async function runMysqlTransaction(callback) {
   try {
     await ensureMysqlSessionUtc(connection);
     await connection.beginTransaction();
-    const result = await callback(connection);
+    const result = await callback(listingStorageReadConnection(connection));
     await connection.commit();
     return result;
   } catch (error) {
