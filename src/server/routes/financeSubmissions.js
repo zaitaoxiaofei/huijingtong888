@@ -10,6 +10,7 @@ export function createFinanceSubmissionRoutes({ readJson }) {
     "GET /api/finance-submissions/detail": (req, url) => financeSubmissions.detail(url.searchParams.get("id"), req._session),
     "GET /api/finance-submissions/payroll-ledger": (req, url) => financeSubmissions.payrollLedger(Object.fromEntries(url.searchParams), req._session),
     "POST /api/finance-submissions/payroll-item": async req => financeSubmissions.savePayrollItem(await readJson(req), req._session),
+    "POST /api/finance-submissions/payroll-void": async req => financeSubmissions.voidPayroll(await readJson(req),req._session),
     "POST /api/finance-submissions/payroll-delete": async req => financeSubmissions.deletePayrollItem(await readJson(req), req._session),
     "POST /api/finance-submissions/payroll-paid-batch": async req => financeSubmissions.recordPayrollPaidBatch(await readJson(req), req._session),
     "POST /api/finance-submissions/payroll-paid": async req => financeSubmissions.recordPayrollPaid(await readJson(req), req._session),

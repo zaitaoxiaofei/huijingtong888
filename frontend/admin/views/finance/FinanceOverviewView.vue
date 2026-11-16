@@ -75,7 +75,8 @@ watch(() => [auth.user?.id, auth.user?.tenant?.id, allowed.value, currentApiCach
   companyOpen.value = false; shopId.value = "all"; companyId.value = String(route.query.companyId||"all"); companies.value = [];
   refresh();
 }, { immediate: true });
-onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort(); inventoryController?.abort(); });
+window.addEventListener("erp:finance-changed",load);
+onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",load); generation++; inventoryGeneration++; controller?.abort(); inventoryController?.abort(); });
 </script>
 
 <template>
@@ -95,7 +96,7 @@ onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort()
       </div></div>
       <div v-if="loadError" class="statement-error"><span>{{ loadError }}</span><el-button link type="primary" @click="load">重新加载</el-button></div>
       <template v-else>
-        <div class="annual-totals"><div v-for="card in overviewCards" :key="card.key"><BillingMetricLabel :label="'累计'+card.label" :hint="card.hint"/><strong :class="{negative:loaded&&totals[card.key]<0}">{{loaded?amountText(totals[card.key],card.key):'—'}}</strong><small>{{card.key==='ai_cost'?'按量估算 · 企业共用':' '}}</small></div></div>
+        <div class="annual-totals"><div v-for="card in overviewCards" :key="card.key"><BillingMetricLabel :label="'累计'+card.label" :hint="card.hint"/><strong :class="{negative:loaded&&totals[card.key]<0}">{{loaded?amountText(totals[card.key],card.key):'—'}}</strong><small>{{card.key==='ai_cost'?'按公司归属计费 · 估算':' '}}</small></div></div>
         <el-skeleton v-if="!loaded" class="statement-skeleton" :rows="8" animated />
         <el-table v-else :data="calendar" row-key="month_key" class="month-table">
           <el-table-column type="expand" width="38"><template #default="{row}"><div v-if="!row.future&&row.summary" class="month-costs"><button v-for="cost in costDetails(row)" :key="cost.key" @click="bill(row)"><BillingMetricLabel :label="cost.label" :hint="cost.hint"/><b>{{amountText(cost.amount)}}</b></button></div><p v-else class="statement-note">该月份尚无账单</p></template></el-table-column>

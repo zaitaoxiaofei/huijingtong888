@@ -9,6 +9,7 @@ export { FINANCE_SUBMISSIONS_SCHEMA } from "./finance-submissions-schema.js";
 import { FINANCE_SUBMISSIONS_SCHEMA } from "./finance-submissions-schema.js";
 
 const payrollRevision = text => createHash("sha256").update(text).digest("hex");
+const batchRevision=(batch,items)=>payrollRevision(JSON.stringify([batch.id,batch.status,String(batch.total_amount),batch.item_count,items.map(i=>[i.id,i.detail_json])]));
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 
 export function submissionActor(session, reviewer = false) {
@@ -62,7 +63,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
     const where = ["tenant_id=?", "kind=?"], params = [actor.tenantId, kind];
     if (!actor.reviewer) { where.push("applicant_id=?"); params.push(actor.personId); }
     if (filters.status) {
-      if (!["pending", "approved", "rejected"].includes(filters.status)) fail("审批状态无效");
+      if (!["pending", "approved", "rejected", "voided"].includes(filters.status)) fail("审批状态无效");
       where.push("status=?"); params.push(filters.status);
     }
     return query(`SELECT id, applicant_id, applicant_name, kind, status, file_name, total_amount, item_count, review_note, created_at, reviewed_at FROM finance_submissions WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT 200`, params);
@@ -74,7 +75,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
     const [batch] = await query(`SELECT * FROM finance_submissions WHERE id=? AND tenant_id=?${actor.reviewer ? "" : " AND applicant_id=?"} LIMIT 1`, [Number(id), actor.tenantId, ...(actor.reviewer ? [] : [actor.personId])]);
     if (!batch || (batch.kind === "payroll" && !actor.reviewer)) fail("申请不存在或无权访问", 404);
     const rows = await query("SELECT id, detail_json FROM finance_submission_items WHERE submission_id=? AND tenant_id=? ORDER BY id", [batch.id, actor.tenantId]);
-    return { ...batch, items: rows.map(row => ({ ...JSON.parse(row.detail_json), id: row.id })) };
+    return { ...batch, revision:batchRevision(batch,rows), items: rows.map(row => ({ ...JSON.parse(row.detail_json), id: row.id })) };
   }
   async function submit(body, session) {
     const actor = submissionActor(session);
@@ -109,8 +110,10 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
       const [batch] = await run("SELECT * FROM finance_submissions WHERE id=? AND tenant_id=? FOR UPDATE", [Number(body.id), actor.tenantId]);
       if (!batch) fail("申请不存在或不属于当前企业", 404);
       if (batch.status !== "pending") fail("该申请已经审批，请刷新记录", 409);
+      const snapshot=await run("SELECT * FROM finance_submission_items WHERE submission_id=? AND tenant_id=? ORDER BY id FOR UPDATE",[batch.id,actor.tenantId]);
+      if(body.expected_revision && body.expected_revision!==batchRevision(batch,snapshot))fail("申请明细已变化，请刷新后重新核对再入账",409);
       if (body.status === "approved") {
-        const items = await run("SELECT * FROM finance_submission_items WHERE submission_id=? AND tenant_id=? ORDER BY company_id, expense_date, id", [batch.id, actor.tenantId]);
+        const items = [...snapshot].sort((a,b)=>Number(a.company_id)-Number(b.company_id)||String(a.expense_date).localeCompare(String(b.expense_date))||Number(a.id)-Number(b.id));
         for (const item of items) {
           const row = JSON.parse(item.detail_json);
           const [company] = await run(`SELECT id FROM finance_companies WHERE id=? AND status='active' AND (tenant_id=?${actor.legacy ? " OR tenant_id IS NULL OR tenant_id=0" : ""}) LIMIT 1`, [item.company_id, actor.tenantId]);
@@ -138,6 +141,30 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
       return { ok: true, status: body.status };
     });
   }
+  async function voidPayroll(body,session){
+    const actor=submissionActor(session,true),reason=String(body.reason||'').trim();
+    if(!/^\d+$/.test(String(body.id))||reason.length<4||reason.length>500||!/^([a-f0-9]{64})$/.test(body.expected_revision||''))fail('请提供工资批次、当前版本及4—500字作废原因');
+    await ensure();return transaction(async connection=>{
+      const run=async(sql,params=[])=>(await connection.execute(sql,params))[0];
+      const [batch]=await run("SELECT * FROM finance_submissions WHERE id=? AND tenant_id=? AND kind='payroll' FOR UPDATE",[Number(body.id),actor.tenantId]);
+      if(!batch)fail('工资批次不存在或不属于当前企业',404);if(!['pending','approved'].includes(batch.status))fail('仅可作废待入账或已入账工资批次',409);
+      const items=await run('SELECT * FROM finance_submission_items WHERE submission_id=? AND tenant_id=? ORDER BY id FOR UPDATE',[batch.id,actor.tenantId]);
+      if(batchRevision(batch,items)!==body.expected_revision)fail('工资批次已变化，请刷新核对后再作废',409);
+      for(const item of items){const row=JSON.parse(item.detail_json);const [period]=await run('SELECT status FROM finance_periods WHERE company_id=? AND month_key=? FOR UPDATE',[item.company_id,row.month]);if(period?.status==='closed')fail('工资月份已关账，请先核对会计账簿',409);
+        const expenses=await run("SELECT * FROM finance_expenses WHERE source_type='finance_submission' AND source_id=? FOR UPDATE",[item.id]);
+        if(expenses.length!==(batch.status==='approved'?1:0))fail('该批费用缺失或不一致，不能作废',409);
+        let reversalId=null;
+        if(expenses.length){const expense=expenses[0];if(expense.category!=='salary'||Number(expense.company_id)!==Number(item.company_id)||Number(expense.amount_cny)!==Number(item.amount)||(expense.tenant_id!=null&&Number(expense.tenant_id)!==actor.tenantId))fail('工资费用金额或归属已变化，请核对后重试',409);
+          const vouchers=await run('SELECT id FROM finance_vouchers WHERE expense_id=? LIMIT 1 FOR UPDATE',[expense.id]);if(vouchers.length)fail('工资费用已有凭证，请先核对凭证后再作废',409);
+          const reversal=await run("INSERT INTO finance_expenses(tenant_id,company_id,expense_date,category,description,currency_code,original_amount,exchange_rate,amount_cny,voucher_status,source_type,source_id,created_by,payment_reference) VALUES(?,?,?,'salary',?,'CNY',?,1,?,'missing','payroll_void',?,?,?)",[expense.tenant_id,item.company_id,expense.expense_date,'工资批次'+batch.id+'作废冲销：'+reason,-Number(expense.amount_cny),-Number(expense.amount_cny),item.id,actor.personId,'void-payroll:'+batch.id]);reversalId=Number(reversal.insertId);
+        }
+        await run("INSERT INTO finance_payroll_item_revisions (tenant_id,item_id,operation,before_json,after_json,recorded_by) VALUES (?,?,'void_batch',?,?,?)",[actor.tenantId,item.id,item.detail_json,JSON.stringify({voided:true,submission_id:batch.id,reason,reversal_expense_id:reversalId,payment_history_preserved:true}),actor.personId]);
+      }
+      await run("UPDATE finance_submissions SET status='voided',review_note=?,reviewed_by=?,reviewed_at=UTC_TIMESTAMP() WHERE id=? AND tenant_id=?",[reason,actor.personId,batch.id,actor.tenantId]);
+      await run('DELETE FROM finance_imported_payroll_periods WHERE tenant_id=? AND submission_id=?',[actor.tenantId,batch.id]);
+      return {ok:true,status:'voided',items:items.length,payment_history_preserved:true};
+    });
+  }
   async function payrollLedger(filters, session) {
     const actor = submissionActor(session, true);
     const year = String(filters.year || new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date()).slice(0, 4));
@@ -147,7 +174,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
     if (selected != null && !companyList.some(company => Number(company.id) === selected)) fail("公司不存在或不属于当前企业", 404);
     if (!companyList.length) return { year, companies: [], rows: [] };
     const companyIds = selected ? [selected] : companyList.map(company => Number(company.id));
-    const records = await query(`SELECT i.id, i.detail_json, s.status AS approval_status, p.paid_amount, p.created_at AS paid_updated_at, EXISTS(SELECT 1 FROM finance_payroll_payment_updates confirmed WHERE confirmed.tenant_id=i.tenant_id AND confirmed.item_id=i.id AND confirmed.paid_amount>0) AS payment_confirmed
+    const records = await query(`SELECT i.id, i.submission_id, i.detail_json, s.status AS approval_status, p.paid_amount, p.created_at AS paid_updated_at, EXISTS(SELECT 1 FROM finance_payroll_payment_updates confirmed WHERE confirmed.tenant_id=i.tenant_id AND confirmed.item_id=i.id AND confirmed.paid_amount>0) AS payment_confirmed
       FROM finance_submission_items i
       JOIN finance_submissions s ON s.id=i.submission_id AND s.tenant_id=i.tenant_id AND s.kind='payroll'
       JOIN finance_imported_payroll_periods period ON period.tenant_id=i.tenant_id AND period.submission_id=i.submission_id
@@ -157,7 +184,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
         AND s.status IN ('pending','approved') ORDER BY i.expense_date, i.company_id, i.id`, [actor.tenantId, ...companyIds, `${year}-01-01`, `${Number(year) + 1}-01-01`]);
     return { year, companies: companyList, rows: records.map(record => {
       const row = JSON.parse(record.detail_json), paid = money(record.paid_amount || 0);
-      return { ...row, id: record.id, revision: payrollRevision(record.detail_json), approval_status: record.approval_status, cost_confirmed: record.approval_status==='approved'||Boolean(record.payment_confirmed), paid_amount: paid,
+      return { ...row, id: record.id, submission_id:Number(record.submission_id), revision: payrollRevision(record.detail_json), approval_status: record.approval_status, cost_confirmed: record.approval_status==='approved'||Boolean(record.payment_confirmed), paid_amount: paid,
         remaining_amount: money(row.net - paid), paid_updated_at: record.paid_updated_at };
     }) };
   }
@@ -322,7 +349,7 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
       return {ok:true};
     });
   }
-  return { companies, identity, list, detail, submit, review, payrollLedger, recordPayrollPaid, recordPayrollPaidBatch, savePayrollItem, deletePayrollItem, preview: async (body, session) => {
+  return { companies, identity, list, detail, submit, review, voidPayroll, payrollLedger, recordPayrollPaid, recordPayrollPaidBatch, savePayrollItem, deletePayrollItem, preview: async (body, session) => {
     const { rows, total } = await parse(body, session);
     return { items: rows, total_amount: total, item_count: rows.length };
   } };

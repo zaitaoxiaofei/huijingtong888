@@ -165,6 +165,7 @@ function clearGetCacheForMutation(url = "") {
 }
 
 function notifyGetCacheMutation(url = "", body = null) {
+  if (/^\/api\/(finance-submissions|finance-center)(\/|$)/.test(String(url))) window.dispatchEvent(new CustomEvent("erp:finance-changed"));
   const path = String(url || "").split("?")[0];
   const product=path.match(/^\/api\/products\/(\d+)$/);
   if(product&&body&&Object.prototype.hasOwnProperty.call(body,'image_url'))window.dispatchEvent(new CustomEvent('erp:product-image-changed',{detail:{productId:Number(product[1])}}));

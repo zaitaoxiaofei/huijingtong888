@@ -1,6 +1,6 @@
 <script setup>
 import { billingProfitTotals } from "../../../../src/shared/billing-profit.js";
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Edit, Plus, View } from "@element-plus/icons-vue";
@@ -14,6 +14,9 @@ import { billingMetrics } from "./billing-metrics.js";
 import { billingExpenseCategories, billingExpenseCategoryLabel, summarizeBillingExpenses } from "./billing-expense-categories.js";
 import { formatInteger, formatMoney } from "./profit-utils.js";
 
+const FinanceImportPanel=defineAsyncComponent(()=>import("../../components/finance/FinanceImportPanel.vue"));
+const reviewSubmissionId=ref(null);
+const pendingPayrollBatches=computed(()=>[...new Set(visiblePayroll.value.filter(r=>r.approval_status==='pending').map(r=>r.submission_id).filter(Boolean))]);
 const route = useRoute();
 const router = useRouter();
 let abortController = null;
@@ -109,7 +112,7 @@ const billingGroups = computed(() => buildBillingGroups(selectedSummary.value, e
 const incomeGroup = computed(() => billingGroups.value[0]);
 const expenseGroups = computed(() => billingGroups.value.slice(1));
 const classifiedExpenseTotal = computed(() => expenseGroups.value.reduce((sum, group) => sum + group.amount, 0));
-const unclassifiedDifference = computed(() => Math.round((Number(selectedSummary.value.revenue || 0) - Number(selectedSummary.value.net_profit || 0) - classifiedExpenseTotal.value) * 100) / 100);
+const unclassifiedDifference = computed(() => selectedSummary.value.net_profit==null?null:Math.round((Number(selectedSummary.value.revenue || 0) - Number(selectedSummary.value.net_profit || 0) - classifiedExpenseTotal.value) * 100) / 100);
 function openSource(source = "platform") { sourceKind.value = source; sourceDrawer.value = true; }
 async function loadOrderRecords() {
   recordController?.abort();recordController=new AbortController();const signal=recordController.signal,scope=currentApiCacheScope();
@@ -129,6 +132,7 @@ async function loadOrderRecords() {
 }
 
 function showGroupItem(item) {
+  if(item.source==='ai_usage'){aiOpen.value=true;return;}
   if (item.source === "expenses") return showExpenses(item.key);
   if (item.source === "advertising") return openSource("advertising");
   if (item.source === "unavailable") return openSource();
@@ -160,6 +164,7 @@ async function saveCostCorrection(action='save') {
   try{await apiClient.post('/api/finance-submissions/billing-cost',{order_id:correctionForm.order_id,field:correctionForm.field,company_id:Number(correctionForm.company_id),expected_base:correctionForm.base,expected_revision:correctionForm.revision,amount:correctionForm.amount,reason:correctionForm.reason,action});correctionDialog.value=false;ElMessage.success('费用已更新');await loadData();await loadOrderRecords();}catch(error){ElMessage.error(error.message||'费用保存失败');}finally{correctionSaving.value=false;}
 }
 function editExpense(row) {
+  if(row.source_type==='payroll_void'){ElMessage.info('这是已作废工资的审计冲销，请在工资管理查看原批次');return;}
   if(row.source_type==='billing_cost_adjustment') { Object.assign(correctionForm,{order_id:row.cost_order_id,field:row.cost_field,company_id:String(row.company_id),base:Number(row.cost_base),amount:Number(row.cost_base)+Number(row.amount_cny),revision:Number(row.cost_revision),reason:''});correctionDialog.value=true;return; }
   if(row.source_type==='finance_submission') {router.push({path:row.category==='salary'?'/finance/payroll':'/finance/reimbursements',query:{companyId:String(row.company_id),month:String(row.expense_date).slice(0,7)}});return;}
   openExpense(row);
@@ -309,6 +314,7 @@ async function saveExpense() {
 }
 
 async function removeExpense(row) {
+  if(row.source_type==='payroll_void'){ElMessage.info('工资冲销记录保留审计，不能在此删除');return;}
   try {
     await ElMessageBox.confirm(row.source_type==='billing_cost_adjustment'?'删除这条更正后，会恢复来源订单的费用金额。确认删除？':`确认删除“${row.description || row.category}”这笔费用？`, "删除经营费用", { type: "warning" });
     if(row.source_type==='billing_cost_adjustment') await apiClient.post('/api/finance-submissions/billing-cost',{order_id:row.cost_order_id,field:row.cost_field,company_id:Number(row.company_id),expected_base:Number(row.cost_base),expected_revision:Number(row.cost_revision),action:'restore',reason:'删除费用更正，恢复来源金额'});
@@ -381,7 +387,8 @@ watch(
 );
 watch(sourceFilters, () => { if (orderRecordDrawer.value) { orderRecords.page = 1; loadOrderRecords(); } });
 watch(()=>currentApiCacheScope(),()=>{recordCache.clear();recordController?.abort();abortController?.abort();orderRecords.rows=[];payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';loadData();});
-onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); recordCache.clear(); });
+window.addEventListener("erp:finance-changed",loadData);
+onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData); abortController?.abort(); recordController?.abort(); recordCache.clear(); });
 </script>
 
 <template>
@@ -402,7 +409,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); rec
         <button class="summary-card interactive" @click="openOrderDetails()"><BillingMetricLabel label="订单" :hint="billingMetrics.order_count.hint"/><strong>{{formatInteger(selectedSummary.order_count)}}</strong><small>查看订单 →</small></button>
         <button class="summary-card interactive" @click="showGroupItem(incomeGroup.children[0])"><BillingMetricLabel label="营业额" :hint="billingMetrics.revenue.hint"/><strong>¥{{formatMoney(selectedSummary.revenue)}}</strong><small>查看收入 →</small></button>
         <div class="summary-card"><BillingMetricLabel metric="order_profit"/><strong>¥{{formatMoney(selectedSummary.order_profit)}}</strong><small>订单相关费用已扣除</small></div>
-        <div class="summary-card is-profit"><BillingMetricLabel label="净利润" :hint="billingMetrics.net_profit.hint"/><strong :class="{'negative-money':Number(selectedSummary.net_profit)<0}">¥{{formatMoney(selectedSummary.net_profit)}}</strong><small>{{formatRatio(selectedSummary.net_profit_margin)}} 净利率</small></div>
+        <div class="summary-card is-profit"><BillingMetricLabel label="净利润" :hint="billingMetrics.net_profit.hint"/><strong :class="{'negative-money':Number(selectedSummary.net_profit)<0}">{{selectedSummary.net_profit==null?'待核定':'¥'+formatMoney(selectedSummary.net_profit)}}</strong><small>{{selectedSummary.net_profit_margin==null?'待核定':formatRatio(selectedSummary.net_profit_margin)}} 净利率</small></div>
         <button class="summary-card interactive" @click="shopsOpen=true"><span>店铺</span><strong>{{shopRows.length}}</strong><small>查看账单 →</small></button>
         <button class="summary-card interactive" @click="settlementOpen=true"><BillingMetricLabel label="入账进度" hint="已入账订单数 ÷ 所选范围的订单总数，按Ozon财务记录识别，不是银行到账比例。取消订单可能不产生入账记录。"/><strong>{{formatRatio(entryProgress)}}</strong><small>查看结算 →</small></button>
 
@@ -412,13 +419,14 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); rec
 
           <div class="expense-panels">
             <article v-for="group in expenseGroups" :key="group.key" class="expense-panel">
-              <header><BillingMetricLabel :label="groupNames[group.key]" :hint="group.hint"/><strong>¥{{formatMoney(group.amount)}}</strong></header>
-              <div v-for="item in inlineItems(group)" :key="item.key" class="expense-line"><BillingMetricLabel :label="itemNames[item.key] || item.label" :hint="item.hint"/><el-button link type="primary" @click="showGroupItem(item)">{{item.amount==null?'未拆分':formatMoney(item.amount)}} <span class="amount-arrow">→</span></el-button></div>
+              <header><BillingMetricLabel :label="groupNames[group.key]" :hint="group.hint"/><strong>{{group.amount==null?'待核定':'¥'+formatMoney(group.amount)}}</strong></header>
+              <div v-for="item in inlineItems(group)" :key="item.key" class="expense-line"><BillingMetricLabel :label="itemNames[item.key] || item.label" :hint="item.hint"/><el-button link type="primary" @click="showGroupItem(item)">{{item.amount==null?(item.source==='ai_usage'?'待核定':'未拆分'):formatMoney(item.amount)}} <span class="amount-arrow">→</span></el-button></div>
               <div v-if="!inlineItems(group).length && group.key!=='personnel'" class="empty-expense">暂无已入账费用</div>
               <template v-if="group.key==='personnel'">
-                <div v-if="pendingPayroll" class="expense-line pending-payroll"><BillingMetricLabel label="待审批工资" hint="按所选公司和工资月份读取；待审批金额仅供核对，不计入上方支出和净利润。"/><span>¥{{formatMoney(pendingPayroll)}}</span></div>
+                <div v-if="pendingPayroll" class="expense-line pending-payroll"><BillingMetricLabel label="待确认入账工资" hint="金额已填报或已登记发放，但尚未确认入账。点击下方批次可在本页核对并计入费用。"/><span>¥{{formatMoney(pendingPayroll)}}</span></div>
                 <span v-if="payrollError" class="payroll-hint">工资暂未读取</span><span v-else-if="!payrollLoading && !visiblePayroll.length" class="payroll-hint">所选月份暂无工资记录</span>
                 <el-button link type="primary" class="payroll-entry" :loading="payrollLoading" @click="payrollOpen=true">工资明细<span v-if="visiblePayroll.length">（{{visiblePayroll.length}}条）</span> →</el-button>
+                <el-button v-for="id in pendingPayrollBatches" :key="id" link type="primary" @click="reviewSubmissionId=id">核对并入账 · 批次{{id}} →</el-button>
                 <span class="payroll-hint">已发放工资按归属月计成本，审批后不重复扣除</span>
               </template>
             </article>
@@ -428,6 +436,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); rec
         </div>
       </div>
     </section>
+    <FinanceImportPanel v-if="reviewSubmissionId" kind="payroll" :submission-id="reviewSubmissionId" @closed="reviewSubmissionId=null" @changed="loadData"/>
     <el-dialog v-model="payrollOpen" title="工资明细" width="min(96vw, 1120px)" destroy-on-close>
       <p class="payroll-hint">工资按所选公司和月份展示；账单支出按实际记账日期统计。公司共用工资不自动分摊到店铺。</p>
       <el-alert v-if="payrollError" :title="payrollError" type="warning" :closable="false"/>
@@ -437,7 +446,8 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); rec
         <el-table-column label="基本工资" align="right" width="120"><template #default="{row}">{{formatMoney(row.base)}}</template></el-table-column>
         <el-table-column label="公司缴费" align="right" width="120"><template #default="{row}">{{formatMoney(row.employer)}}</template></el-table-column>
         <el-table-column label="公司成本" align="right" width="120"><template #default="{row}">{{formatMoney(payrollCost(row))}}</template></el-table-column>
-        <el-table-column label="状态" width="100"><template #default="{row}"><el-tag :type="row.approval_status==='approved'||row.cost_confirmed||Number(row.paid_amount||0)>0?'success':'warning'">{{row.approval_status==='approved'?'已入账':Number(row.paid_amount||0)>0?'已发待归档':row.cost_confirmed?'已确认待归档':'待确认'}}</el-tag></template></el-table-column>
+        <el-table-column label="已登记发放" width="120" align="right"><template #default="{row}">{{formatMoney(row.paid_amount)}}</template></el-table-column><el-table-column label="未发差额" width="120" align="right"><template #default="{row}">{{formatMoney(row.remaining_amount)}}</template></el-table-column>
+        <el-table-column label="入账状态" width="130"><template #default="{row}"><el-tag :type="row.approval_status==='approved'||row.cost_confirmed||Number(row.paid_amount||0)>0?'success':'warning'">{{row.approval_status==='approved'?'已入账':Number(row.paid_amount||0)>0?'已发待归档':row.cost_confirmed?'已确认待归档':'待确认'}}</el-tag></template></el-table-column>
         <el-table-column label="操作" width="110"><template #default="{row}"><el-button link type="primary" @click="router.push({path:'/finance/payroll',query:{month:row.month,companyId:String(row.company_id)}})">查看原记录</el-button></template></el-table-column>
       </el-table>
     </el-dialog>
@@ -541,7 +551,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); rec
 
     </el-dialog>
     <el-dialog v-model="aiOpen" title="AI 用量" width="min(96vw, 1120px)" destroy-on-close>
-    <section v-if="aiOpen" v-loading="state.loading" class="ai-usage-section">
+    <section v-if="aiOpen" v-loading="state.loading" class="ai-usage-section"><p v-if="selectedSummary.ai_cost_company_id">图片费用归属：{{state.companies.find(c=>Number(c.id)===Number(selectedSummary.ai_cost_company_id))?.name||'已配置公司'}}；本账单按量成本 {{selectedSummary.ai_usage_cost==null?'待核定':formatMoney(selectedSummary.ai_usage_cost)}} 元，固定AI费用 {{formatMoney(selectedSummary.ai_fixed_cost)}} 元。</p><p v-if="selectedSummary.ai_cost_fallback_months?.length">无调用记录月份按已确认估算：{{selectedSummary.ai_cost_fallback_months.join('、')}}。</p>
       <div class="section-head">
         <div>
           <strong>{{ selectedPeriodTitle }}</strong>
@@ -549,7 +559,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); rec
         </div>
       </div>
       <div class="ai-usage-summary">
-        <article><BillingMetricLabel metric="ai_cost" /><strong>{{ formatAiMoney(aiUsage.cost) }} RMB</strong></article>
+        <article><BillingMetricLabel label="企业图片调用估算" hint="这里展示原始图片调用费用，不含固定订阅及历史缺失月份补估。"/><strong>{{aiUsage.available===false?'待核定':formatAiMoney(aiUsage.cost)+' RMB'}}</strong></article>
         <article><BillingMetricLabel metric="ai_subscription" /><strong>{{ formatMoney(aiSubscription) }} CNY</strong><el-button link type="primary" @click="openExpense(null, 'ai_subscription')">录入 ChatGPT Pro 等订阅</el-button></article>
         <article><BillingMetricLabel metric="request_count" /><strong>{{ formatInteger(aiUsage.request_count) }} 次</strong></article>
         <article><BillingMetricLabel metric="generated_count" /><strong>{{ formatInteger(aiUsage.generated_count) }} 张</strong></article>

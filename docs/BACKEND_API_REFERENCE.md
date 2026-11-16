@@ -2463,6 +2463,17 @@ Create, edit or remove a domestic shipping, packaging or order-payment cost from
   - `404` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `POST /api/finance-submissions/payroll-void`
+
+Explicitly void a pending or approved payroll batch without physically deleting items or paid records. Approved payroll keeps its original expense and adds one protected negative salary entry per item. Requires displayed batch revision and reason; inconsistent expenses, linked vouchers, closed periods and stale snapshots block the transaction. The batch leaves active payroll but its original items, payments and per-item void audit remain available.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/finance-submissions/payroll-delete`
 
 Delete a current-enterprise wage and its corresponding posted expense transactionally. Requires a reason and revision. Paid wages, linked vouchers, closed periods and inconsistent expenses block deletion. Retains before/after audit and payment history; company reports and monthly billing read the same remaining expense records.
@@ -2609,6 +2620,25 @@ Preview or explicitly confirm adjustments to the company reconciliation ledger. 
   - `200` `application/json` -> `object`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `GET /api/finance-center/ai-cost-policy`
+
+Read the enterprise's assigned AI cost company, effective month, historical missing-month estimate and revision.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/finance-center/ai-cost-policy`
+
+Save an explicitly reviewed AI cost company assignment and append policy history. The reporting ai-v2 projection deducts monthly metered costs once; missing historical months may use the configured estimate. Company overhead is not allocated to shop reports; fixed GPT subscriptions remain independent recorded expenses. Historical order formula versions are never rewritten.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/finance-center/order-sales-source`
 
 Read an owned authorized Ozon shop's official monthly order realization report without changing Ozon or ERP amounts. Rechecks membership, assignment, credentials and matching company tax number. The returned CNY original can then be uploaded and separately confirmed.
@@ -2621,7 +2651,7 @@ Read an owned authorized Ozon shop's official monthly order realization report w
 
 #### `GET /api/monthly-billing-details`
 
-Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Salary recognition paid-payroll-v1 includes previously paid pending payroll in its owned company/payroll month as a read-only accrual; approval replaces the accrual with the posted row without double counting. Unconfirmed unpaid payroll, AI usage estimates and loss reference totals are not extra deductions. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeOverviewAi=1 opts into two grouped enterprise-wide AI queries, with available=false on read failure; AI is unallocated to company/shop and is never an extra profit deduction. Grouped months include expense_totals by category for the same monthly cost breakdown. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
+Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Unconfirmed unpaid payroll and loss reference totals are not extra deductions; paid pending payroll is recognized once and approval replaces its reporting accrual. An explicitly configured AI company policy selects reporting version revenue-less-recorded-costs-ai-v2 and deducts allocated metered cost once; unavailable usage leaves net_profit unknown. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeOverviewAi=1 opts into two grouped enterprise-wide AI queries, with available=false on read failure; AI is charged only to its configured company, not individual shops; policy and fixed AI cost metadata are included in the summary. Grouped months include expense_totals by category for the same monthly cost breakdown. includeAppendices=0 skips procurement/current-inventory appendices; a configured AI cost policy still reads grouped usage to preserve the same net profit. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Query parameters:

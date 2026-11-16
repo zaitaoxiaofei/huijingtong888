@@ -1,3 +1,4 @@
+import {financeAiCostPolicy} from '../../services/finance-ai-cost-policy.js';
 import {
   closeFinancePeriod,
   deleteFinanceExpense,
@@ -18,6 +19,8 @@ import { companyFinanceDocuments } from '../../services/company-finance-document
 
 export function createFinanceCenterRoutes({ readJson, services }) {
   return {
+    "GET /api/finance-center/ai-cost-policy": req=>financeAiCostPolicy.get(req._session),
+    "POST /api/finance-center/ai-cost-policy": async req=>financeAiCostPolicy.save(await readJson(req,{limitBytes:64*1024}),req._session),
     "POST /api/finance-center/order-sales-source": async req => companyFinanceDocuments.orderSalesSource(await readJson(req,{limitBytes:64*1024}),req._session),
     "GET /api/finance-center/document-reconciliation": (req,url) => companyFinanceDocuments.reconcile(Object.fromEntries(url.searchParams),req._session),
     "POST /api/finance-center/document-calibration": async req => {

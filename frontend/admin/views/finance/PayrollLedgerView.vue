@@ -15,6 +15,7 @@ const routeMonth = () => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(route.query.month
 const allowed = computed(() => canAccessPage(auth.user, "/finance/payroll"));
 const year = ref(routeMonth().slice(0, 4)), companyId = ref(String(route.query.companyId || "all")), companies = ref([]), rows = ref([]), selectedMonth = ref(routeMonth());
 const loading = ref(false), errorText = ref(""), importOpen = ref(false), contributionDetails = ref(false);
+const reviewSubmissionId=ref(null);
 const detailsOpen = ref(false), editorOpen = ref(false), editingRow = ref(null), copyingRow = ref(false), selectedRows = ref([]), batchSaving = ref(false);
 const paymentRow = ref(null), paidAmount = ref(0), paymentOpen = ref(false), saving = ref(false);
 let generation = 0, controller;
@@ -124,7 +125,7 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
   <div v-if="allowed" class="payroll-ledger">
     <header class="ledger-header"><div><h1>工资管理</h1><p>按公司查看全年1—12月工资汇总，点击明细查看或编辑记录。</p></div><div class="detail-actions"><el-button type="primary" @click="openEditor()">新增工资明细</el-button><el-button type="primary" @click="importOpen=true">导入工资表</el-button></div></header>
     <div class="detail-actions"><el-button :disabled="companyId==='all'" title="先选择归属公司，再查看公司账单" @click="openFinance('/finance/company-statements')">公司账单与凭证</el-button><el-button @click="openFinance('/profit/monthly-billing')">月度账单</el-button><el-button @click="router.push({path:'/finance-center',query:{companyId,year}})">经营总览</el-button></div>
-    <el-alert type="info" :closable="false" title="可直接新增工资明细，也可导入工资表。点击月份查看明细、批量登记发放或逐条编辑；审批通过后计入工资成本，发放登记不重复扣费。" />
+    <el-alert type="info" :closable="false" title="可直接新增工资明细，也可导入工资表。点击月份查看明细、批量登记发放或逐条编辑；点击明细中的“核对并入账”确认成本；发放登记单独保留，不重复扣费。" />
     <div class="ledger-filters"><el-date-picker v-model="year" type="year" value-format="YYYY" format="YYYY年" aria-label="工资年份" :clearable="false" @change="load" /><el-select v-model="companyId" aria-label="工资归属公司" @change="load"><el-option label="全部公司" value="all" /><el-option v-for="company in companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select><el-button :loading="loading" @click="load">刷新</el-button></div>
     <el-alert v-if="errorText" :title="errorText" type="error" :closable="false" />
     <section v-else v-loading="loading" class="ledger-section">
@@ -135,7 +136,7 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
         <div><span>工资已发金额</span><strong>¥{{ money(annual.paid) }}</strong></div>
         <div><span>工资未发差额</span><strong>¥{{ money(annual.remaining) }}</strong></div>
       </div>
-      <p class="ledger-note cost-note">公司人工总支出 = 基本工资 + 公司承担社保公积金；个人扣款已包含在基本工资中，不重复相加。含待审批工资，审批通过后计入账单。</p>
+      <p class="ledger-note cost-note">公司人工总支出 = 基本工资 + 公司承担社保公积金；个人扣款已包含在基本工资中，不重复相加。含已确认与待确认工资；已发放工资按归属月计成本，可在同一行核对确认，审批归档不重复扣费。</p>
       <el-table :data="months" class="month-ledger" :row-class-name="({row}) => row.month===selectedMonth ? 'selected-month' : ''" @row-click="row => openDetails(row.month)">
         <el-table-column prop="label" label="月份" width="64" fixed />
         <el-table-column prop="count" label="人数" width="60" align="right" />
@@ -163,12 +164,13 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
         <el-table-column label="公司人工总支出" width="130" align="right"><template #default="{row}"><strong>{{ money(companyCost(row)) }}</strong></template></el-table-column>
         <el-table-column label="已发金额" width="110" align="right"><template #default="{row}">{{ money(row.paid_amount) }}</template></el-table-column>
         <el-table-column label="未发差额" width="110" align="right"><template #default="{row}">{{ money(row.remaining_amount) }}</template></el-table-column>
-        <el-table-column label="审批状态" width="90"><template #default="{row}">{{ row.approval_status==='approved' ? '已审批' : '待审批' }}</template></el-table-column>
-        <el-table-column label="操作" width="290" fixed="right"><template #default="{row}"><el-button type="primary" link :disabled="batchSaving" :aria-label="`编辑${row.person_name}工资明细`" @click="openEditor(row)">编辑</el-button><el-button type="primary" link :disabled="batchSaving" @click="openEditor(row,true)">复制新增</el-button><el-button type="primary" link :disabled="batchSaving" :aria-label="`登记${row.person_name}已发金额`" @click="openPayment(row)">登记发放</el-button><el-button type="danger" link :disabled="batchSaving" @click="deleteItem(row)">删除</el-button></template></el-table-column>
+        <el-table-column label="入账状态" width="100"><template #default="{row}">{{ row.approval_status==='approved'?'已入账':Number(row.paid_amount||0)>0?'已发待归档':row.cost_confirmed?'已确认待归档':'待确认入账' }}</template></el-table-column>
+        <el-table-column label="操作" width="370" fixed="right"><template #default="{row}"><el-button v-if="row.approval_status==='pending'" type="primary" link :disabled="batchSaving" @click="reviewSubmissionId=row.submission_id">核对并入账</el-button><el-button type="primary" link :disabled="batchSaving" :aria-label="`编辑${row.person_name}工资明细`" @click="openEditor(row)">编辑</el-button><el-button type="primary" link :disabled="batchSaving" @click="openEditor(row,true)">复制新增</el-button><el-button type="primary" link :disabled="batchSaving" :aria-label="`登记${row.person_name}已发金额`" @click="openPayment(row)">登记发放</el-button><el-button type="danger" link :disabled="batchSaving" @click="deleteItem(row)">删除</el-button></template></el-table-column>
       </el-table>
       <p v-if="contributionDetails && details.some(row => !row.employer_items)" class="ledger-note">部分旧导入记录未保存缴费分项，以“—”显示，合计金额仍保留。</p>
     </section>
     </el-dialog>
+    <FinanceImportPanel v-if="reviewSubmissionId" kind="payroll" :submission-id="reviewSubmissionId" @closed="reviewSubmissionId=null" @changed="load"/>
     <PayrollItemEditor v-model="editorOpen" :row="editingRow" :copy="copyingRow" :companies="companies" :company-id="companyId" :month="selectedMonth" @saved="handleItemSaved" />
     <el-dialog v-model="paymentOpen" title="登记已发金额" width="min(94vw, 440px)" :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close><template v-if="paymentRow"><p>{{ paymentRow.company_name }} · {{ paymentRow.person_name }}</p><p>{{ paymentRow.month }} · 表内实发工资 ¥{{ money(paymentRow.net) }}</p><el-form label-position="top" @submit.prevent="savePayment"><el-form-item label="累计已发金额（元）"><el-input-number v-model="paidAmount" :min="0" :precision="2" :max="100000000" :disabled="saving" /><el-button :disabled="saving" @click="paidAmount=Number(paymentRow.net)">填入全部工资</el-button></el-form-item><p class="ledger-note">保存只登记发放记录，不会执行银行转账。</p><p>未发差额：¥{{ money((cents(paymentRow.net)-cents(paidAmount))/100) }}</p></el-form></template><template #footer><el-button :disabled="saving" @click="paymentOpen=false">取消</el-button><el-button type="primary" :loading="saving" :disabled="paidAmount==null" @click="savePayment">保存</el-button></template></el-dialog>
     <el-dialog v-model="importOpen" title="工资表导入与审核" width="min(94vw, 1200px)" destroy-on-close><FinanceImportPanel v-if="importOpen" kind="payroll" :month="selectedMonth" :company-id="companyId" @changed="load" /></el-dialog>

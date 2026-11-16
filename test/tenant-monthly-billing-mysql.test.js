@@ -318,6 +318,15 @@ test('monthly billing reads only the current enterprise, including every financi
       assert.equal(ad.total,1);assert.equal(ad.groups[0].amount_cny,9);assert.equal(ad.rows[0].original_amount,null);assert.ok(!JSON.stringify(ad).includes('B secret'));
       await assert.rejects(monthlyBillingSourceRecordsMysql({...range,source:'other'},'2'),{statusCode:400});
     });
+    await t.test('assigned AI lowers company net profit once and is identical across annual, monthly and lightweight reads',async()=>{
+      const args={from:'2026-10-01',to:'2026-10-31',companyId:2};const before=(await monthlyBillingDetailsMysql(args,'2')).selected;
+      await q("INSERT INTO finance_ai_cost_policies(tenant_id,company_id,effective_month,updated_by) VALUES(2,2,'2026-01',2)");
+      try{const month=(await monthlyBillingDetailsMysql(args,'2')).selected,light=(await monthlyBillingDetailsMysql({...args,includeAppendices:'0'},'2')).selected,annual=(await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,companyId:2,overviewOnly:'1'},'2')).selected;
+        assert.equal(month.summary.ai_cost_applied,true);assert.equal(month.summary.ai_usage_cost,.95);assert.equal(month.summary.order_profit,before.summary.order_profit);assert.equal(month.summary.net_profit,Math.round((before.summary.net_profit-.95)*100)/100);
+        assert.equal(light.summary.net_profit,month.summary.net_profit);assert.equal(annual.summary.net_profit,month.summary.net_profit);
+        const shop=(await monthlyBillingDetailsMysql({...args,shopId:20},'2')).selected;assert.equal(shop.summary.ai_cost_applied,false);
+      }finally{await q('DELETE FROM finance_ai_cost_policies WHERE tenant_id=2');}
+    });
     await t.test('unavailable annual AI remains unknown rather than a recorded zero',async()=>{
       await q('RENAME TABLE ai_image_usage_events TO ai_image_usage_events_unavailable');
       try{const r=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1',includeOverviewAi:'1'},'2');assert.equal(r.selected.ai_usage.available,false);assert.equal(r.selected.ai_usage.cost,null);}

@@ -874,7 +874,12 @@ fi
 candidate_pid=""
 
 trap - ERR
-install_storage_lifecycle_timers
+# Finance-only releases must not install unapproved storage workers/timers.
+if [[ "${BINLOG_ARCHIVE_ENABLED:-0}" == "1" || "${MEDIA_CACHE_LIFECYCLE_ENABLED:-0}" == "1" ]]; then
+  install_storage_lifecycle_timers
+else
+  echo "Storage lifecycle flags remain disabled; existing timers left unchanged."
+fi
 # A failed release never ages out its preceding restore points. Run retention
 # only after the new primary and candidate have both passed readiness checks.
 if ! (cd "$release_dir" && node scripts/prune-release-backups.mjs --apply --lock-fd=9); then
