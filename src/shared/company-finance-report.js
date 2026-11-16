@@ -14,6 +14,7 @@ export const FINANCE_GROUPS = [
 ];
 export const MANUAL_EXPENSE_METRICS = ['国内物流费','AI使用费','软件订阅费','场地租金','水电物业费','办公耗材费','设备折旧费','设备采购支出','商品采购支出','押金及预付款','银行手续费','汇兑损益','会计服务费','其他费用'];
 export const UPLOAD_TYPES = [
+ {value:'order-sales',label:'Ozon逐单销售凭证（官方JSON）',kinds:['order-sales'],shop:true,hint:'上传官方逐单销售报告JSON（header/rows，合同CNY）。用于校对，不重复累计月报；SKU月报不能代替逐单报告。'},
  {value:'auto',label:'平台报告 · 自动识别',hint:'Z店销售报告、服务书、结算报告等；选择实际店铺。'},
  {value:'sales',label:'销售报告（销售、退货与补贴）',kinds:['sales'],shop:true,hint:'上传平台销售报告XLSX，按正文业务月份核对。取消未成交订单不自动记为收入。'},
  {value:'platform-fees',label:'平台费用服务书 / 综合凭证',kinds:['platform-invoice','recharged-service','star-service','platform-adjustment'],shop:true,hint:'上传UTD、转收费报告或星级推广服务书；综合凭证只记一次。'},

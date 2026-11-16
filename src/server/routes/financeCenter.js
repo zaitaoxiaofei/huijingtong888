@@ -18,6 +18,13 @@ import { companyFinanceDocuments } from '../../services/company-finance-document
 
 export function createFinanceCenterRoutes({ readJson, services }) {
   return {
+    "POST /api/finance-center/order-sales-source": async req => companyFinanceDocuments.orderSalesSource(await readJson(req,{limitBytes:64*1024}),req._session),
+    "GET /api/finance-center/document-reconciliation": (req,url) => companyFinanceDocuments.reconcile(Object.fromEntries(url.searchParams),req._session),
+    "POST /api/finance-center/document-calibration": async req => {
+      const body=await readJson(req,{limitBytes:64*1024});
+      if(!['preview','confirm'].includes(body.action))throw Object.assign(new Error('请选择校准预览或确认'),{statusCode:400});
+      return companyFinanceDocuments[body.action==='preview'?'calibrationPreview':'calibrationConfirm'](body,req._session);
+    },
     "GET /api/finance-center/document-report": (req,url) => companyFinanceDocuments.report(Object.fromEntries(url.searchParams),req._session),
     "POST /api/finance-center/document-import": async req => {
       const body=await readJson(req,{limitBytes:64*1024});

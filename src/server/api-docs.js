@@ -1473,6 +1473,21 @@ const endpoints = [
       query: [...queryFieldsFromSchema("ProfitFiltersQuery"), param("inventory", scalar("string", "Set to 1 for the inventory sales leaderboard (product/sku dimensions)."), false), param("productId", scalar("integer", "Filter inventory leaderboard details by inventory product ID."), false)],
       responses: [response(200, "application/json", arrayOf(scalar("object", "Profit ranking row."), "Ranking rows."))]
     }),
+    endpoint("GET", "/api/finance-center/document-reconciliation", "Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history.", {
+      auth: "authenticated; current-enterprise finance authority",
+      query: [param("company_id", scalar("integer", "Owned company ID.")), param("shop_id", scalar("integer", "Shop assigned to the company in the selected month.")), param("month", scalar("string", "Business month YYYY-MM."))],
+      responses: [response(200, "application/json", scalar("object", "rows, controls, gaps, history, summary; profit is never inferred from incomplete inputs."))]
+    }),
+    endpoint("POST", "/api/finance-center/document-calibration", "Preview or explicitly confirm adjustments to the company reconciliation ledger. Never rewrites frozen order profit. Confirmation rechecks evidence, baseline, month closing and optimistic tokens atomically; duplicate submissions reuse history.", {
+      auth: "authenticated; current-enterprise finance authority",
+      requestBody: body(scalar("object", "company_id, shop_id, month and action. preview: row_keys (1-200). confirm: rows of key/token, reason (4-1000 characters), acknowledge=true.")),
+      responses: [response(200, "application/json", scalar("object", "Preview rows or confirmed adjustment IDs.")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/finance-center/order-sales-source", "Read an owned authorized Ozon shop's official monthly order realization report without changing Ozon or ERP amounts. Rechecks membership, assignment, credentials and matching company tax number. The returned CNY original can then be uploaded and separately confirmed.", {
+      auth: "authenticated; current-enterprise finance authority",
+      requestBody: body(scalar("object", "company_id, shop_id, month (YYYY-MM).")),
+      responses: [response(200, "application/json", scalar("object", "data (official header/rows), filename, source and note; no credentials."))]
+    }),
     endpoint("GET", "/api/monthly-billing-details", "Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.", {
       auth: "authenticated; current-enterprise finance authority",
       query: [

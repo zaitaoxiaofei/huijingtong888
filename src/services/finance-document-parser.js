@@ -1,8 +1,9 @@
 import crypto from 'node:crypto';
+import { parseOrderSalesJson } from './finance-order-sales.js';
 import { platformInvoiceFacts, rechargedServiceFacts, paymentAdjustmentFacts } from './finance-platform-text.js';
 import { financeXlsxRows } from './finance-xlsx-reader.js';
 
-export const PARSER_VERSION = 'ozon-monthly-2';
+export const PARSER_VERSION = 'ozon-monthly-3';
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 export const rounded = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 function amount(value) {
@@ -69,6 +70,7 @@ function documentMonth(text) {
 export async function parseFinanceDocument(buffer,name,{month}={}) {
   validateMonth(month);
   if(!Buffer.isBuffer(buffer)||!buffer.length||buffer.length>20*1024*1024)fail('文件为空或超过20MB，请检查上传原件');
+  if(/\.json$/i.test(name))return parseOrderSalesJson(buffer,{month});
   const {text:original,rows,scanned}=await extract(buffer,name);const text=original.replace(/\u00a0/g,' '),flat=text.replace(/\s+/g,' ');
   const result={version:PARSER_VERSION,sha256:crypto.createHash('sha256').update(buffer).digest('hex'),kind:'support',month,period:documentMonth(flat),currency:null,document_number:null,facts:[],cash:[],warnings:[],controls:[],buyer_tax_number:null};
   result.buyer_tax_number=flat.match(/\b(9[0-9A-Z]{17})\b/)?.[1]||null;
@@ -82,9 +84,15 @@ export async function parseFinanceDocument(buffer,name,{month}={}) {
     const isEntry=flat.includes('入账记录查询');
     const header=rows.findIndex(r=>r?.includes(isEntry?'创建日期':'批次单号'));if(header<0)fail('连连表格缺少交易明细表头');
     const h=rows[header];const get=(r,label)=>r[h.indexOf(label)];
+    const required=isEntry?['创建日期','交易单号','币种','金额','状态']:['批次单号','交易日期','提现币种','提现金额','实收基础服务费','提前宝服务费','小额服务费','小额服务费币种','到账币种','到账金额'];
+    if(required.some(k=>!h.includes(k)))fail('连连原件缺少必需金额/交易号/手续费表头，请重新完整导出，不把缺列当零');
+    result.account_company_name=flat.match(/名称[：:]\s*\[([^\]]+)\]/)?.[1]?.trim();if(!result.account_company_name)fail('连连原件缺少公司名称，请上传完整带抬头的导出');
     for(let i=header+1;i<rows.length;i++){
       const r=rows[i];if(!r)continue;const date=String(get(r,isEntry?'创建日期':'交易日期')||'');if(!/^20\d{2}-\d{2}-\d{2}/.test(date))continue;
       if(isEntry&&get(r,'状态')!=='成功')continue;
+      const reference=get(r,isEntry?'交易单号':'批次单号');if(reference==null||String(reference).trim()===''||typeof reference==='number'&&!Number.isSafeInteger(reference))fail('连连交易号缺失或精度已损失，请上传原始导出，不手工转数字');
+      if((isEntry?['金额']:['提现金额','实收基础服务费','提前宝服务费','小额服务费','到账金额']).some(k=>get(r,k)==null||get(r,k)===''))fail('连连金额或手续费为空，不能当作零，请核对原始导出');
+      if(!isEntry&&amount(get(r,'小额服务费'))!==0&&get(r,'小额服务费币种')!==get(r,'提现币种'))fail('小额服务费与提现币种不同，请分币种核对，不合并金额');
       result.cash.push({type:isEntry?'entry':'withdrawal',date,currency:get(r,isEntry?'币种':'提现币种'),amount:rounded(amount(get(r,isEntry?'金额':'提现金额'))),reference:String(get(r,isEntry?'交易单号':'批次单号')),fee:isEntry?null:rounded(amount(get(r,'实收基础服务费'))+amount(get(r,'提前宝服务费'))+amount(get(r,'小额服务费'))),listed_bank_currency:isEntry?null:get(r,'到账币种'),listed_bank_amount:isEntry?null:rounded(amount(get(r,'到账金额'))),source:`第${i}行`});
     }
     result.warnings.push('公司共用收款流水；按交易日期筛选，不自动认作店铺收入或银行实际到账，提现费用保留原币');

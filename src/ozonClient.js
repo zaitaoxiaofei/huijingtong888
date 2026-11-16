@@ -23,6 +23,11 @@ let fbsListNextRequestAt = 0;
 let fbsListCooldownUntil = 0;
 let fbsListQueue = Promise.resolve();
 
+export async function fetchOzonMonthlyRealization(shop, {year,month,...options} = {}) {
+  if(!Number.isInteger(year)||year<2020||!Number.isInteger(month)||month<1||month>12)throw new Error('请选择有效销售月份');
+  return ozonRequest(shop, '/v1/finance/realization/posting', {year,month}, options);
+}
+
 export async function fetchOzonReturnObservations(shop, options = {}) {
   if (!hasRealOzonCredentials(shop)) throw new Error("店铺缺少 Ozon API 凭据，无法核查退货");
   return fetchOzonReturns(shop, { ...options, request: (path, payload, opts) => ozonRequest(opts.shop, path, payload, opts) });
