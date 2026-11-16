@@ -22453,6 +22453,8 @@ async function upsertInboundInventoryMovementMysql(connection, inboundId, body =
     product_id: body.product_id,
     owner_person_id: body.owner_person_id,
     source_type: "purchase_inbound",
+      stock_location: "LOCAL",
+      stock_location_source: "purchase_receipt",
     source_ref: sourceRef,
     quantity_delta: body.quantity,
     unit_cost: body.unitCost,
@@ -25072,6 +25074,8 @@ export async function directInboundProcurementRequestsMysql(body = {}, tenantId 
         product_id: request.product_id,
         owner_person_id: personId,
         source_type: "purchase_inbound",
+      stock_location: "LOCAL",
+      stock_location_source: "purchase_receipt",
         source_ref: `inbound_${inboundId}`,
         quantity_delta: quantity,
         unit_cost: unitCost,
@@ -25672,6 +25676,8 @@ export async function createInboundRecordMysql(body = {}, tenantId = "admin", se
         product_id: body.product_id,
         owner_person_id: personId,
         source_type: "purchase_inbound",
+      stock_location: "LOCAL",
+      stock_location_source: "purchase_receipt",
         source_ref: `inbound_${inboundId}`,
         quantity_delta: quantity,
         unit_cost: unitCost,
@@ -25807,6 +25813,8 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
       product_id: productId,
       owner_person_id: personId,
       source_type: "purchase_inbound",
+      stock_location: "LOCAL",
+      stock_location_source: "purchase_receipt",
       source_ref: `inbound_${inboundId}`,
       quantity_delta: quantity,
       unit_cost: unitCost,
@@ -31657,7 +31665,9 @@ function inventoryCapitalSourcesMysql(scope) {
           AND ${localStockLocationPredicateMysql("im")} AND ${orderTenantPredicateMysql("im", scope)}
         GROUP BY im.product_id) stock
       JOIN products p ON p.id=stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
-      ${costJoin}`,
+      ${costJoin}
+      WHERE NOT EXISTS (SELECT 1 FROM product_components capital_component
+        WHERE capital_component.product_id=p.id AND ${orderTenantPredicateMysql("capital_component", scope)})`,
     fbp: `SELECT oss.id AS row_id,oss.shop_id,
       (SELECT CASE WHEN COUNT(*)=1 THEN MIN(op.id) ELSE NULL END FROM online_products op WHERE op.shop_id=oss.shop_id AND op.ozon_sku=oss.ozon_sku AND op.archived=0) AS online_product_id,
       p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,

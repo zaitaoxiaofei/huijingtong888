@@ -180,6 +180,32 @@ test('monthly billing reads only the current enterprise, including every financi
       assert.deepEqual(await q("SELECT id,product_id,quantity_delta,status FROM inventory_movements ORDER BY id"),before);
       await q("DELETE FROM inventory_movements WHERE source_type='review-fixture'");await q("DELETE FROM products WHERE id IN(23,24)");
     });
+    await t.test('local capital excludes virtual parents and nested parents but retains real multipacks and child deficits',async()=>{
+      await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(240,2,'Virtual set','V240',100,'VIRTUAL-240'),(241,2,'Virtual sub-set','V241',50,'VIRTUAL-241'),(242,2,'Physical child pack','P242',3,'PHYSICAL-242'),(243,2,'Physical deficit','P243',4,'PHYSICAL-243'),(244,2,'Real four-piece set','P244',5,'PHYSICAL-244'),(340,3,'Foreign parent','V340',999,'FOREIGN-340')");
+      await q("INSERT INTO product_components(tenant_id,product_id,component_product_id,quantity) VALUES(2,240,241,2),(2,241,242,2),(2,240,243,1),(3,244,340,1)");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,240,'virtual-capital-fixture',-70,'UNKNOWN','posted'),(2,241,'virtual-capital-fixture',10,'LOCAL','posted'),(2,242,'virtual-capital-fixture',8,'LOCAL','posted'),(2,243,'virtual-capital-fixture',-2,'LOCAL','posted'),(2,244,'virtual-capital-fixture',4,'LOCAL','posted')");
+      const before=await q("SELECT id,product_id,quantity_delta FROM inventory_movements ORDER BY id");
+      const all=await financeInventoryCapitalDetailsMysql({kind:'local',pageSize:100},'2');
+      const ids=all.rows.map(r=>r.product_id);
+      assert.ok(!ids.includes(240));assert.ok(!ids.includes(241));
+      assert.ok(ids.includes(242));assert.ok(ids.includes(243));assert.ok(ids.includes(244));
+      assert.equal(all.rows.find(r=>r.product_id===242).quantity,8);
+      assert.equal(all.rows.find(r=>r.product_id===242).inventory_value,24);
+      assert.equal(all.rows.find(r=>r.product_id===244).inventory_value,20);
+      assert.equal(all.summary.categories.local.availability_unknown_count,1);
+      const unknown=await financeInventoryCapitalDetailsMysql({kind:'local',review:'availability'},'2');
+      assert.deepEqual(unknown.rows.map(r=>r.product_id),[243]);
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',query:'VIRTUAL-240'},'2')).total,0);
+      await q("UPDATE inventory_movements SET quantity_delta=2 WHERE product_id=243 AND source_type='virtual-capital-fixture'");
+      const known=await financeInventoryCapitalDetailsMysql({kind:'local'},'2');
+      assert.equal(known.summary.categories.local.value,40+24+8+20);
+      assert.equal(known.summary.categories.local.quantity,20+8+2+4);
+      await q("UPDATE inventory_movements SET quantity_delta=-2 WHERE product_id=243 AND source_type='virtual-capital-fixture'");
+      assert.deepEqual(await q("SELECT id,product_id,quantity_delta FROM inventory_movements ORDER BY id"),before);
+      await q("DELETE FROM inventory_movements WHERE source_type='virtual-capital-fixture'");
+      await q("DELETE FROM product_components WHERE product_id IN(240,241,244)");
+      await q("DELETE FROM products WHERE id IN(240,241,242,243,244,340)");
+    });
     await t.test('unknown available quantity is not capitalized as zero',async()=>{
       await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(25,2,'Unverified negative stock','P-25',2,'STOCK-25')");
       await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,25,'capital-unknown',-5,'LOCAL','posted')");

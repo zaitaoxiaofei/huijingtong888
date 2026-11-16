@@ -106,6 +106,12 @@ test('pending purchase correction and direct receipt preserve money, stock and e
    assert.equal(Number((await q("SELECT quantity_delta FROM inventory_movements WHERE product_id=204 AND source_type='order_outbound'"))[0].quantity_delta),-1);
    assert.equal((await service.receive({...input,expected_revision:preview.revision},session(2))).duplicate,true);assert.equal(await stock(204),24,'A retried receipt returns its committed result without incrementing stock twice');
   });
+  await t.test('new approved purchase receipts save the domestic warehouse without altering quantity',async()=>{
+   await q("INSERT INTO products(id,tenant_id,name) VALUES(205,2,'Explicit domestic receipt')");
+   await legacy.createInboundRecordMysql({product_id:205,person_id:2,quantity:3,amount:30,status:'approved'},2,2);
+   const [movement]=await q("SELECT quantity_delta,stock_location,stock_location_source FROM inventory_movements WHERE product_id=205 AND source_type='purchase_inbound'");
+   assert.equal(Number(movement.quantity_delta),3);assert.equal(movement.stock_location,'LOCAL');assert.equal(movement.stock_location_source,'purchase_receipt');
+  });
   await t.test('arrival cards count pending quantities across batches, respecting search and tenant',async()=>{
    const result=await createProcurementArrivals().list({status:'open',summary_only:'1',product_id:200},session());assert.equal(result.summary.open,1);assert.equal(result.summary.open_quantity,6);assert.equal(result.summary.arrived_quantity,0);
    await assert.rejects(createProcurementArrivals().list({status:'open',product_id:300},session()),{statusCode:404});
