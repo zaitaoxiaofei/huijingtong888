@@ -26,3 +26,9 @@ test('dated partial backfill is limited to selected uncovered orders and revalid
  let sent;await submitPurchaseBackfills([a],{get:async()=>({revision:'new-revision'}),post:async(path,body)=>{if(path.endsWith('/preview'))return a.preview;sent=body;}},()=>true);
  assert.equal(sent.purchase_date_basis,'order_date');assert.equal(sent.revision,'new-revision');assert.equal(sent.quantity,2);assert.equal(a.status,'success');
 });
+
+test('database Date values and HTTP date strings resolve to the same Beijing order date',async()=>{
+ const {purchaseOrderDate}=await import('../src/shared/purchase-backfill-defaults.js');
+ const date=new Date('2026-10-01T17:00:00Z');
+ assert.equal(purchaseOrderDate(date),'2026-10-02');assert.equal(purchaseOrderDate(date),purchaseOrderDate(date.toISOString()));assert.equal(purchaseOrderDate(new Date('invalid')),'');
+});
