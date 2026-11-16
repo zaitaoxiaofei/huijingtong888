@@ -11,9 +11,9 @@ export const navigationMenus = [
     label: "财务中心",
     icon: ChartNoAxesCombined,
     children: [
-      { key: "company-statements", label: "公司账单与凭证", route: "/finance/company-statements" },
       { key: "finance-center", label: "经营总览", route: "/finance-center" },
       { key: "profit-monthly-billing", label: "月度账单", route: "/profit/monthly-billing" },
+      { key: "company-statements", label: "公司账单与凭证", route: "/finance/company-statements" },
       { key: "finance-payroll", label: "工资管理", route: "/finance/payroll" },
       { key: "finance-reimbursements", label: "报销中心", route: "/finance/reimbursements" },
     ]

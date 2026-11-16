@@ -1,4 +1,5 @@
 <script setup>
+import {overviewCards,overviewAmounts} from "./billing-overview.js";
 import { billingProfitTotals } from "../../../../src/shared/billing-profit.js";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -90,6 +91,7 @@ const expenseForm = reactive({
 
 const selectedPeriodTitle = computed(() => `${state.dateRange?.[0] || "-"} 至 ${state.dateRange?.[1] || "-"}`);
 const selectedSummary = computed(() => ({...(state.month?.summary||{}),...billingProfitTotals(state.month?.summary||{},expenseRows.value)}));
+const headerAmounts=computed(()=>overviewAmounts(selectedSummary.value,aiUsage.value,{companyId:state.companyId,shopId:state.shopId}));
 const procurementInventory = computed(() => state.month?.procurement_inventory || {});
 const aiUsage = computed(() => state.month?.ai_usage || {});
 const aiUsagePeople = computed(() => Array.isArray(aiUsage.value.people) ? aiUsage.value.people : []);
@@ -371,14 +373,8 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
       <div class="toolbar-links"><el-button :icon="Plus" @click="openExpense(null,'other')">录入费用</el-button><el-dropdown @command="toolbarCommand"><el-button>更多 ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="overview">年度总览</el-dropdown-item><el-dropdown-item command="capital">采购与库存</el-dropdown-item><el-dropdown-item command="payroll">工资审核</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
     </section>
     <section v-loading="state.loading" class="billing-overview">
-      <div class="summary-grid">
-        <button class="summary-card interactive" @click="openOrderDetails()"><BillingMetricLabel label="订单" :hint="billingMetrics.order_count.hint"/><strong>{{formatInteger(selectedSummary.order_count)}}</strong><small>查看订单 →</small></button>
-        <div class="summary-card"><BillingMetricLabel metric="order_profit"/><strong>¥{{formatMoney(selectedSummary.order_profit)}}</strong><small>订单相关费用已扣除</small></div>
-        <div class="summary-card is-profit"><BillingMetricLabel label="净利润" :hint="billingMetrics.net_profit.hint"/><strong :class="{'negative-money':Number(selectedSummary.net_profit)<0}">¥{{formatMoney(selectedSummary.net_profit)}}</strong><small>{{formatRatio(selectedSummary.net_profit_margin)}} 净利率</small></div>
-        <button class="summary-card interactive" @click="shopsOpen=true"><span>店铺</span><strong>{{shopRows.length}}</strong><small>查看账单 →</small></button>
-        <button class="summary-card interactive" @click="settlementOpen=true"><BillingMetricLabel label="结算比例" :hint="billingMetrics.settlement_rate.hint"/><strong>{{formatRatio(selectedSummary.settlement_rate)}}</strong><small>查看结算 →</small></button>
-        <button class="summary-card interactive" @click="aiOpen=true"><BillingMetricLabel label="AI 估算" :hint="billingMetrics.ai_cost.hint"/><strong>¥{{formatAiMoney(aiUsage.cost)}}</strong><small>查看用量 →</small></button>
-      </div>
+      <div class="summary-grid aligned-summary"><div v-for="card in overviewCards" :key="card.key" class="summary-card" :class="{'is-profit':card.key==='net_profit'}"><BillingMetricLabel :label="card.label" :hint="card.hint"/><strong :class="{'negative-money':headerAmounts[card.key]<0}">{{headerAmounts[card.key]==null?(card.key==='ai_cost'&&(state.companyId!=='all'||state.shopId!=='all')?'待分摊':'待补'):'¥'+(card.key==='ai_cost'?formatAiMoney(headerAmounts[card.key]):formatMoney(headerAmounts[card.key]))}}</strong><el-button v-if="card.key==='ai_cost'" link @click="aiOpen=true">按量估算 · 查看用量</el-button></div></div>
+      <div class="billing-secondary"><el-button link @click="openOrderDetails()">订单 {{formatInteger(selectedSummary.order_count)}} →</el-button><el-button link @click="shopsOpen=true">店铺 {{shopRows.length}} →</el-button><el-button link @click="settlementOpen=true">结算比例 {{formatRatio(selectedSummary.settlement_rate)}} →</el-button></div>
       <div class="profit-workspace">
         <div class="formula-card">
           <div class="income-group"><BillingMetricLabel label="收入" :hint="incomeGroup.hint"/><el-button link type="primary" aria-label="查看收入记录" @click="showGroupItem(incomeGroup.children[0])">¥{{formatMoney(incomeGroup.amount)}} <span class="amount-arrow">→</span></el-button></div>
@@ -778,6 +774,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
   .summary-grid, .ai-usage-summary, .formula-list, .expense-form-grid, .procurement-metric-grid, .inventory-metric-grid { grid-template-columns: 1fr; }
   .profit-workspace { padding: 0 12px 12px; }
 }
+.summary-grid.aligned-summary{grid-template-columns:repeat(5,minmax(0,1fr))}.billing-secondary{display:flex;gap:24px;flex-wrap:wrap;margin:12px 0 18px}@media(max-width:900px){.summary-grid.aligned-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 
 <style scoped>

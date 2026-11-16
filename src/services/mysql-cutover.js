@@ -28156,7 +28156,7 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
   if (Number(shopId) > 0) { where.push("e.shop_id = ?"); params.push(Number(shopId)); }
   if (companyId) { where.push("e.company_id = ?"); params.push(companyId); }
   const rows = await mysqlQuery(`
-    SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key,
+    SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key, e.category, SUM(e.amount_cny) amount_cny,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN e.amount_cny ELSE 0 END), 0) AS salary_expense,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN 0 ELSE e.amount_cny END), 0) AS manual_expense,
       COALESCE(SUM(CASE WHEN e.category IN ('domestic_shipping','packaging','order_payment') THEN e.amount_cny ELSE 0 END),0) AS order_expense
@@ -28164,20 +28164,23 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
     JOIN finance_companies c ON c.id=e.company_id
     LEFT JOIN shops s ON s.id=e.shop_id
     WHERE ${where.join(" AND ")}
-    GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m')`, params);
-  return new Map(rows.map(row => [row.month_key, row]));
+    GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m'), e.category`, params);
+  const months=new Map();
+  for(const row of rows){const current=months.get(row.month_key)||{manual_expense:0,salary_expense:0,order_expense:0,expense_totals:[]};for(const key of ['manual_expense','salary_expense','order_expense'])current[key]=roundMoneyMysql(current[key]+Number(row[key]||0));current.expense_totals.push({category:row.category,amount_cny:Number(row.amount_cny)});months.set(row.month_key,current);}
+  return months;
 }
 
-async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: requestedCompany }) {
+async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: requestedCompany, includeOverviewAi=false }) {
   const from = ranges[0].from, to = ranges.at(-1).to;
   await ensureFinanceCenterSchema();
   const companies = await mysqlQuery(`SELECT c.id,c.name FROM finance_companies c WHERE c.status!='deleted' AND ${monthlyFinanceTenantPredicateMysql("c", tenantScope)} ORDER BY c.id`);
   const companyId = requestedCompany && requestedCompany !== "all" ? Number(requestedCompany) : 0;
   if (companyId && (!Number.isSafeInteger(companyId) || !companies.some(c => Number(c.id) === companyId))) throw Object.assign(new Error("公司不存在或不属于当前企业"), { statusCode: 404 });
   if (requestedCompany && requestedCompany !== "all" && !companyId) throw Object.assign(new Error("公司标识无效"), { statusCode: 400 });
-  const [ranking, expenses] = await Promise.all([
+  const [ranking, expenses, ai] = await Promise.all([
     profitRankingMysql({ dimension: "shop", from, to, shopId, fast: "1" }, tenantId, { groupByMonth: true, companyId }),
-    annualBillingExpensesMysql(from, to, shopId, tenantScope, companyId)
+    annualBillingExpensesMysql(from, to, shopId, tenantScope, companyId),
+    includeOverviewAi ? billingAiUsageMysql(from,to,tenantScope,{groupByMonth:true}).catch(()=>({available:false,months:{}})) : Promise.resolve(null)
   ]);
   const byMonth = new Map();
   for (const row of ranking.rows) {
@@ -28192,7 +28195,7 @@ async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMon
     summary.order_expense = roundMoneyMysql(expense.order_expense);
     Object.assign(summary,billingProfitTotals(summary));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
-    return { ...range, label: `${Number(range.month_key.slice(5))}月`, summary, procurement_inventory: {}, ai_usage: {} };
+    return { ...range, label: `${Number(range.month_key.slice(5))}月`, summary, expense_totals:expense.expense_totals||[], procurement_inventory: {}, ai_usage: ai ? {...(ai.available?(ai.months[range.month_key]||{request_count:0,cost:0}):{request_count:null,cost:null}),available:ai.available,scope:'enterprise'} : {} };
   });
   return { year, fromMonth, toMonth, selectedMonth, selectedMonthKey, shopId, companyId: companyId || "all", companies,
     shops: shops.map(shop => ({ id: shop.id, name: shop.name })), months,
@@ -28645,7 +28648,7 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   }
   const selectedMonthKey = `${year}-${String(selectedMonth).padStart(2, "0")}`;
   const overviewOnly = query.overviewOnly === "1";
-  if (overviewOnly) return annualBillingOverviewMysql({ ranges: monthRanges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: query.companyId || query.company_id });
+  if (overviewOnly) return annualBillingOverviewMysql({ ranges: monthRanges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: query.companyId || query.company_id, includeOverviewAi:query.includeOverviewAi==='1' });
 
   const monthRows = await Promise.all(monthRanges.map(async (range) => {
     const includeOrders = (query.includeOrders === "1" || query.include_orders === "1") && range.month_key === selectedMonthKey;
@@ -31507,11 +31510,11 @@ async function dashboardAiUsageMysql(dateKey, tenantId = "admin") {
   };
 }
 
-async function billingAiUsageMysql(from, to, scope) {
+async function billingAiUsageMysql(from, to, scope, {groupByMonth=false}={}) {
   const unitCost = 0.038;
   const tenantKey = scope.defaultTenant ? "admin" : String(scope.id);
   const [eventRows, legacyRows] = await Promise.all([mysqlQuery(`
-    SELECT COALESCE(p.name, '未识别用户') AS person_name,
+    SELECT ${groupByMonth?"DATE_FORMAT(CONVERT_TZ(e.started_at,'+00:00','+08:00'),'%Y-%m') AS month_key,":''} COALESCE(p.name, '未识别用户') AS person_name,
            CASE WHEN tm.person_id IS NOT NULL THEN e.person_id ELSE NULL END AS person_id,
            SUM(e.requested_count) AS request_count,
            SUM(CASE WHEN e.status = 'success' THEN e.requested_count ELSE 0 END) AS generated_count,
@@ -31522,10 +31525,10 @@ async function billingAiUsageMysql(from, to, scope) {
     LEFT JOIN people p ON p.id = tm.person_id
     WHERE e.tenant_id = ? AND DATE(CONVERT_TZ(e.started_at, '+00:00', '+08:00')) BETWEEN ? AND ?
       AND e.operation = 'submit'
-    GROUP BY e.person_id, tm.person_id, p.name
+    GROUP BY ${groupByMonth?'month_key,':''} e.person_id, tm.person_id, p.name
     ORDER BY request_count DESC
-  `, [tenantKey, from, to]).catch(() => []), mysqlQuery(`
-    SELECT COALESCE(p.name, '未识别用户') AS person_name,
+  `, [tenantKey, from, to]).catch(error => {if(groupByMonth)throw error;return [];}), mysqlQuery(`
+    SELECT ${groupByMonth?"DATE_FORMAT(CONVERT_TZ(i.updated_at,'+00:00','+08:00'),'%Y-%m') AS month_key,":''} COALESCE(p.name, '未识别用户') AS person_name,
            CASE WHEN tm.person_id IS NOT NULL THEN j.created_by_person_id ELSE NULL END AS person_id,
            COUNT(*) AS request_count,
            COUNT(*) AS generated_count,
@@ -31541,8 +31544,9 @@ async function billingAiUsageMysql(from, to, scope) {
         SELECT 1 FROM ai_image_usage_events e
         WHERE e.tenant_id = i.tenant_id AND e.item_no = i.item_no AND e.operation = 'submit'
       )
-    GROUP BY j.created_by_person_id, tm.person_id, p.name
-  `, [tenantKey, from, to]).catch(() => [])]);
+    GROUP BY ${groupByMonth?'month_key,':''} j.created_by_person_id, tm.person_id, p.name
+  `, [tenantKey, from, to]).catch(error => {if(groupByMonth)throw error;return [];})]);
+  if(groupByMonth){const months={};for(const row of [...eventRows,...legacyRows]){const month=months[row.month_key]||{request_count:0,generated_count:0};month.request_count+=Number(row.request_count||0);month.generated_count+=Number(row.generated_count||0);month.cost=Number((month.request_count*unitCost).toFixed(3));months[row.month_key]=month;}return {available:true,months};}
   const peopleMap = new Map();
   for (const row of [...eventRows, ...legacyRows]) {
     const key = String(row.person_id || 0);

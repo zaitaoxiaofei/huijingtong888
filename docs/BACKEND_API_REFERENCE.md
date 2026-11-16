@@ -2621,7 +2621,7 @@ Read an owned authorized Ozon shop's official monthly order realization report w
 
 #### `GET /api/monthly-billing-details`
 
-Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Pending payroll, AI usage estimates and loss reference totals are not extra deductions. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
+Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Pending payroll, AI usage estimates and loss reference totals are not extra deductions. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeOverviewAi=1 opts into two grouped enterprise-wide AI queries, with available=false on read failure; AI is unallocated to company/shop and is never an extra profit deduction. Grouped months include expense_totals by category for the same monthly cost breakdown. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Query parameters:
@@ -2634,6 +2634,7 @@ Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item
   - `shopId` (`string`, optional): Current-enterprise shop ID or all.
   - `companyId` (`string`, optional): Current-enterprise company ID or all; an unowned company returns 404.
   - `overviewOnly` (`string`, optional): 1 selects grouped monthly summaries.
+  - `includeOverviewAi` (`string`, optional): 1 includes grouped enterprise AI estimates for the annual overview; not allocated to a company/shop.
   - `includeAppendices` (`string`, optional): 0 omits procurement/current-inventory and AI appendix work; otherwise include the existing appendices. No financial summary fields are removed.
   - `includeOrders` (`string`, optional): 1 includes order rows for the selected calendar month; independent of appendix selection.
 - Responses:
