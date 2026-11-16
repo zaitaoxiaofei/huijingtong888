@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -75,13 +76,13 @@ test("backend restores the current draft snapshot when compact AI lab requests o
 
 test("draft image and template materialization share a per-save URL cache", async () => {
   const mapRef = [];
-  const materialize = new Function("objectValue", "aiVariantSaveTraceId", "logAiVariantSavePerf", "normalizeStringList", "materializeListingMediaUrlList", "materializeAiOptimizationTemplateMedia", "forceDraftTemplateImages", "rewriteMediaUrlsWithMap", `${extract(service, "materializeAiOptimizationDraftMedia")}; return materializeAiOptimizationDraftMedia;`)((v) => v || {}, () => "", () => {}, (v) => v || [], async (urls, meta, session, map) => { map.set("/temporary.jpg", "https://media.example/permanent.jpg"); mapRef.push(map); return ["https://media.example/permanent.jpg"]; }, async (payload, session, map) => { assert.equal(map, mapRef[0]); assert.equal(map.get("/temporary.jpg"), "https://media.example/permanent.jpg"); return payload; }, (payload) => payload, (v) => v);
+  const materialize = new Function("withMediaCacheLease", "objectValue", "aiVariantSaveTraceId", "logAiVariantSavePerf", "normalizeStringList", "materializeListingMediaUrlList", "materializeAiOptimizationTemplateMedia", "forceDraftTemplateImages", "rewriteMediaUrlsWithMap", `${extract(service, "materializeAiOptimizationDraftMedia")}; return materializeAiOptimizationDraftMedia;`)(withMediaCacheLease, (v) => v || {}, () => "", () => {}, (v) => v || [], async (urls, meta, session, map) => { map.set("/temporary.jpg", "https://media.example/permanent.jpg"); mapRef.push(map); return ["https://media.example/permanent.jpg"]; }, async (payload, session, map) => { assert.equal(map, mapRef[0]); assert.equal(map.get("/temporary.jpg"), "https://media.example/permanent.jpg"); return payload; }, (payload) => payload, (v) => v);
   await materialize({ ai_payload: { source: "ai_optimization" }, source_images: ["/temporary.jpg"], template_payload: { images: ["/temporary.jpg"] } });
 });
 
 test("batch watermark cache shares common details per shop while retaining distinct main images", async () => {
   let calls = 0;
-  const watermark = new Function("watermarkListingMedia", `${extract(service, "watermarkListingMediaForSaveBatch")}; return watermarkListingMediaForSaveBatch;`)(async (body) => {
+  const watermark = new Function("withMediaCacheLease", "watermarkListingMedia", `${extract(service, "watermarkListingMediaForSaveBatch")}; return watermarkListingMediaForSaveBatch;`)(withMediaCacheLease, async (body) => {
     calls++;
     await new Promise(setImmediate);
     return { images: [{ publishUrl: `https://media.example/${body.shop_id}/${body.images[0].url}` }] };
@@ -103,7 +104,7 @@ test("batch watermark cache shares common details per shop while retaining disti
 
 test("failed watermark tasks are removed from the batch cache so retries can succeed", async () => {
   let calls = 0;
-  const watermark = new Function("watermarkListingMedia", `${extract(service, "watermarkListingMediaForSaveBatch")}; return watermarkListingMediaForSaveBatch;`)(async () => {
+  const watermark = new Function("withMediaCacheLease", "watermarkListingMedia", `${extract(service, "watermarkListingMediaForSaveBatch")}; return watermarkListingMediaForSaveBatch;`)(withMediaCacheLease, async () => {
     if (++calls === 1) throw new Error("Upload failed");
     return { images: [{ publishUrl: "https://media.example/final.jpg" }] };
   });

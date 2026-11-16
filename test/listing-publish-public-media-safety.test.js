@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
@@ -223,7 +224,7 @@ function listingFunction(name) {
 }
 
 function listingFixture(network, overrides = {}) {
-  const context = vm.createContext({ URL, Buffer, Date, Number, String, Object, Array, Map, Set, AbortSignal, path,
+  const context = vm.createContext({ withMediaCacheLease, URL, Buffer, Date, Number, String, Object, Array, Map, Set, AbortSignal, path,
     requestPublicMedia: network.context.requestPublicMedia,
     listingMediaReachabilityCache: new Map(),
     LISTING_MEDIA_REACHABILITY_CACHE_MAX_ENTRIES: 100,

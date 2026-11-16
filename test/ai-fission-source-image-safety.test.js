@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -8,7 +9,7 @@ const source = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf
 const workflow = source('src/server/services/ai/aiWorkflowService.js');
 const lab = source('src/services/ai-variant-lab.js');
 function imageReader(request = requestPublicImage) {
-  const context = vm.createContext({ requestPublicImage: request, Response, AbortSignal, URL,
+  const context = vm.createContext({withMediaCacheLease,  requestPublicImage: request, Response, AbortSignal, URL,
     AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS: 20000 });
   vm.runInContext(workflow.slice(workflow.indexOf('async function fetchSourceImageResponse('),
     workflow.indexOf('function normalizeFetchableSourceUrl(')), context);
@@ -40,7 +41,7 @@ test('public draft image retry preserves browser headers and limits decoded down
 });
 
 test('fission recognition rejects private URLs and preserves uploaded data images', async () => {
-  const context = vm.createContext({ resolvePublicImageTarget,
+  const context = vm.createContext({withMediaCacheLease,  resolvePublicImageTarget,
     resolveLocalPublicImageFile: () => '', statusError: (message, status) => Object.assign(new Error(message), { status }) });
   vm.runInContext(lab.slice(lab.indexOf('async function resolveImageUrl('),
     lab.indexOf('async function resolveOptimizerImageInputs(')), context);

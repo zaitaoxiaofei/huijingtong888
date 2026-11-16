@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
@@ -9,7 +10,7 @@ const fn=parse(source,{ecmaVersion:"latest",sourceType:"module"}).body.map(node=
 function fixture(ok){
   const probes=[];
   const url="https://public.example/image.png";
-  const context=vm.createContext({
+  const context=vm.createContext({withMediaCacheLease,
     tryRepairPayloadListingMediaReachability:async payload=>payload,
     normalizeArray:value=>Array.isArray(value)?value:[],uniqueStringValues:values=>[...new Set(values)],
     prewarmPublishMediaUrls:async()=>({total:1,image_results:[{url,ok}],failed_urls:ok?[]:[url]}),

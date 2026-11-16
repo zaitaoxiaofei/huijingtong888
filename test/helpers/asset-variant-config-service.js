@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from '../../src/services/media-cache-coordination.js';
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -15,7 +16,7 @@ function section(source, start, end) {
 
 export function loadAssetVariantConfigService({ query, execute = async () => ({ insertId: 99 }), transaction, readFile = async () => Buffer.from("tail") } = {}) {
   const context = vm.createContext({
-    Buffer, Date, Number, String, Object, Array, Map, Set, path,
+    Buffer, Date, Number, String, Object, Array, Map, Set, path, withMediaCacheLease, readCacheAwareFile:readFile,
     ROOT_DIR: "/fixture", TAIL_TEMPLATE_ROOT: "/fixture/tails",
     fs: { readFile },
     assetVariantExecutionScope, assetVariantTenantPredicate, assetVariantTenantScope,
@@ -50,7 +51,7 @@ export function loadAssetVariantConfigService({ query, execute = async () => ({ 
 
 export function loadShopTailResolver(query) {
   const context = vm.createContext({
-    Number, String,
+    Number, String, withMediaCacheLease,
     row: async (sql, params) => (await query(sql, params))[0] || null,
     listingTenantId: session => session?.tenant?.slug === "default" ? "admin" : String(session.tenant.id),
     materializeShopTailImageForPublish: async value => value || ""

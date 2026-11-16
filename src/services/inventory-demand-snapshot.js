@@ -1,3 +1,4 @@
+import {readScopedJson,writeScopedJson} from './scoped-json-object.js';
 // A read model only: never used to reserve stock, post receipts or write costs.
 export const INVENTORY_DEMAND_SNAPSHOT_VERSION = 'demand-v9-manual-order-handling';
 export const INVENTORY_DEMAND_SNAPSHOT_SCHEMA = `CREATE TABLE IF NOT EXISTS inventory_demand_snapshots (
@@ -32,7 +33,7 @@ export function inventoryDemandSummary(value){
     fbp:value.fbp?{...value.fbp,rows:[]}:value.fbp};
 }
 
-export function createInventoryDemandSnapshot({query,calculate,products,revision,changes,now=Date.now}){
+export function createInventoryDemandSnapshot({query,calculate,products,revision,changes,now=Date.now,readJson=(text,tenantId)=>readScopedJson(text,{kind:'inventory-demand',tenantId}),writeJson=(text,tenantId)=>writeScopedJson(text,{kind:'inventory-demand',tenantId})}){
   const entries=new Map();
   async function load(tenantId){
     if(!Number.isSafeInteger(Number(tenantId))||Number(tenantId)<=0)throw new Error('当前企业无效，无法读取库存需求');
@@ -44,7 +45,8 @@ export function createInventoryDemandSnapshot({query,calculate,products,revision
     entry.loading=(async()=>{
       const rows=await query('SELECT version,payload_json,calculated_at FROM inventory_demand_snapshots WHERE tenant_id=?',[key]);
       if(rows[0]?.version===INVENTORY_DEMAND_SNAPSHOT_VERSION){
-        let payload;try{payload=JSON.parse(rows[0].payload_json);}catch{payload={};}
+        const stored=await readJson(rows[0].payload_json,key);
+        let payload;try{payload=JSON.parse(stored);}catch{payload={};}
         if(Array.isArray(payload.rows)&&payload.rows.every(r=>Number.isSafeInteger(Number(r.product_id)))){
           entry.rows=payload.rows.map(inventoryDemandSummary);entry.at=new Date(rows[0].calculated_at).toISOString();entry.fullAt=payload.full_calculated_at||entry.at;
         }
@@ -74,7 +76,7 @@ export function createInventoryDemandSnapshot({query,calculate,products,revision
         const rows=ids.map(id=>existing.get(id)),at=new Date(now()).toISOString(),fullAt=full?at:entry.fullAt||entry.at;
         await query(`INSERT INTO inventory_demand_snapshots(tenant_id,version,payload_json,calculated_at) VALUES(?,?,?,?)
           ON DUPLICATE KEY UPDATE version=VALUES(version),payload_json=VALUES(payload_json),calculated_at=VALUES(calculated_at)`,
-          [Number(tenantId),INVENTORY_DEMAND_SNAPSHOT_VERSION,JSON.stringify({rows,full_calculated_at:fullAt}),at.slice(0,23).replace('T',' ')]);
+          [Number(tenantId),INVENTORY_DEMAND_SNAPSHOT_VERSION,await writeJson(JSON.stringify({rows,full_calculated_at:fullAt}),Number(tenantId)),at.slice(0,23).replace('T',' ')]);
         entry.rows=rows;entry.at=at;entry.fullAt=fullAt;entry.epoch=epoch;
       }).catch(()=>{entry.error='后台核算失败，已保留上次成功结果，可点击重新核算重试';}).finally(()=>{entry.pending=null;entry.runningEpoch=null;entry.runningFull=null;if(entry.refreshAgain){entry.refreshAgain=false;refresh(entry,tenantId);}});
     }catch(error){entry.error=error.message;}

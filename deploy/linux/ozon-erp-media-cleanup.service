@@ -5,17 +5,20 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=ozon-erp
-Group=ozon-erp
+User=root
 WorkingDirectory=/opt/ozon-erp/current
 EnvironmentFile=/etc/ozon-erp/ozon-erp.env
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node scripts/cleanup-verified-local-media.mjs --write --days 7 --limit 200
+ExecStart=/usr/bin/flock --close -n /var/lock/ozon-erp-release.lock /usr/bin/setpriv --reuid=ozon-erp --regid=ozon-erp --init-groups /usr/bin/node scripts/cleanup-media-cache.mjs --write
+TimeoutStartSec=3min
+MemoryMax=384M
+CPUQuota=50%
+Nice=10
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/ozon-erp/shared
+ReadWritePaths=/opt/ozon-erp/shared /var/lock
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ozon-erp-media-cleanup

@@ -1,3 +1,5 @@
+import {withMediaCacheLease} from "../../../services/media-cache-coordination.js";
+import {readCacheAwareFile,statCacheAwareFile,readCacheAwareDirectory} from "../../../services/media-cache-io.js";
 import crypto from "node:crypto";
 import {archiveMediaCacheFile,restoreMediaCacheFile,restoreMediaCacheDirectory} from "../../../services/media-cache-files.js";
 import fs from "node:fs/promises";
@@ -28,6 +30,7 @@ export const imageCropperPaths = {
 };
 
 export async function saveUploadedImage({ filename, contentType, buffer }, session = null) {
+  return withMediaCacheLease(async () => {
   session = await authorizeBusinessTaskSession(session);
   const safeName = sanitizeFilename(filename || "upload.png");
   const extension = path.extname(safeName).toLowerCase();
@@ -65,9 +68,12 @@ export async function saveUploadedImage({ filename, contentType, buffer }, sessi
     size: buffer.length,
     contentType
   };
+
+  },{writes:true});
 }
 
 export async function saveShopWatermark({ shopId, filename, contentType, buffer }, session = null) {
+  return withMediaCacheLease(async () => {
   session = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(session, "operations");
   const shop = await getShopForWatermark(shopId, session);
@@ -109,6 +115,8 @@ export async function saveShopWatermark({ shopId, filename, contentType, buffer 
     watermark_name: safeName,
     has_watermark: true
   };
+
+  },{writes:true});
 }
 
 export async function detectAndCropImage({
@@ -126,6 +134,7 @@ export async function detectAndCropImage({
   roundCornerTolerance = true,
   manualBoxes = []
 }, session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const sourcePath = resolveTempPath(imagePath);
@@ -171,9 +180,12 @@ export async function detectAndCropImage({
     crops,
     zipUrl: scopedZipRoute("download-zip", taskId, batch)
   };
+
+  },{writes:true});
 }
 
 export async function enhanceTaskCrops({ taskId, filenames = [] }, session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const input = await chooseInputDir(taskDir, filenames);
@@ -205,9 +217,12 @@ export async function enhanceTaskCrops({ taskId, filenames = [] }, session = nul
     })),
     zipUrl: scopedZipRoute("download-enhanced-zip", taskId, batch)
   };
+
+  },{writes:true});
 }
 
 export async function convertTaskCropsToRatio({ taskId, filenames = [] }, session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const input = await chooseInputDir(taskDir, filenames);
@@ -239,9 +254,12 @@ export async function convertTaskCropsToRatio({ taskId, filenames = [] }, sessio
     })),
     zipUrl: scopedZipRoute("download-ratio-3x4-zip", taskId, batch)
   };
+
+  },{writes:true});
 }
 
 export async function watermarkTaskCrops({ taskId, shopId, filenames = [], options = {} }, session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   const shop = await getShopForWatermark(shopId, session);
   const watermark = await getWatermarkFileForShop(shop);
@@ -279,14 +297,20 @@ export async function watermarkTaskCrops({ taskId, shopId, filenames = [], optio
     })),
     zipUrl: scopedZipRoute("download-watermarked-zip", taskId, batch)
   };
+
+  },{writes:true});
 }
 
 export async function getShopWatermarkFile(shopId, session = null) {
+  return withMediaCacheLease(async () => {
   const shop = await getShopForWatermark(shopId, session);
   return getWatermarkFileForShop(shop);
+
+  });
 }
 
 export async function getTaskFile(taskId, filename, session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const filePath = path.resolve(taskDir, filename);
@@ -297,7 +321,7 @@ export async function getTaskFile(taskId, filename, session = null) {
   }
 
   await restoreMediaCacheFile(filePath);
-  const stat = await fs.stat(filePath).catch(() => null);
+  const stat = await statCacheAwareFile(filePath).catch(() => null);
   if (!stat?.isFile()) {
     const error = new Error("文件不存在");
     error.status = 404;
@@ -310,9 +334,12 @@ export async function getTaskFile(taskId, filename, session = null) {
     size: stat.size,
     contentType: contentTypeFor(filePath)
   };
+
+  });
 }
 
 export async function createTaskZip(taskId, batch = "", session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   const taskDir = resolveTaskDir(taskId);
@@ -326,20 +353,26 @@ export async function createTaskZip(taskId, batch = "", session = null) {
   }
 
   const files = await Promise.all(imageEntries.map(async (entry) => {
+  return withMediaCacheLease(async () => {
     const filePath = path.join(cropsDir, entry);
     return {
       name: path.basename(entry),
-      data: await fs.readFile(filePath)
+      data: await readCacheAwareFile(filePath)
     };
-  }));
+
+  });
+}));
 
   return {
     filename: `image-cropper-${taskId}.zip`,
     buffer: buildZip(files)
   };
+
+  });
 }
 
 export async function createEnhancedTaskZip(taskId, batch = "", session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   if (batch) {
@@ -353,7 +386,7 @@ export async function createEnhancedTaskZip(taskId, batch = "", session = null) 
   }
   const taskDir = resolveTaskDir(taskId);
   const enhancedDir = path.join(taskDir, "enhanced");
-  const entries = await fs.readdir(enhancedDir).catch(() => []);
+  const entries = await readCacheAwareDirectory(enhancedDir).catch(() => []);
   const imageEntries = entries
     .filter((entry) => ALLOWED_EXTENSIONS.has(path.extname(entry).toLowerCase()))
     .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
@@ -365,20 +398,26 @@ export async function createEnhancedTaskZip(taskId, batch = "", session = null) 
   }
 
   const files = await Promise.all(imageEntries.map(async (entry) => {
+  return withMediaCacheLease(async () => {
     const filePath = path.join(enhancedDir, entry);
     return {
       name: entry,
-      data: await fs.readFile(filePath)
+      data: await readCacheAwareFile(filePath)
     };
-  }));
+
+  });
+}));
 
   return {
     filename: `image-cropper-enhanced-${taskId}.zip`,
     buffer: buildZip(files)
   };
+
+  });
 }
 
 export async function createRatioTaskZip(taskId, batch = "", session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   return createScopedTaskZip({
@@ -388,9 +427,12 @@ export async function createRatioTaskZip(taskId, batch = "", session = null) {
     errorMessage: "没有可下载的 3:4 图片",
     filenamePrefix: "image-cropper-3x4"
   });
+
+  });
 }
 
 export async function createWatermarkedTaskZip(taskId, batch = "", session = null) {
+  return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
   await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   return createScopedTaskZip({
@@ -399,6 +441,8 @@ export async function createWatermarkedTaskZip(taskId, batch = "", session = nul
     batch,
     errorMessage: "没有可下载的水印图片",
     filenamePrefix: "image-cropper-watermarked"
+  });
+
   });
 }
 
@@ -559,6 +603,7 @@ export function runPythonWatermarker(inputDir, outputDir, watermarkPath, taskId,
 }
 
 async function chooseInputDir(taskDir, filenames) {
+  return withMediaCacheLease(async () => {
   await restoreMediaCacheDirectory(taskDir);
   const names = normalizeCropFilenames(filenames);
   const candidates = ["watermarked", "enhanced", "ratio-3x4", "crops"];
@@ -569,7 +614,7 @@ async function chooseInputDir(taskDir, filenames) {
       const groups = new Map();
       for (const name of names) {
         const filePath = path.join(root, name);
-        const stat = await fs.stat(filePath).catch(() => null);
+        const stat = await statCacheAwareFile(filePath).catch(() => null);
         if (!stat?.isFile()) continue;
         const groupDir = path.dirname(name).replace(/\\/g, "/");
         const basename = path.basename(name);
@@ -591,6 +636,8 @@ async function chooseInputDir(taskDir, filenames) {
   }
 
   return { dir: path.join(taskDir, "crops"), filenames: [] };
+
+  });
 }
 
 function runPythonImageProcess(scriptPath, args, fallbackMessage) {
@@ -627,6 +674,7 @@ function runPythonImageProcess(scriptPath, args, fallbackMessage) {
 }
 
 async function getShopForWatermark(shopId, session) {
+  return withMediaCacheLease(async () => {
   session = await authorizeBusinessTaskSession(session || currentAiTenantSession());
   const id = Number(shopId);
   if (!Number.isInteger(id) || id <= 0) return null;
@@ -638,23 +686,32 @@ async function getShopForWatermark(shopId, session) {
     WHERE id = ? AND status != 'deleted' AND (tenant_id = ?${businessTaskTenantKey(session) === "admin" ? " OR tenant_id IS NULL" : ""})
     LIMIT 1
   `, [id, Number(session.tenant.id)]))[0] || null;
+
+  });
 }
 
 async function updateShopWatermark(shopId, storedName, originalName, session) {
+  return withMediaCacheLease(async () => {
   const relativePath = toWatermarkReference(storedName);
   await ensureMysqlShopWatermarkColumns();
   await mysqlExecute(`UPDATE shops SET watermark_path = ?, watermark_name = ? WHERE id = ? AND (tenant_id = ?${businessTaskTenantKey(session) === "admin" ? " OR tenant_id IS NULL" : ""})`, [relativePath, originalName, Number(shopId), Number(session.tenant.id)]);
   invalidateMasterDataCache("shops");
+
+  });
 }
 
 export async function assertImageCropperTaskOwner(taskId, session = currentAiTenantSession()) {
+  return withMediaCacheLease(async () => {
   resolveTaskDir(taskId);
   return assertAiImageTaskOwner(`image-cropper:${taskId}`, session || currentAiTenantSession());
+
+  });
 }
 
 let mysqlShopWatermarkColumnsReady = false;
 
 async function ensureMysqlShopWatermarkColumns() {
+  return withMediaCacheLease(async () => {
   if (mysqlShopWatermarkColumnsReady) return;
   for (const sql of [
     "ALTER TABLE shops ADD COLUMN watermark_path TEXT NULL",
@@ -672,6 +729,8 @@ async function ensureMysqlShopWatermarkColumns() {
     }
   }
   mysqlShopWatermarkColumnsReady = true;
+
+  });
 }
 
 function toWatermarkReference(filename) {
@@ -700,6 +759,7 @@ function isPathInside(targetPath, rootPath) {
 }
 
 async function getWatermarkFileForShop(shop) {
+  return withMediaCacheLease(async () => {
   if (!shop) {
     const error = new Error("店铺不存在");
     error.status = 404;
@@ -715,7 +775,7 @@ async function getWatermarkFileForShop(shop) {
   let stat = null;
   for (const candidate of candidates) {
     if(candidate.startsWith(`${path.resolve(ROOT_DIR,"uploads","shop-watermarks")}${path.sep}`))await restoreMediaCacheFile(candidate);
-    const candidateStat = await fs.stat(candidate).catch(() => null);
+    const candidateStat = await statCacheAwareFile(candidate).catch(() => null);
     if (candidateStat?.isFile()) {
       filePath = candidate;
       stat = candidateStat;
@@ -733,6 +793,8 @@ async function getWatermarkFileForShop(shop) {
     size: stat.size,
     contentType: contentTypeFor(filePath)
   };
+
+  });
 }
 
 function normalizeWatermarkOptions(options = {}) {
@@ -765,6 +827,7 @@ function clampNumber(value, minimum, maximum) {
 }
 
 async function createScopedTaskZip({ taskId, scope, batch = "", errorMessage, filenamePrefix }) {
+  return withMediaCacheLease(async () => {
   const taskDir = resolveTaskDir(taskId);
   const scopedDir = resolveScopedOutputDir(taskDir, scope, batch);
   const imageEntries = await listImageFiles(scopedDir);
@@ -776,17 +839,22 @@ async function createScopedTaskZip({ taskId, scope, batch = "", errorMessage, fi
   }
 
   const files = await Promise.all(imageEntries.map(async (entry) => {
+  return withMediaCacheLease(async () => {
     const filePath = path.join(scopedDir, entry);
     return {
       name: path.basename(entry),
-      data: await fs.readFile(filePath)
+      data: await readCacheAwareFile(filePath)
     };
-  }));
+
+  });
+}));
 
   return {
     filename: `${filenamePrefix}-${taskId}.zip`,
     buffer: buildZip(files)
   };
+
+  });
 }
 
 function normalizeCropFilenames(filenames) {
@@ -844,7 +912,8 @@ function resolveScopedOutputDir(taskDir, scope, batch = "") {
 }
 
 async function listImageFiles(dir) {
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  return withMediaCacheLease(async () => {
+  const entries = await readCacheAwareDirectory(dir, { withFileTypes: true }).catch(() => []);
   const files = [];
   for (const entry of entries) {
     if (entry.isFile() && ALLOWED_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
@@ -855,22 +924,30 @@ async function listImageFiles(dir) {
     }
   }
   return files.sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
+
+  });
 }
 
 async function latestImageDirectory(root) {
-  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  return withMediaCacheLease(async () => {
+  const entries = await readCacheAwareDirectory(root, { withFileTypes: true }).catch(() => []);
   const directFiles = entries.filter((entry) => entry.isFile() && ALLOWED_EXTENSIONS.has(path.extname(entry.name).toLowerCase()));
   if (directFiles.length) return root;
 
   const dirs = await Promise.all(entries
     .filter((entry) => entry.isDirectory())
     .map(async (entry) => {
+  return withMediaCacheLease(async () => {
       const dir = path.join(root, entry.name);
       const files = await listImageFiles(dir);
-      const stat = files.length ? await fs.stat(dir).catch(() => null) : null;
+      const stat = files.length ? await statCacheAwareFile(dir).catch(() => null) : null;
       return files.length ? { dir, time: stat?.mtimeMs || 0 } : null;
-    }));
+
+  });
+}));
   return dirs.filter(Boolean).sort((a, b) => b.time - a.time)[0]?.dir || "";
+
+  });
 }
 
 function resolveTaskDir(taskId) {

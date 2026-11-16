@@ -1,3 +1,4 @@
+import {withMediaCacheLease} from "../src/services/media-cache-coordination.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { webcrypto } from "node:crypto";
@@ -10,7 +11,7 @@ const source = readFileSync(new URL("../src/services/listing-automation.js", imp
 const declarations = parse(source, { ecmaVersion: "latest", sourceType: "module" }).body.map(node => node.declaration || node);
 const functions = declarations.filter(node => node.type === "FunctionDeclaration").map(node => source.slice(node.start, node.end)).join("\n");
 function service(extra = {}) {
-  const context = vm.createContext({ URL, Buffer, AbortSignal, console, LOCAL_DICTIONARY_DISPLAY_ZH: new Map(),
+  const context = vm.createContext({withMediaCacheLease,  URL, Buffer, AbortSignal, console, LOCAL_DICTIONARY_DISPLAY_ZH: new Map(),
     config: { listingMediaPublicBaseUrl: "https://erp.example" },
     LISTING_PUBLISH_MEDIA_PREWARM_LIMIT: 1, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY: 2,
     listingMediaReachabilityCache: new Map(), LISTING_MEDIA_REACHABILITY_CACHE_TTL_MS: 60000, LISTING_MEDIA_REACHABILITY_CACHE_MAX_ENTRIES: 100,
@@ -62,7 +63,7 @@ test("shared images across variants reuse an exact source mapping, including pub
 function browser() {
   const source = readFileSync(new URL("../frontend/admin/utils/browser-watermark-batch.js", import.meta.url), "utf8");
   const cache = new Map(), uploads = [];
-  const context = vm.createContext({ TextEncoder, Uint8Array, crypto: webcrypto,
+  const context = vm.createContext({withMediaCacheLease,  TextEncoder, Uint8Array, crypto: webcrypto,
     setTimeout: fn => { queueMicrotask(fn); return 0; },
     localStorage: { getItem: key => cache.get(key), setItem: (key, value) => cache.set(key, value), removeItem: key => cache.delete(key) },
     uploadListingMedia: async (file, metadata) => {

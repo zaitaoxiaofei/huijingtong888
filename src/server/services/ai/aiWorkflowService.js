@@ -1,3 +1,5 @@
+import {withMediaCacheLease} from "../../../services/media-cache-coordination.js";
+import {readCacheAwareFile,statCacheAwareFile,readCacheAwareDirectory} from "../../../services/media-cache-io.js";
 import { resolveWorkflowImageRuntime } from "../../../services/ai-image-runtime-selection.js";
 import crypto from "node:crypto";
 import { archiveMediaCacheFile, restoreMediaCacheFile, mediaCacheSource } from "../../../services/media-cache-files.js";
@@ -41,11 +43,15 @@ const AI_SOURCE_IMAGE_CACHE_ROOT = path.resolve(ROOT_DIR, process.env.AI_SOURCE_
 const sourceImageCache = new Map();
 
 export async function cleanupAiSourceImageCache(){
+  return withMediaCacheLease(async () => {
   const protectedHashes=new Set([...sourceImageCache.keys()].map(key=>crypto.createHash("sha256").update(key).digest("hex")));
   return cleanupTemporaryImageCache({root:AI_SOURCE_IMAGE_CACHE_ROOT,retentionHours:48,limit:200,protectedHashes});
+
+  });
 }
 
 export async function getAiStatus() {
+  return withMediaCacheLease(async () => {
   return aiProviderConfig().then((providerConfig) => ({
     configured: Boolean(providerConfig.enabled && providerConfig.hasApiKey && providerConfig.imageModel),
     provider: providerConfig.provider,
@@ -53,9 +59,12 @@ export async function getAiStatus() {
     textModel: providerConfig.textModel,
     imageModel: providerConfig.imageModel
   }));
+
+  });
 }
 
 export async function optimizePrompt(payload = {}) {
+  return withMediaCacheLease(async () => {
   try {
     return await optimizeImagePrompt(payload);
   } catch (error) {
@@ -66,9 +75,12 @@ export async function optimizePrompt(payload = {}) {
     publicError.status = error.status || 502;
     throw publicError;
   }
+
+  });
 }
 
 export async function generateImages(payload = {}, { creditRuntime } = {}) {
+  return withMediaCacheLease(async () => {
   const finalPrompt = String(payload.finalPrompt || payload.prompt || buildImagePromptFallback(payload)).trim();
   if (!finalPrompt) throw Object.assign(new Error("finalPrompt 不能为空"), { status: 400 });
   const credited = await tryGenerateCreditedImage({ ...payload, finalPrompt }, {
@@ -79,9 +91,12 @@ export async function generateImages(payload = {}, { creditRuntime } = {}) {
   const imageRuntimeConfig=await resolveWorkflowImageRuntime(payload,aiImageRuntimePoolConfig);
   const result = await generateImagesInternal({...payload,imageRuntimeConfig});
   return { ...result, billing: { mode: "internal", ...aiImageCharge(result.generatedImages.length), chargedPoints: 0 } };
+
+  });
 }
 
 async function mergeCreditedImageResults(results, failures) {
+  return withMediaCacheLease(async () => {
   // Materialize a stable combined download without submitting any new images.
   const hex = crypto.createHash("sha256").update(results.map(result => result.taskId).join(":")).digest("hex");
   const taskId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
@@ -105,9 +120,12 @@ async function mergeCreditedImageResults(results, failures) {
     chargedPoints: results.reduce((sum, result) => sum + result.billing.chargedPoints, 0),
     creditTaskIds: results.flatMap(result => result.billing.creditTaskIds) };
   return output;
+
+  },{writes:true});
 }
 
 async function validateCreditedImageInput(payload) {
+  return withMediaCacheLease(async () => {
   const sources = [...(Array.isArray(payload.sourceImageUrls) ? payload.sourceImageUrls : []),
     payload.sourceImageUrl, payload.referenceImageUrl, payload.sourceImage, payload.fallbackSourceImageUrl, payload.fallbackReferenceImageUrl];
   for (const item of sources) {
@@ -129,9 +147,12 @@ async function validateCreditedImageInput(payload) {
     // This is a local ownership/file check only, never a supplier request.
     await readLocalAiTaskSourceImage(source);
   }
+
+  });
 }
 
 async function generateImagesInternal(payload = {}, taskId = null) {
+  return withMediaCacheLease(async () => {
   const recovering = Boolean(taskId);
   taskId ||= crypto.randomUUID();
   if (recovering) {
@@ -208,9 +229,12 @@ async function generateImagesInternal(payload = {}, taskId = null) {
     publicError.code = error.code || "";
     throw publicError;
   }
+
+  });
 }
 
 async function resolveSourceImageWithFallback(payload = {}) {
+  return withMediaCacheLease(async () => {
   try {
     return await resolveSourceImage(payload);
   } catch (error) {
@@ -219,9 +243,12 @@ async function resolveSourceImageWithFallback(payload = {}) {
     console.warn("Primary AI reference image is unavailable; using fallback reference image", error.message);
     return resolveSourceImage({ sourceImageUrl: fallbackSource });
   }
+
+  });
 }
 
 async function resolveSourceImagesWithFallback(payload = {}) {
+  return withMediaCacheLease(async () => {
   const urls = Array.from(new Set([
     ...(Array.isArray(payload.sourceImageUrls) ? payload.sourceImageUrls : []),
     payload.sourceImageUrl
@@ -239,9 +266,12 @@ async function resolveSourceImagesWithFallback(payload = {}) {
   if (!resolved.length) return resolveSourceImageWithFallback(payload);
   if (resolved.length === 1) return resolved[0];
   return buildServerReferenceBoard(resolved, Number(payload.productImageCount || 0));
+
+  });
 }
 
 async function buildServerReferenceBoard(images = [], productImageCount = 0) {
+  return withMediaCacheLease(async () => {
   const canvasWidth = 1536;
   const canvasHeight = 1024;
   const safeProductCount = Math.max(1, Math.min(images.length, productImageCount || 1));
@@ -269,6 +299,8 @@ async function buildServerReferenceBoard(images = [], productImageCount = 0) {
     .png()
     .toBuffer();
   return { buffer, contentType: "image/png", filename: "multi-reference-board.png", source: `server-board:${images.length}` };
+
+  });
 }
 
 function buildImagePromptFallback(payload = {}) {
@@ -306,6 +338,7 @@ function buildImagePromptFallback(payload = {}) {
 }
 
 async function generateImageEdits({ taskId, finalPrompt, ratio, imageCount, sourceImage, runtimeConfig = null, providerJob = null, onProviderJob = null }) {
+  return withMediaCacheLease(async () => {
   const safeTaskId = validateTaskId(taskId);
   const count = clampImageCount(imageCount);
   const taskDir = resolveGeneratedTaskDir(safeTaskId);
@@ -340,9 +373,12 @@ async function generateImageEdits({ taskId, finalPrompt, ratio, imageCount, sour
   }
 
   return generatedImages;
+
+  },{writes:true});
 }
 
 async function resolveSourceImage(payload = {}) {
+  return withMediaCacheLease(async () => {
   const source = String(payload.sourceImageUrl || payload.referenceImageUrl || payload.sourceImage || "").trim();
   if (!source) return null;
   if (source.startsWith("data:")) return parseDataImageUrl(source);
@@ -351,9 +387,12 @@ async function resolveSourceImage(payload = {}) {
   const error = new Error("参考图仅支持 data URL、http(s) URL 或本站相对 URL");
   error.status = 400;
   throw error;
+
+  });
 }
 
 async function cachedSourceImage(source) {
+  return withMediaCacheLease(async () => {
   const tenantCacheKey = `${aiTenantId()}:${source}`;
   const now = Date.now();
   for (const [key, entry] of sourceImageCache) {
@@ -373,6 +412,8 @@ async function cachedSourceImage(source) {
     sourceImageCache.delete(oldestKey);
   }
   return promise;
+
+  });
 }
 
 function firstProviderJob(providerJob = null) {
@@ -412,6 +453,7 @@ function parseDataImageUrl(value) {
 }
 
 async function fetchSourceImage(source) {
+  return withMediaCacheLease(async () => {
   const localTaskImage = await readLocalAiTaskSourceImage(source);
   if (localTaskImage) return localTaskImage;
   const url = normalizeFetchableSourceUrl(source);
@@ -441,9 +483,12 @@ async function fetchSourceImage(source) {
     source,
     cachedRemote: true
   };
+
+  },{writes:true});
 }
 
 async function readLocalAiTaskSourceImage(source = "") {
+  return withMediaCacheLease(async () => {
   const value = String(source || "").trim();
   if (!value) return null;
   let pathname = value;
@@ -472,6 +517,8 @@ async function readLocalAiTaskSourceImage(source = "") {
     filename: path.basename(file.filePath),
     source: value
   };
+
+  });
 }
 
 function resolveLocalPublicSourceImage(value = "", pathname = "") {
@@ -493,6 +540,7 @@ function resolveLocalPublicSourceImage(value = "", pathname = "") {
 }
 
 async function fetchSourceImageResponse(url) {
+  return withMediaCacheLease(async () => {
   for (const retry of [false, true]) {
     const image = await requestPublicImage(url, {
       headers: sourceImageFetchHeaders(url, { retry }),
@@ -502,6 +550,8 @@ async function fetchSourceImageResponse(url) {
     if (image) return new Response(image.buffer, { headers: { "Content-Type": image.contentType } });
   }
   throw Object.assign(new Error("参考图读取失败，请使用不超过 20 MB 的公开图片或本企业素材"), { status: 400 });
+
+  });
 }
 
 function sourceImageFetchHeaders(url, { retry = false } = {}) {
@@ -561,6 +611,7 @@ function extensionForContentType(contentType) {
 }
 
 export async function generateWorkflow(payload = {}) {
+  return withMediaCacheLease(async () => {
   const promptResult = await optimizePrompt(payload).catch((error) => {
     if (String(error?.code || "").startsWith("AI_CREDIT_")) throw error;
     if (error.status === 503) throw error;
@@ -589,9 +640,12 @@ export async function generateWorkflow(payload = {}) {
     cropMessage: imageResult.cropMessage,
     zipUrl: imageResult.zipUrl
   };
+
+  });
 }
 
 export async function generateCommerceCopy(payload = {}) {
+  return withMediaCacheLease(async () => {
   const context = normalizeCommerceCopyInput(payload);
   if (!context.productName && !context.categoryName && !context.targetModel) {
     const error = new Error("请先填写商品名称、类目或目标车型");
@@ -656,9 +710,12 @@ export async function generateCommerceCopy(payload = {}) {
     model: result.model,
     ...completed
   };
+
+  });
 }
 
 async function completeCommerceCopyTranslations(copy = {}) {
+  return withMediaCacheLease(async () => {
   const tags = Array.isArray(copy.tags) ? copy.tags : [];
   const tagsZh = Array.isArray(copy.tagsZh) ? copy.tagsZh : [];
   const hasTitleZh = /[\u3400-\u9fff]/u.test(copy.titleZh || "");
@@ -699,9 +756,12 @@ async function completeCommerceCopyTranslations(copy = {}) {
     console.error("Commerce copy translation completion failed", error);
     return copy;
   }
+
+  });
 }
 
 export async function testCopyGeneration(payload = {}) {
+  return withMediaCacheLease(async () => {
   const draftId = Number(payload.draftId || payload.draft_id || 0);
   if (!draftId && !payload.draft) {
     const error = new Error("请提供草稿 ID 或草稿对象");
@@ -774,18 +834,24 @@ export async function testCopyGeneration(payload = {}) {
     quality
   };
   return response;
+
+  });
 }
 
 async function loadListingDraftForCopyTest(draftId = 0) {
+  return withMediaCacheLease(async () => {
   const id = Number(draftId || 0);
   if (!id) return null;
   await assertCurrentAiTenantPermission();
   const tenantId = aiTenantId();
   const rows = await mysqlQuery("SELECT * FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted' LIMIT 1", [id,tenantId]);
   return assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: rows[0] || null });
+
+  });
 }
 
 export async function cropGeneratedImages({ taskId, generatedImages = [], cropMode = "auto" }) {
+  return withMediaCacheLease(async () => {
   const safeTaskId = validateTaskId(taskId);
   await assertAiImageTaskOwner(safeTaskId);
   const croppedTaskDir = resolveCroppedTaskDir(safeTaskId);
@@ -805,6 +871,7 @@ export async function cropGeneratedImages({ taskId, generatedImages = [], cropMo
         const filename = `crop_${String(cropIndex).padStart(3, "0")}.png`;
         const targetPath = path.join(croppedTaskDir, filename);
         await fs.copyFile(path.join(tempOutputDir, crop.filename), targetPath);
+        await archiveMediaCacheFile(targetPath);
         croppedImages.push({
           ...createImageRecord(safeTaskId, "cropped", filename, targetPath),
           sourceImage: sourceFilename,
@@ -826,9 +893,12 @@ export async function cropGeneratedImages({ taskId, generatedImages = [], cropMo
       cropMessage: "自动裁切失败，可手动进入拆分器处理"
     };
   }
+
+  },{writes:true});
 }
 
 export async function getAiTaskFile(taskId, scope, filename, session = currentAiTenantSession()) {
+  return withMediaCacheLease(async () => {
   const safeTaskId = validateTaskId(taskId);
   await assertAiImageTaskOwner(safeTaskId, session);
   const root = scope === "cropped" ? resolveCroppedTaskDir(safeTaskId) : resolveGeneratedTaskDir(safeTaskId);
@@ -839,16 +909,19 @@ export async function getAiTaskFile(taskId, scope, filename, session = currentAi
     throw error;
   }
   await restoreMediaCacheFile(filePath);
-  const stat = await fs.stat(filePath).catch(() => null);
+  const stat = await statCacheAwareFile(filePath).catch(() => null);
   if (!stat?.isFile()) {
     const error = new Error("File not found");
     error.status = 404;
     throw error;
   }
   return { filePath, size: stat.size, contentType: contentTypeFor(filePath) };
+
+  });
 }
 
 export async function createAiTaskZip(taskId, session = currentAiTenantSession()) {
+  return withMediaCacheLease(async () => {
   const safeTaskId = validateTaskId(taskId);
   await assertAiImageTaskOwner(safeTaskId, session);
   const generatedFiles = await collectImageFiles(path.resolve(GENERATED_ROOT, safeTaskId), "generated");
@@ -863,6 +936,8 @@ export async function createAiTaskZip(taskId, session = currentAiTenantSession()
     filename: `ai-generated-${safeTaskId}.zip`,
     buffer: buildZip(files)
   };
+
+  });
 }
 
 export function streamAiFile(filePath) {
@@ -874,8 +949,9 @@ function resolveCroppedTaskDir(taskId) {
 }
 
 async function collectImageFiles(root, prefix) {
+  return withMediaCacheLease(async () => {
   const files = [];
-  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readCacheAwareDirectory(root, { withFileTypes: true }).catch(() => []);
   const sourcePrefix = mediaCacheSource(path.join(root, "index.png")).replace(/index\.png$/, "");
   const mappings = await mysqlQuery("SELECT source_url FROM media_migration_map WHERE status='verified' AND source_url LIKE ? ESCAPE '!' LIMIT 1000", [`${sourcePrefix.replace(/[!_%]/g, match => `!${match}`)}%`]).catch(error => { if (error.code === "ER_NO_SUCH_TABLE") return []; throw error; });
   const names = new Set(entries.filter(entry => entry.isFile()).map(entry => entry.name));
@@ -884,9 +960,11 @@ async function collectImageFiles(root, prefix) {
     if (!ALLOWED_EXTENSIONS.has(path.extname(name).toLowerCase())) continue;
     const filePath = path.join(root, name);
     await restoreMediaCacheFile(filePath);
-    files.push({ name: `${prefix}/${name}`, data: await fs.readFile(filePath) });
+    files.push({ name: `${prefix}/${name}`, data: await readCacheAwareFile(filePath) });
   }
   return files.sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+
+  });
 }
 
 function normalizeRatio(value) {

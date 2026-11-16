@@ -1,3 +1,5 @@
+import {withMediaCacheLease} from "./media-cache-coordination.js";
+import {readCacheAwareFile,statCacheAwareFile,restoreManagedCacheInput} from "./media-cache-io.js";
 import {externalizeInlineMedia} from "./database-inline-media.js";
 import {encodeListingJsonForWrite,decodeListingJsonSections,listingStoredJsonText} from "./listing-json-sections.js";
 import { financeOriginalName } from './finance-original-name.js';
@@ -319,6 +321,7 @@ function resolveListingMediaRoots() {
 }
 
 async function writeListingMediaFile(storedName, buffer, contentType = "application/octet-stream", objectPrefix = "listing-media") {
+  return withMediaCacheLease(async () => {
   const extension = path.extname(storedName).toLowerCase();
   const ossObject = await putContentAddressedObject(buffer, {
     prefix: objectPrefix,
@@ -337,9 +340,12 @@ async function writeListingMediaFile(storedName, buffer, contentType = "applicat
   const error = new Error("OSS 未启用或配置不完整，图片未保存。系统禁止将业务图片降级保存到本地或 MySQL。");
   error.status = 503;
   throw error;
+
+  });
 }
 
 async function writeListingMediaFileFromPath(storedName, filePath, contentType = "application/octet-stream", objectPrefix = "listing-media") {
+  return withMediaCacheLease(async () => {
   const extension = path.extname(storedName).toLowerCase();
   const ossObject = await putContentAddressedFile(filePath, {
     prefix: objectPrefix,
@@ -358,9 +364,12 @@ async function writeListingMediaFileFromPath(storedName, filePath, contentType =
   const error = new Error("OSS 未启用或配置不完整，图片未保存。系统禁止将业务图片降级保存到本地或 MySQL。");
   error.status = 503;
   throw error;
+
+  });
 }
 
 async function writeTeamAttachmentFile(storedName, buffer) {
+  return withMediaCacheLease(async () => {
   let primaryPath = "";
   for (const root of TEAM_ATTACHMENT_ROOTS) {
     await fs.mkdir(root, { recursive: true });
@@ -369,6 +378,8 @@ async function writeTeamAttachmentFile(storedName, buffer) {
     if (!primaryPath) primaryPath = targetPath;
   }
   return primaryPath;
+
+  },{writes:true});
 }
 
 function isOptimizableListingImage(contentType = "", extension = "") {
@@ -382,6 +393,7 @@ async function optimizeListingImageForPublish(buffer, {
   extension = "",
   force = false
 } = {}) {
+  return withMediaCacheLease(async () => {
   const sourceBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
   const normalizedExtension = String(extension || "").toLowerCase();
   const normalizedContentType = String(contentType || mimeTypeForListingMediaExtension(normalizedExtension)).toLowerCase();
@@ -433,6 +445,8 @@ async function optimizeListingImageForPublish(buffer, {
     console.warn("[listing-media] image optimize failed:", error?.message || error);
     return { buffer: sourceBuffer, contentType: normalizedContentType || contentType, extension: normalizedExtension, optimized: false };
   }
+
+  });
 }
 
 async function optimizeListingImageFileForPublish(filePath, {
@@ -441,6 +455,7 @@ async function optimizeListingImageFileForPublish(filePath, {
   sourceSize = 0,
   force = false
 } = {}) {
+  return withMediaCacheLease(async () => {
   const normalizedExtension = String(extension || "").toLowerCase();
   const normalizedContentType = String(contentType || mimeTypeForListingMediaExtension(normalizedExtension)).toLowerCase();
   const originalBytes = Math.max(0, Number(sourceSize || 0));
@@ -476,7 +491,7 @@ async function optimizeListingImageFileForPublish(filePath, {
   const optimizedPath = path.join(os.tmpdir(), `ozon-listing-optimized-${crypto.randomUUID()}${outputExtension}`);
   try {
     await pipeline.toFile(optimizedPath);
-    const optimizedSize = Number((await fs.stat(optimizedPath)).size || 0);
+    const optimizedSize = Number((await statCacheAwareFile(optimizedPath)).size || 0);
     if (!optimizedSize || (originalBytes && optimizedSize >= originalBytes)) {
       await fs.unlink(optimizedPath).catch(() => {});
       return { filePath, contentType: normalizedContentType || contentType, extension: normalizedExtension, optimized: false, originalBytes, size: originalBytes };
@@ -494,6 +509,8 @@ async function optimizeListingImageFileForPublish(filePath, {
     console.warn("listing image optimization skipped:", error?.message || error);
     return { filePath, contentType: normalizedContentType || contentType, extension: normalizedExtension, optimized: false, originalBytes, size: originalBytes };
   }
+
+  });
 }
 
 export async function listingCategoryTemplates(session) {
@@ -947,6 +964,7 @@ function createCollectorMediaArchiveQueue(limit = 3) {
 }
 
 async function archiveCollectorMediaValue(value, metadata, session, urlMap, archive) {
+  return withMediaCacheLease(async () => {
   if (typeof value === "string") {
     if (!isCollectorMediaSource(value)) return value;
     if (!archive.pending.has(value)) archive.pending.set(value, archive.run(() => materializeListingMediaUrl(value, {
@@ -969,9 +987,12 @@ async function archiveCollectorMediaValue(value, metadata, session, urlMap, arch
     return [key, nextValue];
   });
   return Object.fromEntries(entries);
+
+  });
 }
 
 async function archiveCollectedProductMediaValue(value, metadata, session, urlMap, archive) {
+  return withMediaCacheLease(async () => {
   if (Array.isArray(value)) {
     return mapWithConcurrency(value, 3, (item) => archiveCollectedProductMediaValue(item, metadata, session, urlMap, archive));
   }
@@ -983,9 +1004,12 @@ async function archiveCollectedProductMediaValue(value, metadata, session, urlMa
     return [key, nextValue];
   });
   return Object.fromEntries(entries);
+
+  });
 }
 
 async function archiveCollectedProductMedia(product = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const storage = ossStorageConfig();
   if (!storage.enabled) {
     const error = new Error("采集图片归档失败：OSS 未启用，已阻止外部图片地址写入正式数据库");
@@ -999,6 +1023,8 @@ async function archiveCollectedProductMedia(product = {}, session = null) {
     source_id: sourceId,
     role: "collector_image"
   }, session, new Map(), { pending: new Map(), run: createCollectorMediaArchiveQueue() });
+
+  });
 }
 
 function collectedNumber(value) {
@@ -3530,14 +3556,18 @@ export async function createListingTemplateFromCollectedProductId(id, session = 
 }
 
 export async function uploadListingMedia(req, options = {}) {
+  return withMediaCacheLease(async () => {
   if (!options.publicUpload) {
     options = { ...options, session: await authorizeBusinessTaskSession(options.session || req?._session) };
     assertBusinessTaskPermission(options.session, "operations");
   }
   return withListingMediaUploadSlot(() => uploadListingMediaWithSlot(req, options));
+
+  });
 }
 
 async function uploadListingMediaWithSlot(req, options = {}) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const file = await readListingMediaMultipart(req);
   let optimizedMedia = null;
@@ -3651,6 +3681,8 @@ async function uploadListingMediaWithSlot(req, options = {}) {
     const cleanupPaths = new Set([file.filePath, optimizedMedia?.filePath].filter(Boolean));
     await Promise.all(Array.from(cleanupPaths, (target) => fs.unlink(target).catch(() => {})));
   }
+
+  });
 }
 
 function listingMediaUploadResult(asset, options = {}) {
@@ -3712,12 +3744,16 @@ export async function uploadTeamAttachment(req, { purpose = "team" } = {}) {
 }
 
 export async function watermarkListingMedia(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   session = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(session, "operations");
   return withListingWatermarkSlot(() => processListingMediaWatermark(body, session));
+
+  });
 }
 
 async function withListingWatermarkSlot(worker) {
+  return withMediaCacheLease(async () => {
   if (activeListingWatermarkJobs >= LISTING_WATERMARK_CONCURRENCY) {
     await new Promise((resolve) => pendingListingWatermarkJobs.push(resolve));
   }
@@ -3728,9 +3764,12 @@ async function withListingWatermarkSlot(worker) {
     activeListingWatermarkJobs -= 1;
     pendingListingWatermarkJobs.shift()?.();
   }
+
+  });
 }
 
 async function processListingMediaWatermark(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   session = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
@@ -3761,7 +3800,7 @@ async function processListingMediaWatermark(body = {}, session = null) {
   const watermarkPath = await resolveListingShopWatermarkPath(shop);
   const options = listingShopWatermarkOptions(shop);
   const watermarkSignature = crypto.createHash("sha256")
-    .update(await fs.readFile(watermarkPath)).update(JSON.stringify(options)).digest("hex");
+    .update(await readCacheAwareFile(watermarkPath)).update(JSON.stringify(options)).digest("hex");
   const results = [];
   for (const [index, image] of images.entries()) {
     await assertAccess();
@@ -3844,9 +3883,12 @@ async function processListingMediaWatermark(body = {}, session = null) {
     shop: { id: Number(shop.id), name: shop.name || "" },
     images: results
   };
+
+  });
 }
 
 async function generateWatermarkedListingImages(images = [], shop = {}, session = null, options = {}) {
+  return withMediaCacheLease(async () => {
   const normalizedInput = normalizeArray(images)
     .map((item, index) => (typeof item === "string" ? { url: item, name: `image-${index + 1}` } : item))
     .map((item, index) => ({
@@ -3891,9 +3933,12 @@ async function generateWatermarkedListingImages(images = [], shop = {}, session 
       asset_id: Number(next.assetId || next.asset?.id || 0) || null
     };
   });
+
+  });
 }
 
 async function watermarkListingMediaForSaveBatch(body, shop, session, cache) {
+  return withMediaCacheLease(async () => {
   const images = await Promise.all(body.images.map((image) => {
     // Cache only within this persisted save batch; never across later operator edits.
     const key = JSON.stringify([shop.id, shop.watermark_path, image.url]);
@@ -3910,9 +3955,12 @@ async function watermarkListingMediaForSaveBatch(body, shop, session, cache) {
     return cache.get(key);
   }));
   return { images };
+
+  });
 }
 
 async function resolveOriginalWatermarkSources(images = []) {
+  return withMediaCacheLease(async () => {
   const resolved = [];
   for (const item of normalizeArray(images)) {
     const originalUrl = String(item.url || "").trim();
@@ -3924,9 +3972,12 @@ async function resolveOriginalWatermarkSources(images = []) {
     });
   }
   return resolved;
+
+  });
 }
 
 async function originalSourceForWatermarkedListingMedia(url = "") {
+  return withMediaCacheLease(async () => {
   const value = String(url || "").trim();
   if (!value || !listingMediaPathFromUrl(value)) return "";
   const asset = await row(`
@@ -3941,9 +3992,12 @@ async function originalSourceForWatermarkedListingMedia(url = "") {
   const source = String(asset?.source_path || metadata.sourceUrl || "").trim();
   if (!source || source === value) return "";
   return source;
+
+  });
 }
 
 async function applyShopWatermarkedImagesToPayload(payload = {}, shop = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const next = {
     ...payload,
     items: normalizeArray(payload.items).map((item) => ({ ...item }))
@@ -3985,6 +4039,8 @@ async function applyShopWatermarkedImagesToPayload(payload = {}, shop = {}, sess
     ready: generated.filter((item) => item.status === "watermark_ready").length
   };
   return next;
+
+  });
 }
 
 function shouldReusePreparedShopWatermarkMedia(body = {}, shop = {}) {
@@ -4016,6 +4072,7 @@ function preparedShopWatermarkSummary(payload = {}, shop = {}) {
 }
 
 async function resolveShopTailImageUrl(shop = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const shopId = Number(shop.id || shop.shop_id || 0);
   if (!shopId) return "";
   const rule = await row(`
@@ -4049,6 +4106,8 @@ async function resolveShopTailImageUrl(shop = {}, session = null) {
     ? [...tailTenantParams, shopId, Number(rule.tail_template_id), Number(rule.tail_template_id), shopId]
     : [...tailTenantParams, shopId, 0, shopId]).catch(() => null);
   return materializeShopTailImageForPublish(template?.image_path || "", shop, session);
+
+  });
 }
 
 function normalizeShopTailImageUrl(value = "") {
@@ -4072,6 +4131,7 @@ function normalizeShopTailImageUrl(value = "") {
 }
 
 async function materializeShopTailImageForPublish(value = "", shop = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const raw = String(value || "").trim();
   if (!raw) return "";
   const localPath = await resolveShopTailImageLocalPath(raw);
@@ -4085,7 +4145,7 @@ async function materializeShopTailImageForPublish(value = "", shop = {}, session
     error.status = 400;
     throw error;
   }
-  const sourceBuffer = await fs.readFile(localPath);
+  const sourceBuffer = await readCacheAwareFile(localPath);
   if (!sourceBuffer.length) return "";
   const extension = LISTING_MEDIA_TYPES.has(path.extname(localPath).toLowerCase()) ? path.extname(localPath).toLowerCase() : ".png";
   const optimizedMedia = await optimizeListingImageForPublish(sourceBuffer, {
@@ -4144,9 +4204,12 @@ async function materializeShopTailImageForPublish(value = "", shop = {}, session
     }
   }, session).catch(() => null);
   return publishUrl;
+
+  });
 }
 
 async function resolveShopTailImageLocalPath(value = "") {
+  return withMediaCacheLease(async () => {
   const raw = String(value || "").trim();
   if (!raw) return "";
   let pathname = raw;
@@ -4168,10 +4231,12 @@ async function resolveShopTailImageLocalPath(value = "") {
   const uploadsIndex = normalized.toLowerCase().lastIndexOf("uploads/asset-tail-templates/");
   if (uploadsIndex >= 0) add(path.join(process.cwd(), "public", normalized.slice(uploadsIndex)));
   for (const candidate of candidates) {
-    const stat = await fs.stat(candidate).catch(() => null);
+    const stat = await statCacheAwareFile(candidate).catch(() => null);
     if (stat?.isFile()) return candidate;
   }
   return "";
+
+  });
 }
 
 function appendTailImageToPayload(payload = {}, tailImageUrl = "") {
@@ -4239,6 +4304,7 @@ function appendTailImageToCopyImages(images = [], tailImageUrl = "") {
 }
 
 export async function listingMediaAssets(query = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const tenantScope = tenantId === "admin" ? "(m.tenant_id = ? OR m.tenant_id IS NULL)" : "m.tenant_id = ?";
@@ -4366,6 +4432,8 @@ export async function listingMediaAssets(query = {}, session = null) {
     `, [tenantId, limit]);
   }
   return rows.map(normalizeListingMediaAssetRow);
+
+  });
 }
 
 function applyPreparedDraftShopMedia(payload = {}, preparedMedia = [], sourceImages = null) {
@@ -4511,6 +4579,7 @@ function normalizeOzonSellerMediaJobRow(row = {}) {
 }
 
 export async function createOzonSellerMediaUploadJobs(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const items = normalizeOzonSellerMediaSourceItems(body);
@@ -4628,9 +4697,12 @@ export async function createOzonSellerMediaUploadJobs(body = {}, session = null)
     job_id: jobId,
     jobs
   };
+
+  });
 }
 
 export async function claimServerPublishMediaUploadJobs(body = {}, tenantId = "admin") {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
   const runnerId = cleanText(body.runnerId || body.runner_id || `runner-${Date.now().toString(36)}`, 128);
@@ -4668,9 +4740,12 @@ export async function claimServerPublishMediaUploadJobs(body = {}, tenantId = "a
     claimed: rows.length,
     jobs: rows.map(normalizeOzonSellerMediaJobRow)
   };
+
+  });
 }
 
 export async function completeServerPublishMediaUploadJob(jobId = "", mediaJobId = "", body = {}, tenantId = "admin") {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const normalizedTenantId = String(tenantId || "admin").trim() || "admin";
   const normalizedJobId = cleanText(decodeURIComponent(String(jobId || "")), 128);
@@ -4724,9 +4799,12 @@ export async function completeServerPublishMediaUploadJob(jobId = "", mediaJobId
     error: success ? "" : errorMessage || "SELLER_MEDIA_UPLOAD_FAILED",
     message
   };
+
+  });
 }
 
 export async function listOzonSellerMediaUploadJobs(query = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const limit = Math.max(1, Math.min(200, Number(query.limit || 50) || 50));
   const status = cleanText(query.status || "", 32);
@@ -4745,6 +4823,8 @@ export async function listOzonSellerMediaUploadJobs(query = {}, session = null) 
     LIMIT ?
   `, [...params, limit]);
   return rows.map(normalizeOzonSellerMediaJobRow);
+
+  });
 }
 
 export async function searchMaterialPackages(query = {}, session = null) {
@@ -5576,9 +5656,10 @@ function logAiVariantSavePerf(traceId = "", stage = "", startedAt = Date.now(), 
 }
 
 export async function registerListingMediaAssetFromFile(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const sourcePath = path.resolve(String(body.filePath || body.file_path || ""));
-  const buffer = await fs.readFile(sourcePath);
+  const buffer = await readCacheAwareFile(sourcePath);
   const extension = path.extname(sourcePath).toLowerCase() || ".jpg";
   const contentType = body.mime_type || LISTING_MEDIA_TYPES.get(extension) || mimeTypeForListingMediaExtension(extension);
   const role = sanitizeListingMediaFilename(body.role || "asset").replace(/\.[^.]+$/, "").slice(0, 32) || "asset";
@@ -5624,9 +5705,12 @@ export async function registerListingMediaAssetFromFile(body = {}, session = nul
     hash_sha256: storedMedia.hashSha256,
     status: publishUrl ? "public_ready" : "local_only"
   }, session);
+
+  });
 }
 
 export async function registerListingMediaAsset(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const payload = normalizeListingMediaAssetPayload(body, session);
   if (payload.shop_id) {
@@ -5681,9 +5765,12 @@ export async function registerListingMediaAsset(body = {}, session = null) {
     attributeValueMemoryCache.delete(oldestKey);
   }
   return asset;
+
+  });
 }
 
 async function enqueueOzonSellerMediaUploadForListingAsset(asset = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const sourceUrl = String(asset.publish_url || asset.publishUrl || "").trim();
   if (
     !sourceUrl
@@ -5712,9 +5799,12 @@ async function enqueueOzonSellerMediaUploadForListingAsset(asset = {}, session =
     }]
   }, session);
   return result;
+
+  });
 }
 
 async function listingWatermarkShop(shopId, session) {
+  return withMediaCacheLease(async () => {
   const tenantId = listingTenantId(session);
   const shop = await row(`
     SELECT id, name, watermark_path, watermark_name,
@@ -5730,9 +5820,12 @@ async function listingWatermarkShop(shopId, session) {
     throw error;
   }
   return shop;
+
+  });
 }
 
 async function resolveListingShopWatermarkPath(shop = {}) {
+  return withMediaCacheLease(async () => {
   const clean = String(shop.watermark_path || "").replace(/\\/g, "/");
   const filename = clean.startsWith("shop-watermarks/") ? path.basename(clean) : "";
   const candidates = filename
@@ -5740,13 +5833,15 @@ async function resolveListingShopWatermarkPath(shop = {}) {
     : [];
   for (const candidate of candidates) {
     if(candidate.startsWith(`${path.resolve("uploads","shop-watermarks")}${path.sep}`))await restoreMediaCacheFile(candidate);
-    const stat = await fs.stat(candidate).catch(() => null);
+    const stat = await statCacheAwareFile(candidate).catch(() => null);
     if (stat?.isFile()) return candidate;
   }
   const error = new Error(`${shop.name || "目标店铺"}的店铺水印文件不可用（watermark_path），请在店铺设置中重新上传水印。`);
   error.code = "LISTING_SHOP_WATERMARK_UNAVAILABLE";
   error.status = 400;
   throw error;
+
+  });
 }
 
 function listingShopWatermarkOptions(shop = {}) {
@@ -5760,19 +5855,20 @@ function listingShopWatermarkOptions(shop = {}) {
 }
 
 async function readListingImageBuffer(url = "", session = null, beforeRequest) {
+  return withMediaCacheLease(async () => {
   const value = String(url || "").trim();
   if (!value) throw new Error("鍥剧墖 URL 涓虹┖");
   const localPath = resolveListingMediaLocalPath(value);
   if (localPath) {
     if (beforeRequest) await beforeRequest();
-    const buffer = await fs.readFile(localPath);
+    const buffer = await readCacheAwareFile(localPath);
     if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error("Watermark image is empty or exceeds 30MB");
     return { buffer, source: localPath };
   }
   const privateFile = await resolveLocalAiTaskMedia(value, session) || await resolveLocalImageCropperMedia(value, session);
   if (privateFile) {
     if (beforeRequest) await beforeRequest();
-    const buffer = await fs.readFile(privateFile.filePath);
+    const buffer = await readCacheAwareFile(privateFile.filePath);
     if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error("Watermark image is empty or exceeds 30MB");
     return { buffer, source: privateFile.filePath };
   }
@@ -5780,6 +5876,8 @@ async function readListingImageBuffer(url = "", session = null, beforeRequest) {
     return downloadListingSourceImage(value, { beforeRequest });
   }
   throw new Error("浠呮敮鎸?listing-media 鏈湴鍥剧墖鎴栧叕缃戝浘鐗?URL");
+
+  });
 }
 
 function resolveListingMediaLocalPath(url = "") {
@@ -5836,6 +5934,7 @@ function syncAiOptimizationTemplateImages(payload = {}) {
 }
 
 async function materializeAiOptimizationTemplateMedia(payload = {}, session = null, urlMap = new Map()) {
+  return withMediaCacheLease(async () => {
   if (!isAiOptimizationMediaPayload(payload)) return payload;
   const traceId = aiVariantSaveTraceId(payload);
   const totalStarted = Date.now();
@@ -5888,9 +5987,12 @@ async function materializeAiOptimizationTemplateMedia(payload = {}, session = nu
   });
   logAiVariantSavePerf(traceId, "backend.template.media.done", totalStarted, { cachedUrls: urlMap.size });
   return result;
+
+  });
 }
 
 async function materializeAiOptimizationDraftMedia(payload = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const facts = objectValue(payload.manual_facts || payload.manualFacts);
   const ai = objectValue(facts.ai_optimization || facts.aiOptimization || facts);
   const shouldMaterialize = String(payload.ai_payload?.source || payload.aiPayload?.source || "").includes("ai_optimization")
@@ -5927,6 +6029,8 @@ async function materializeAiOptimizationDraftMedia(payload = {}, session = null)
     cachedUrls: urlMap.size
   });
   return result;
+
+  });
 }
 
 function forceDraftTemplateImages(templatePayload = {}, imageUrls = []) {
@@ -5951,6 +6055,7 @@ function forceDraftTemplateImages(templatePayload = {}, imageUrls = []) {
 }
 
 async function materializeListingTemplateMediaForDraftSafety(payload = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const normalized = normalizeTemplatePayload(payload);
   const traceId = aiVariantSaveTraceId(normalized);
   const urlMap = new Map();
@@ -5986,9 +6091,12 @@ async function materializeListingTemplateMediaForDraftSafety(payload = {}, sessi
   };
   assertNoEmbeddedMediaForPersistence(result, "listing template");
   return result;
+
+  });
 }
 
 async function materializeListingDraftMediaForDraftSafety(payload = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const normalized = normalizeDraftPayload(payload);
   const traceId = aiVariantSaveTraceId(normalized);
   const mediaUrls = normalizedDraftMediaUrls(normalized);
@@ -6019,6 +6127,8 @@ async function materializeListingDraftMediaForDraftSafety(payload = {}, session 
   };
   assertNoEmbeddedMediaForPersistence(result, "listing draft");
   return result;
+
+  });
 }
 
 function assertNoEmbeddedMediaForPersistence(value, storageName) {
@@ -6152,28 +6262,41 @@ function normalizedDraftMediaUrls(payload = {}) {
 }
 
 async function materializeListingMediaItems(images = [], metadata = {}, session = null, urlMap = new Map()) {
+  return withMediaCacheLease(async () => {
   return Promise.all(normalizeImages(images).map(async (image) => ({
     ...image,
     url: await materializeListingMediaUrl(image.url, metadata, session, urlMap)
   })));
+
+  });
 }
 
 async function materializeListingMediaUrlList(value = [], metadata = {}, session = null, urlMap = new Map()) {
+  return withMediaCacheLease(async () => {
   const urls = normalizeStringList(value);
   const next = await Promise.all(urls.map((url) => materializeListingMediaUrl(url, metadata, session, urlMap)));
   return uniqueStringValues(next.filter(Boolean));
+
+  });
 }
 
 export async function materializeListingMediaAssetUrl(url = "", metadata = {}, session = null) {
+  return withMediaCacheLease(async () => {
   return materializeListingMediaUrlRecord(url, metadata, session, new Map());
+
+  });
 }
 
 async function materializeListingMediaUrl(url = "", metadata = {}, session = null, urlMap = new Map()) {
+  return withMediaCacheLease(async () => {
   const result = await materializeListingMediaUrlRecord(url, metadata, session, urlMap);
   return result.finalUrl;
+
+  });
 }
 
 async function materializeListingMediaUrlRecord(url = "", metadata = {}, session = null, urlMap = new Map()) {
+  return withMediaCacheLease(async () => {
   const traceId = String(metadata.save_trace_id || metadata.saveTraceId || "").trim();
   const startedAt = Date.now();
   const sourceUrl = String(url || "").trim();
@@ -6401,9 +6524,12 @@ async function materializeListingMediaUrlRecord(url = "", metadata = {}, session
       asset: null
     };
   }
+
+  });
 }
 
 async function readListingMediaBuffer(url = "", session = null) {
+  return withMediaCacheLease(async () => {
   session = session || currentAiTenantSession();
   const assertAccess = async () => {
     if (session) assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
@@ -6416,7 +6542,7 @@ async function readListingMediaBuffer(url = "", session = null) {
   if (localPath) {
     const extension = path.extname(localPath).toLowerCase();
     return {
-      buffer: await fs.readFile(localPath),
+      buffer: await readCacheAwareFile(localPath),
       source: localPath,
       filename: path.basename(localPath),
       contentType: mimeTypeForListingMediaExtension(extension)
@@ -6425,7 +6551,7 @@ async function readListingMediaBuffer(url = "", session = null) {
   const aiTaskFile = await resolveLocalAiTaskMedia(value, session);
   if (aiTaskFile) {
     return {
-      buffer: await fs.readFile(aiTaskFile.filePath),
+      buffer: await readCacheAwareFile(aiTaskFile.filePath),
       source: aiTaskFile.filePath,
       filename: path.basename(aiTaskFile.filePath),
       contentType: aiTaskFile.contentType
@@ -6434,7 +6560,7 @@ async function readListingMediaBuffer(url = "", session = null) {
   const cropperFile = await resolveLocalImageCropperMedia(value, session);
   if (cropperFile) {
     return {
-      buffer: await fs.readFile(cropperFile.filePath),
+      buffer: await readCacheAwareFile(cropperFile.filePath),
       source: cropperFile.filePath,
       filename: path.basename(cropperFile.filePath),
       contentType: cropperFile.contentType
@@ -6456,6 +6582,8 @@ async function readListingMediaBuffer(url = "", session = null) {
     filename: path.basename(new URL(value).pathname),
     contentType: contentType || mimeTypeForListingMediaExtension(path.extname(new URL(value).pathname))
   };
+
+  });
 }
 
 function normalizeListingMediaSourceUrl(url = "") {
@@ -6496,6 +6624,7 @@ function normalizedListingMediaSourceProtocol(protocol = "") {
 }
 
 async function resolveLocalAiTaskMedia(url = "", session = null) {
+  return withMediaCacheLease(async () => {
   const value = String(url || "").trim();
   if (!value) return null;
   let pathname = value;
@@ -6521,9 +6650,12 @@ async function resolveLocalAiTaskMedia(url = "", session = null) {
   });
   if (direct) return direct;
   return resolvePreviewAiTaskMedia(taskId, scope, filename);
+
+  });
 }
 
 async function resolveLocalImageCropperMedia(url = "", session = null) {
+  return withMediaCacheLease(async () => {
   const value = String(url || "").trim();
   if (!value) return null;
   let pathname = value;
@@ -6545,16 +6677,21 @@ async function resolveLocalImageCropperMedia(url = "", session = null) {
   const filename = match[2].split("/").map(decodeURIComponent).join("/").replace(/\\/g, "/");
   const root = path.resolve(process.cwd(), "uploads", "temp", "image-cropper", taskId);
   const filePath = path.resolve(root, filename);
-  if (!isListingPathInside(filePath, root) || !fsSync.existsSync(filePath)) return null;
+  if (!isListingPathInside(filePath, root)) return null;
+  await restoreManagedCacheInput(filePath);
+  if (!fsSync.existsSync(filePath)) return null;
   const extension = path.extname(filePath).toLowerCase();
   if (!LISTING_MEDIA_TYPES.has(extension)) return null;
   return {
     filePath,
     contentType: mimeTypeForListingMediaExtension(extension)
   };
+
+  });
 }
 
 async function resolvePreviewAiTaskMedia(taskId = "", scope = "generated", filename = "") {
+  return withMediaCacheLease(async () => {
   const safeTaskId = String(taskId || "").trim();
   const safeScope = String(scope || "").trim().toLowerCase() === "cropped" ? "cropped" : "generated";
   const safeFilename = String(filename || "").replace(/\\/g, "/").trim();
@@ -6562,13 +6699,15 @@ async function resolvePreviewAiTaskMedia(taskId = "", scope = "generated", filen
   const previewRoot = path.resolve(process.cwd(), "dist", "preview", "uploads", safeScope === "cropped" ? "ai-cropped" : "ai-generated", safeTaskId);
   const filePath = path.resolve(previewRoot, safeFilename);
   if (!filePath.startsWith(previewRoot)) return null;
-  const stat = await fs.stat(filePath).catch(() => null);
+  const stat = await statCacheAwareFile(filePath).catch(() => null);
   if (!stat?.isFile()) return null;
   return {
     filePath,
     size: stat.size,
     contentType: mimeTypeForListingMediaExtension(path.extname(filePath).toLowerCase())
   };
+
+  });
 }
 
 function isKnownAppMediaHost(hostname = "") {
@@ -6607,6 +6746,7 @@ function rewriteMediaUrlsWithMap(value, urlMap = new Map()) {
 }
 
 async function listingMediaRegisteredPublishUrl(url = "", session = null) {
+  return withMediaCacheLease(async () => {
   const localUrl = listingMediaPathFromUrl(url);
   if (!localUrl) return "";
   const tenantId = listingTenantId(session);
@@ -6619,6 +6759,8 @@ async function listingMediaRegisteredPublishUrl(url = "", session = null) {
     LIMIT 1
   `, [localUrl, tenantId]).catch(() => null);
   return String(asset?.publish_url || "").trim();
+
+  });
 }
 
 function collectListingMediaLocalUrls(value, urls = new Set()) {
@@ -6641,6 +6783,7 @@ function collectListingMediaLocalUrls(value, urls = new Set()) {
 }
 
 async function listingMediaPublishUrlMapForPayload(value, session = null) {
+  return withMediaCacheLease(async () => {
   const localUrls = [...collectListingMediaLocalUrls(value)];
   if (!localUrls.length) return new Map();
   const tenantId = listingTenantId(session);
@@ -6658,6 +6801,8 @@ async function listingMediaPublishUrlMapForPayload(value, session = null) {
     if (previewUrl && publishUrl) map.set(previewUrl, publishUrl);
   }
   return map;
+
+  });
 }
 
 function rewriteListingMediaLocalUrls(value, urlMap = new Map()) {
@@ -6675,12 +6820,16 @@ function rewriteListingMediaLocalUrls(value, urlMap = new Map()) {
 }
 
 async function rewriteDraftPayloadToRegisteredPublicMedia(payload = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const urlMap = await listingMediaPublishUrlMapForPayload(payload, session);
   if (!urlMap.size) return payload;
   return rewriteListingMediaLocalUrls(payload, urlMap);
+
+  });
 }
 
 async function applyListingWatermark(sourceBuffer, watermarkPath, options = {}) {
+  return withMediaCacheLease(async () => {
   const base = sharp(sourceBuffer).rotate();
   const meta = await base.metadata();
   const baseWidth = Number(meta.width || 0);
@@ -6705,6 +6854,8 @@ async function applyListingWatermark(sourceBuffer, watermarkPath, options = {}) 
     .toBuffer();
   const rect = listingWatermarkRect(baseWidth, baseHeight, Number(wmMeta.width || watermarkWidth), Number(wmMeta.height || 0), options);
   return base.composite([{ input: fadedWatermark, left: rect.left, top: rect.top }]).png().toBuffer();
+
+  });
 }
 
 function listingWatermarkRect(baseWidth, baseHeight, wmWidth, wmHeight, options = {}) {
@@ -7267,6 +7418,7 @@ function cleanAttributeDisplayName(attr = {}) {
 }
 
 export async function prepareListingTemplatePublishMediaPreview(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   session = await authorizeBusinessTaskSession(session);
   const tenantId = listingTenantId(session);
   await ensureListingAutomationSchema();
@@ -7342,6 +7494,8 @@ export async function prepareListingTemplatePublishMediaPreview(body = {}, sessi
     validation,
     results
   };
+
+  });
 }
 
 async function buildShopPublishPayloadForOzon({
@@ -7402,6 +7556,7 @@ async function buildShopPublishPayloadForOzon({
 }
 
 export async function repairOzonPublishPayloadMedia(payload = {}, options = {}) {
+  return withMediaCacheLease(async () => {
   const replacements = new Map();
   const unresolved = [];
   const urls = collectPublishPayloadMediaUrls(payload)
@@ -7433,6 +7588,8 @@ export async function repairOzonPublishPayloadMedia(payload = {}, options = {}) 
     unresolved,
     changed: replacements.size > 0
   };
+
+  });
 }
 
 function isOzonSellerHostedMediaUrl(url = "") {
@@ -7548,6 +7705,7 @@ export function collectOzonSellerMediaPublishCandidates(payload = {}) {
 }
 
 async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {}) {
+  return withMediaCacheLease(async () => {
   let workingPayload = payload;
   let candidates = collectOzonSellerMediaPublishCandidates(workingPayload);
   if (!candidates.length) {
@@ -7633,6 +7791,8 @@ async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {
     pending: [],
     changed: replacements.size > 0
   };
+
+  });
 }
 
 function isRetryableOzonSellerMediaError(error = null) {
@@ -7647,6 +7807,7 @@ function isRetryableOzonSellerMediaError(error = null) {
 }
 
 export async function repairListingEditorMedia(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const replacements = new Map();
   const unresolved = [];
   const urlMap = new Map();
@@ -7708,6 +7869,8 @@ export async function repairListingEditorMedia(body = {}, session = null) {
     unresolved: uniqueStringValues(unresolved),
     changed: replacements.size > 0
   };
+
+  });
 }
 
 function assertPublishPayloadHasOnlyPublicMedia(payload = {}, validation = null) {
@@ -7727,6 +7890,7 @@ function assertPublishPayloadHasOnlyPublicMedia(payload = {}, validation = null)
 }
 
 async function tryRepairPayloadListingMediaReachability(payload = {}, options = {}) {
+  return withMediaCacheLease(async () => {
   const replacements = new Map();
   const remoteUrls = collectPublishPayloadMediaUrls(payload)
     .filter((url) => /^https?:\/\//i.test(url))
@@ -7741,6 +7905,8 @@ async function tryRepairPayloadListingMediaReachability(payload = {}, options = 
   }
   if (!replacements.size) return payload;
   return replacePayloadMediaUrls(payload, replacements);
+
+  });
 }
 
 export function replacePayloadMediaUrls(payload = {}, replacements = new Map()) {
@@ -7798,6 +7964,7 @@ function collectPublishPayloadMediaUrls(payload = {}) {
 }
 
 async function syncUnreachableListingMediaAssetUrl(url = "") {
+  return withMediaCacheLease(async () => {
   const value = String(url || "").trim();
   if (!value || !isListingMediaPublicUrl(value)) return "";
   const asset = await row(`
@@ -7835,9 +8002,12 @@ async function syncUnreachableListingMediaAssetUrl(url = "") {
     WHERE id = ?
   `, [syncedUrl, Number(asset.id || 0)]).catch(() => null);
   return syncedUrl;
+
+  });
 }
 
 async function assertPublishPayloadMediaReachable(payload = {}, validation = null, options = {}) {
+  return withMediaCacheLease(async () => {
   const repairedPayload = await tryRepairPayloadListingMediaReachability(payload, options);
   if (repairedPayload !== payload) {
     payload.items = normalizeArray(repairedPayload.items);
@@ -7885,6 +8055,8 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
   error.validation = validation || null;
   error.unreachable_media = unavailableRemoteMedia;
   throw error;
+
+  });
 }
 
 export async function publishListingTemplateToOzon(body = {}, session = null) {
@@ -12553,6 +12725,7 @@ function compactListingAiVariantRowSnapshot(value = {}) {
 }
 
 async function repairListingAiVariantAssetTempMediaRow(rowItem = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const normalized = normalizeListingAiVariantAssetRow(rowItem);
   if (normalized.field_key !== "main_image") return rowItem;
   const asset = objectValue(normalized.asset);
@@ -12587,6 +12760,8 @@ async function repairListingAiVariantAssetTempMediaRow(rowItem = {}, session = n
     ...rowItem,
     asset_json: JSON.stringify(payload.asset)
   };
+
+  });
 }
 
 export async function deleteListingAiVariantAssets(body = {}, session = null) {
@@ -13724,6 +13899,7 @@ export async function createInventoryProductListingDraft(body = {}, session = nu
 }
 
 async function ensureAiVariantDraftVideoMedia(body = {}, patch = {}, session = null) {
+  return withMediaCacheLease(async () => {
   const source = String(body.ai_optimization?.source || body.aiOptimization?.source || "").trim();
   if (source !== "ai_variant_lab") return patch;
   const videoUrls = normalizeStringList(patch.video_urls || patch.videoUrls);
@@ -13753,6 +13929,8 @@ async function ensureAiVariantDraftVideoMedia(body = {}, patch = {}, session = n
     error.code = "ai_variant_video_generation_failed";
     throw error;
   }
+
+  });
 }
 
 async function resolveAiVariantDraftShopIds(body = {}, session = null) {
@@ -14491,6 +14669,7 @@ function summarizeDraftMediaRepairIssues(items = []) {
 }
 
 export async function repairAiOptimizationListingMedia(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const limit = Math.min(Math.max(1, Number(body.limit || 100)), 500);
@@ -14619,9 +14798,12 @@ export async function repairAiOptimizationListingMedia(body = {}, session = null
       ids: drafts.filter((item) => item.changed).map((item) => item.id)
     }
   };
+
+  });
 }
 
 export async function repairListingDraftMediaContamination(body = {}, session = null) {
+  return withMediaCacheLease(async () => {
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const apply = body.apply === true || body.dryRun === false || body.dry_run === false;
@@ -14676,6 +14858,8 @@ export async function repairListingDraftMediaContamination(body = {}, session = 
         manual_video_count: item.manual_video_count
       }))
   };
+
+  });
 }
 
 function cleanColorCandidateValue(value, path = "", changes = []) {
@@ -17287,6 +17471,7 @@ async function ensureListingMediaPublicUrl({
   metadata = {},
   skipPublicSync = false
 } = {}) {
+  return withMediaCacheLease(async () => {
   const traceId = String(metadata.save_trace_id || metadata.saveTraceId || "").trim();
   const startedAt = Date.now();
   const targetUrl = String(publishUrl || "").trim();
@@ -17316,6 +17501,8 @@ async function ensureListingMediaPublicUrl({
     publishUrl: String(syncedUrl || targetUrl).slice(0, 180)
   });
   return reachable ? syncedUrl : "";
+
+  });
 }
 
 async function syncListingMediaFileToPublicBase({
@@ -17326,6 +17513,7 @@ async function syncListingMediaFileToPublicBase({
   contentType = "application/octet-stream",
   metadata = {}
 } = {}) {
+  return withMediaCacheLease(async () => {
   const requestKey = `${path.resolve(String(localPath || ""))}|${String(publishUrl || "")}`;
   const existingRequest = listingMediaPublicSyncRequests.get(requestKey);
   if (existingRequest) return existingRequest;
@@ -17343,6 +17531,8 @@ async function syncListingMediaFileToPublicBase({
   });
   listingMediaPublicSyncRequests.set(requestKey, request);
   return request;
+
+  });
 }
 
 async function syncListingMediaFileToPublicBaseOnce({
@@ -17353,6 +17543,7 @@ async function syncListingMediaFileToPublicBaseOnce({
   contentType = "application/octet-stream",
   metadata = {}
 } = {}) {
+  return withMediaCacheLease(async () => {
   const traceId = String(metadata.save_trace_id || metadata.saveTraceId || "").trim();
   const startedAt = Date.now();
   const token = String(config.localPluginPublicToken || "").trim();
@@ -17367,7 +17558,7 @@ async function syncListingMediaFileToPublicBaseOnce({
   }
   const target = new URL("/api/listing/media/public-upload", publishUrl);
   target.searchParams.set("token", token);
-  const buffer = await fs.readFile(localPath);
+  const buffer = await readCacheAwareFile(localPath);
   let lastError = null;
   for (let attempt = 1; attempt <= LISTING_MEDIA_PUBLIC_SYNC_ATTEMPTS; attempt += 1) {
     try {
@@ -17422,13 +17613,19 @@ async function syncListingMediaFileToPublicBaseOnce({
     message: lastError?.message || String(lastError || "")
   });
   return "";
+
+  });
 }
 
 async function isReachableRemoteMediaUrl(url = "", options = {}) {
+  return withMediaCacheLease(async () => {
   return (await inspectRemoteMediaUrlForOzon(url, options)).ok;
+
+  });
 }
 
 async function inspectRemoteMediaUrlForOzon(url = "", options = {}) {
+  return withMediaCacheLease(async () => {
   if (options.beforeRequest) await options.beforeRequest();
   const value = String(url || "").trim();
   if (!/^https?:\/\//i.test(value)) return { ok: false, url: value, status: 0, error: "not_http_url" };
@@ -17479,9 +17676,12 @@ async function inspectRemoteMediaUrlForOzon(url = "", options = {}) {
       elapsedMs: Date.now() - startedAt
     };
   }
+
+  });
 }
 
 async function unreachablePublishMediaUrls(urls = [], options = {}) {
+  return withMediaCacheLease(async () => {
   const imageUrls = new Set(normalizeArray(options.imageUrls));
   const remoteUrls = uniqueStringValues(normalizeArray(urls)
     .map((url) => String(url || "").trim())
@@ -17498,9 +17698,12 @@ async function unreachablePublishMediaUrls(urls = [], options = {}) {
     }
   });
   return checks.filter(Boolean);
+
+  });
 }
 
 async function prewarmPublishMediaUrls(urls = [], options = {}) {
+  return withMediaCacheLease(async () => {
   const imageUrlSet = new Set(normalizeArray(options.imageUrls));
   const remoteUrls = uniqueStringValues(normalizeArray(urls)
     .map((url) => String(url || "").trim())
@@ -17544,6 +17747,8 @@ async function prewarmPublishMediaUrls(urls = [], options = {}) {
     failed_urls: uniqueStringValues([...imageReadiness.failedUrls, ...failedOtherUrls]),
     image_results: imageReadiness.results
   };
+
+  });
 }
 
 function uniqueStringValues(values = []) {
@@ -23213,6 +23418,7 @@ function parseJson(value, fallback) {
 }
 
 async function readListingMediaMultipart(req) {
+  return withMediaCacheLease(async () => {
   const contentType = String(req.headers["content-type"] || "");
   const match = contentType.match(/multipart\/form-data;\s*boundary=(?:"([^"]+)"|([^;]+))/i);
   if (!match) {
@@ -23373,6 +23579,8 @@ async function readListingMediaMultipart(req) {
     if (temporaryPath) await fs.unlink(temporaryPath).catch(() => {});
     throw error;
   }
+
+  });
 }
 
 async function readTeamAttachmentMultipart(req) {

@@ -20,6 +20,7 @@ test("real AI and cropper services guard enterprise media before filesystem read
   const objects=new Map();
   Object.assign(process.env,{OSS_ENABLED:"true",OSS_REGION:"oss-cn-test",OSS_BUCKET:"fixture-media",OSS_ACCESS_KEY_ID:"fixture-id",OSS_ACCESS_KEY_SECRET:"fixture-secret"});
   t.mock.method(OSS.prototype,"head",async key=>{if(!objects.has(key))throw Object.assign(new Error("missing"),{status:404});return{res:{headers:{"content-length":String(objects.get(key).length)}}};});
+  t.mock.method(OSS.prototype,"put",async(key,body)=>{objects.set(key,Buffer.from(body));return{};});
   t.mock.method(OSS.prototype,"putStream",async(key,stream)=>{const chunks=[];for await(const chunk of stream)chunks.push(chunk);objects.set(key,Buffer.concat(chunks));return{};});
   t.mock.method(OSS.prototype,"getStream",async key=>({stream:Readable.from([objects.get(key)])}));
   t.mock.method(OSS.prototype,"getACL",async()=>({acl:"private"}));
