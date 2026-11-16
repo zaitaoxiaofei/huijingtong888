@@ -1,3 +1,5 @@
+import {externalizeInlineMedia} from "./database-inline-media.js";
+import {encodeListingJsonForWrite,decodeListingJsonSections,listingStoredJsonText} from "./listing-json-sections.js";
 import { financeOriginalName } from './finance-original-name.js';
 import { readOzonCategoryIdentity, ozonCategoryIdentityError, ozonCategoryProductRefs, findOzonCategoryProduct } from "./ozon-category-identity.js";
 import { retargetVariantVehicleAttributes } from '../shared/variant-vehicle-attributes.js';
@@ -605,10 +607,10 @@ export async function copyListingTemplateFromOzonSku(body, session) {
       templateName,
       shopId,
       sourceRawJson,
-      JSON.stringify(editablePayload),
+      encodeListingJsonForWrite(JSON.stringify(editablePayload)),
       editablePayload.title,
       editablePayload.description,
-      JSON.stringify(editablePayload.attributes),
+      encodeListingJsonForWrite(JSON.stringify(editablePayload.attributes)),
       JSON.stringify(editablePayload.images),
       templateId,
       listingTenantId(session)
@@ -629,10 +631,10 @@ export async function copyListingTemplateFromOzonSku(body, session) {
       String(sku),
       shopId,
       sourceRawJson,
-      JSON.stringify(editablePayload),
+      encodeListingJsonForWrite(JSON.stringify(editablePayload)),
       editablePayload.title,
       editablePayload.description,
-      JSON.stringify(editablePayload.attributes),
+      encodeListingJsonForWrite(JSON.stringify(editablePayload.attributes)),
       JSON.stringify(editablePayload.images),
       personId(session)
     ]);
@@ -722,6 +724,7 @@ export async function refreshListingCopyJob(jobId, session = null) {
 }
 
 export async function createListingCategoryTemplate(body, session) {
+  body = await externalizeInlineMedia(body, {prefix:"listing-media",beforeRequest:()=>authorizeBusinessTaskSession(session)});
   const totalStarted = Date.now();
   const traceId = aiVariantSaveTraceId(body);
   logAiVariantSavePerf(traceId, "backend.template.create.start", totalStarted, {
@@ -771,10 +774,10 @@ export async function createListingCategoryTemplate(body, session) {
     payload.source_type || "manual",
     payload.source_ozon_sku || "",
     JSON.stringify(compactListingSourceProvenance(payload.source_raw)),
-    JSON.stringify(compactListingPersistencePayload(payload.editable_payload)),
+    encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(payload.editable_payload))),
     payload.title,
     payload.description,
-    JSON.stringify(payload.attributes),
+    encodeListingJsonForWrite(JSON.stringify(payload.attributes)),
     JSON.stringify(payload.images),
     personId(session)
   ]);
@@ -860,10 +863,10 @@ export async function createListingTemplateFromCollectedProduct(body, session, o
     JSON.stringify(payload.ai_rules),
     payload.source_ozon_sku,
     JSON.stringify(compactListingSourceProvenance(payload.source_raw)),
-    JSON.stringify(compactListingPersistencePayload(payload.editable_payload)),
+    encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(payload.editable_payload))),
     payload.title,
     payload.description,
-    JSON.stringify(payload.attributes),
+    encodeListingJsonForWrite(JSON.stringify(payload.attributes)),
     JSON.stringify(payload.images),
     personId(session)
   ]);
@@ -2491,7 +2494,7 @@ async function repairCollectorBoxTemplateCategoryDisplay(template = null, detail
       UPDATE listing_category_templates
       SET editable_payload_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND ${tenantScope}
-    `, [JSON.stringify(nextEditable), template.id, tenantId]);
+    `, [encodeListingJsonForWrite(JSON.stringify(nextEditable)), template.id, tenantId]);
     return listingCategoryTemplate(template.id, session);
   }
   const resolved = unresolvedCategory
@@ -2523,7 +2526,7 @@ async function repairCollectorBoxTemplateCategoryDisplay(template = null, detail
     UPDATE listing_category_templates
     SET ozon_category_id = ?, category_name = ?, editable_payload_json = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND ${tenantScope}
-  `, [nextCategoryId, displayName, JSON.stringify(nextEditable), template.id, tenantId]);
+  `, [nextCategoryId, displayName, encodeListingJsonForWrite(JSON.stringify(nextEditable)), template.id, tenantId]);
   const sku = String(detail.sku || detail.product_id || detail.productId || "").trim();
   if (sku) {
     const collectorEditable = {
@@ -9752,8 +9755,8 @@ async function savePublishVariantLinks({ recordId, draftId, tenantId, shopId, sh
     const updated = await run(`UPDATE listing_drafts SET template_payload_json = ?, manual_facts_json = ?
       WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND template_payload_json <=> ? AND manual_facts_json <=> ?`, [
       await serializeListingDraftTemplate(templatePayload, tenantId, { masterHash: draft.frozen_content_version?.master_hash }),
-      JSON.stringify(compactListingPersistencePayload(manualFacts)), Number(draftId), tenantId,
-      storedDraft.template_payload_json, storedDraft.manual_facts_json
+      encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(manualFacts))), Number(draftId), tenantId,
+      storedDraft.template_payload_json, listingStoredJsonText(storedDraft,"manual_facts_json")
     ]);
     if (!Number(updated?.affectedRows || 0)) {
       const latest = await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: await row("SELECT template_payload_json, manual_facts_json FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?", [Number(draftId), tenantId]) });
@@ -11464,6 +11467,7 @@ export async function deleteListingPublishRecords(body = {}, session = null) {
 }
 
 export async function updateListingCategoryTemplate(id, body, session) {
+  body = await externalizeInlineMedia(body, {prefix:"listing-media",beforeRequest:()=>authorizeBusinessTaskSession(session)});
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const tenantScope = tenantId === "admin" ? "(tenant_id = ? OR tenant_id IS NULL)" : "tenant_id = ?";
@@ -11495,10 +11499,10 @@ export async function updateListingCategoryTemplate(id, body, session) {
     payload.title_prompt,
     payload.description_prompt,
     JSON.stringify(payload.image_rules),
-    JSON.stringify(payload.editable_payload),
+    encodeListingJsonForWrite(JSON.stringify(payload.editable_payload)),
     payload.title,
     payload.description,
-    JSON.stringify(payload.attributes),
+    encodeListingJsonForWrite(JSON.stringify(payload.attributes)),
     JSON.stringify(payload.images),
     JSON.stringify(payload.source_raw),
     Number(id),
@@ -12621,6 +12625,7 @@ export async function createListingDraft(body, session) {
   await ensureListingAutomationSchema();
   logAiVariantSavePerf(traceId, "backend.draft.ensure_schema", stageStarted);
   stageStarted = Date.now();
+  body = await externalizeInlineMedia(body, {prefix:"listing-media",beforeRequest:()=>authorizeBusinessTaskSession(session)});
   const payload = sanitizeDraftMediaPayload(await rewriteDraftPayloadToRegisteredPublicMedia(
     await materializeListingDraftMediaForDraftSafety(
       await materializeAiOptimizationDraftMedia(normalizeDraftPayload(body), session),
@@ -12699,8 +12704,8 @@ export async function createListingDraft(body, session) {
     payload.spec,
     payload.quantity,
     serializedTemplate,
-    JSON.stringify(compactListingPersistencePayload(manualFacts)),
-    JSON.stringify(compactListingPersistencePayload(aiPayload)),
+    encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(manualFacts))),
+    encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(aiPayload))),
     personId(session),
     developmentMeta.development_type,
     developmentMeta.vehicle_brand,
@@ -12725,7 +12730,7 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
   const payload = sanitizeDraftMediaPayload(await rewriteDraftPayloadToRegisteredPublicMedia(
     await materializeListingDraftMediaForDraftSafety(
       await materializeAiOptimizationDraftMedia(normalizeDraftPayload({
-        ...body,
+        ...await externalizeInlineMedia(body, {prefix:"listing-media",beforeRequest:()=>authorizeBusinessTaskSession(session)}),
         template_id: body.template_id || body.templateId || existing.template_id
       }), session),
       session
@@ -12825,8 +12830,8 @@ async function writeListingDraftUpdate(prepared, execute = mysqlExecute) {
     payload.spec,
     payload.quantity,
     serializedTemplate,
-    JSON.stringify(compactListingPersistencePayload(manualFacts)),
-    JSON.stringify(compactListingPersistencePayload(aiPayload)),
+    encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(manualFacts))),
+    encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(aiPayload))),
     developmentMeta.development_type,
     developmentMeta.vehicle_brand,
     developmentMeta.vehicle_model,
@@ -13560,8 +13565,8 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
       payload.spec,
       payload.quantity,
       serializedTemplate,
-      JSON.stringify(compactListingPersistencePayload(manualFacts)),
-      JSON.stringify(compactListingPersistencePayload(aiPayload)),
+      encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(manualFacts))),
+      encodeListingJsonForWrite(JSON.stringify(compactListingPersistencePayload(aiPayload))),
       personId(session),
       developmentType,
       developmentMeta.vehicle_brand,
@@ -13707,7 +13712,7 @@ export async function createInventoryProductListingDraft(body = {}, session = nu
     product.color || "",
     product.accessory_name || "",
     Math.max(1, Number(product.product_quantity || 1)),
-    JSON.stringify(manualFacts),
+    encodeListingJsonForWrite(JSON.stringify(manualFacts)),
     JSON.stringify({ source: "inventory_quick_draft", source_product_id: productId }),
     personId(session),
     product.vehicle_brand || "",
@@ -14276,10 +14281,10 @@ async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
       JSON.stringify(baseTemplate.image_rules || {}),
       baseTemplate.source_ozon_sku || "",
       JSON.stringify(sourceRaw),
-      JSON.stringify(nextEditable),
+      encodeListingJsonForWrite(JSON.stringify(nextEditable)),
       title,
       description,
-      JSON.stringify(attributes),
+      encodeListingJsonForWrite(JSON.stringify(attributes)),
       JSON.stringify(images),
       templateId,
       tenantId
@@ -14305,10 +14310,10 @@ async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
     JSON.stringify(baseTemplate.image_rules || {}),
     baseTemplate.source_ozon_sku || "",
     JSON.stringify(sourceRaw),
-    JSON.stringify(nextEditable),
+    encodeListingJsonForWrite(JSON.stringify(nextEditable)),
     title,
     description,
-    JSON.stringify(attributes),
+    encodeListingJsonForWrite(JSON.stringify(attributes)),
     JSON.stringify(images),
     personId(session)
   ]);
@@ -15048,10 +15053,10 @@ async function applyOzonProductDetailToTemplate(templateId, detail, context = {}
     parsed.ozon_category_id || current.ozon_category_id,
     parsed.category_name || current.category_name,
     parsed.template_name || current.template_name,
-    JSON.stringify(editablePayload),
+    encodeListingJsonForWrite(JSON.stringify(editablePayload)),
     parsed.title || current.title,
     parsed.description ?? current.description,
-    JSON.stringify(mergedAttributes.length ? mergedAttributes : current.attributes),
+    encodeListingJsonForWrite(JSON.stringify(mergedAttributes.length ? mergedAttributes : current.attributes)),
     JSON.stringify(parsed.images.length ? parsed.images : current.images),
     JSON.stringify(sourceRaw),
     JSON.stringify(context.categoryAttributes || []),
@@ -23196,6 +23201,7 @@ function objectValue(value) {
 }
 
 function parseJson(value, fallback) {
+  value = decodeListingJsonSections(value);
   // mysql2 decodes native JSON expressions (JSON_OBJECT/JSON_ARRAYAGG) before
   // returning them, while historical LONGTEXT JSON arrives as a string.
   if (value && typeof value === "object" && !ArrayBuffer.isView(value)) return value;

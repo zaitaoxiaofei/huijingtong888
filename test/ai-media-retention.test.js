@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {encodeFrozenContentStorage} from "../src/services/listing-frozen-codec.js";
+import {encodeListingJsonSections} from "../src/services/listing-json-sections.js";
 import { aiMediaRetentionFingerprint, auditAiMediaRetention, applyAiMediaRetention, createAiMediaRetentionSweep, reviewAiMediaRetentionCurrentVersions } from "../src/services/ai-media-retention.js";
 import { headManagedOssRetentionObject, deleteManagedOssRetentionObject, listManagedOssRetentionObjects } from "../src/services/object-storage.js";
 import { verifyAiMediaRetentionMaintenance, runAiMediaRetentionCli } from "../scripts/cleanup-ai-media-retention.mjs";
@@ -10,6 +11,15 @@ const storage = { bucket: "fixture", region: "oss-cn-test", publicBaseUrl: "http
 const key = name => `listing-media/aa/${name}.jpg`;
 const url = name => `${storage.publicBaseUrl}/${key(name)}`;
 const asset = (id = 1, extra = {}) => ({ id, tenant_id: 7, source_type: "ai_generated", role: "main_image", status: "pending_review", url: url(String(id)), created_at: old, updated_at: old, ...extra });
+test("compressed draft attributes protect referenced media; corrupt sections block cleanup",async()=>{
+  const original=JSON.stringify({attributes:Array.from({length:100},()=>({image:url('1'),raw:'metadata'.repeat(100)}))});
+  const packed=encodeListingJsonSections(original);
+  const f=fixture({listing_drafts:[{id:1,tenant_id:7,manual_facts_json:packed}]});
+  const manifest=await auditAiMediaRetention(f.dependencies);assert.equal(manifest.rows.length,0);assert.ok(manifest.kept.some(row=>row.reasons.some(reason=>reason.startsWith('listing_drafts:'))));
+  const broken=JSON.parse(packed);broken._erp_listing_sections_v1.sha256='0'.repeat(64);
+  const bad=fixture({listing_drafts:[{id:1,tenant_id:7,manual_facts_json:JSON.stringify(broken)}]});
+  const refused=await auditAiMediaRetention(bad.dependencies);assert.equal(refused.scan.complete,false);assert.equal(refused.rows.length,0);
+});
 test("compressed immutable draft masters still protect their referenced OSS images",async()=>{
   const payload={payload:{image:url("1"),attributes:"metadata".repeat(1000)}};
   const f=fixture({listing_frozen_content:[{id:1,tenant_id:7,payload_json:JSON.stringify(encodeFrozenContentStorage(payload))}]});

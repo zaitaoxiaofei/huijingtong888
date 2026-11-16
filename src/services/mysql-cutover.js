@@ -1,3 +1,4 @@
+import {prepareInventoryInlineMedia} from "./database-inline-media.js";
 import { officialReturnReportRow } from "./ozon-return-report.js";
 import { ozonReturnFilterSql } from "./ozon-return-state.js";
 import { enrichOrdersWithOzonReturns } from "./ozon-return-reader.js";
@@ -2145,6 +2146,7 @@ function productDetailImageEndpointIndexMysql(value, productId) {
 }
 
 function productDetailImageListMysql(value) {
+  if (typeof value === "string" && /^data:/i.test(value)) return [value];
   const parsed = parseJsonOrNull(value);
   const list = Array.isArray(value)
     ? value
@@ -14815,6 +14817,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
   const name = structuredNaming?.name || String(body.name || "").trim();
   if (!name) throw new Error("Product name is required");
   const scope = await resolveInventoryTenantScope(tenantId);
+  body = await prepareInventoryInlineMedia(body);
   const tenantScoped = true;
   const tenantPk = scope.id;
   if (tenantScoped) {
@@ -15173,6 +15176,8 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin", opti
     return current.personId;
   }
   await auditActor();
+  await assertInventoryRecord(scope, 'product', productId, mysqlQuery);
+  body = await prepareInventoryInlineMedia(body);
   if (tenantScoped) {
     const ownershipTables = ["products", "suppliers", "logistics_fee_rules"];
     const missing = (await Promise.all(ownershipTables.map(async (table) => ({ table, exists: await mysqlSchemaColumnExists(table, "tenant_id") }))))
