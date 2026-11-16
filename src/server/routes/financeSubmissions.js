@@ -1,8 +1,10 @@
+import { financeBillingCosts } from "../../services/finance-billing-costs.js";
 import { financeSubmissions, submissionActor } from "../../services/finance-submissions.js";
 import { reimbursementTemplate, payrollTemplate, submissionExport, payrollLedgerExport } from "../../services/finance-workbooks.js";
 
 export function createFinanceSubmissionRoutes({ readJson }) {
   return {
+    "POST /api/finance-submissions/billing-cost": async req => financeBillingCosts.save(await readJson(req), req._session),
     "GET /api/finance-submissions/companies": req => financeSubmissions.companies(req._session),
     "GET /api/finance-submissions/list": (req, url) => financeSubmissions.list(Object.fromEntries(url.searchParams), req._session),
     "GET /api/finance-submissions/detail": (req, url) => financeSubmissions.detail(url.searchParams.get("id"), req._session),

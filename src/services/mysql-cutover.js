@@ -1,3 +1,4 @@
+import { billingProfitTotals } from "../shared/billing-profit.js";
 import {prepareInventoryInlineMedia} from "./database-inline-media.js";
 import { officialReturnReportRow } from "./ozon-return-report.js";
 import { ozonReturnFilterSql } from "./ozon-return-state.js";
@@ -28106,8 +28107,9 @@ async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scop
     params.push(numericShopId);
   }
   const rows = await mysqlQuery(`
-    SELECT e.*, s.name AS shop_name, c.name AS company_name
+    SELECT e.*, s.name AS shop_name, c.name AS company_name, a.order_id AS cost_order_id, a.field AS cost_field, a.revision AS cost_revision, a.base_amount AS cost_base
     FROM finance_expenses e
+    LEFT JOIN finance_billing_cost_adjustments a ON a.id=e.source_id AND e.source_type='billing_cost_adjustment' AND a.expense_id=e.id
     JOIN finance_companies c ON c.id = e.company_id
     LEFT JOIN shops s ON s.id = e.shop_id
     WHERE ${where.join(" AND ")}
@@ -28155,7 +28157,8 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
   const rows = await mysqlQuery(`
     SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key,
       COALESCE(SUM(CASE WHEN e.category='salary' THEN e.amount_cny ELSE 0 END), 0) AS salary_expense,
-      COALESCE(SUM(CASE WHEN e.category='salary' THEN 0 ELSE e.amount_cny END), 0) AS manual_expense
+      COALESCE(SUM(CASE WHEN e.category='salary' THEN 0 ELSE e.amount_cny END), 0) AS manual_expense,
+      COALESCE(SUM(CASE WHEN e.category IN ('domestic_shipping','packaging','order_payment') THEN e.amount_cny ELSE 0 END),0) AS order_expense
     FROM finance_expenses e
     JOIN finance_companies c ON c.id=e.company_id
     LEFT JOIN shops s ON s.id=e.shop_id
@@ -28185,7 +28188,8 @@ async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMon
     const expense = expenses.get(range.month_key) || {};
     summary.manual_expense = roundMoneyMysql(expense.manual_expense);
     summary.salary_expense = roundMoneyMysql(expense.salary_expense);
-    summary.net_profit = roundMoneyMysql(summary.operating_profit - summary.manual_expense - summary.salary_expense);
+    summary.order_expense = roundMoneyMysql(expense.order_expense);
+    Object.assign(summary,billingProfitTotals(summary));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
     return { ...range, label: `${Number(range.month_key.slice(5))}月`, summary, procurement_inventory: {}, ai_usage: {} };
   });
@@ -28606,13 +28610,13 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
         ...(pendingByShop.get(String(row.shop_id)) || {}),
         manual_expense: roundMoneyMysql(manualExpense),
         salary_expense: roundMoneyMysql(salaryExpense),
-        net_profit: roundMoneyMysql(Number(row.operating_profit || 0) - manualExpense - salaryExpense)
+        ...billingProfitTotals({...row,manual_expense:manualExpense,salary_expense:salaryExpense},expenses.rows.filter(expense=>String(expense.shop_id)===String(row.shop_id)))
       });
     });
     const summary = sumMonthlyBillingRowsMysql(shopRows);
     summary.manual_expense = expenses.total_manual_expense;
     summary.salary_expense = expenses.total_salary_expense;
-    summary.net_profit = roundMoneyMysql(Number(summary.operating_profit || 0) - summary.manual_expense - summary.salary_expense);
+    Object.assign(summary,billingProfitTotals(summary,expenses.rows));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
     const selected = {
       ...explicitRange,
@@ -28661,13 +28665,13 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
         ...(pendingByShop.get(String(row.shop_id)) || {}),
         manual_expense: roundMoneyMysql(manualExpense),
         salary_expense: roundMoneyMysql(salaryExpense),
-        net_profit: roundMoneyMysql(Number(row.operating_profit || 0) - manualExpense - salaryExpense)
+        ...billingProfitTotals({...row,manual_expense:manualExpense,salary_expense:salaryExpense},expenses.rows.filter(expense=>String(expense.shop_id)===String(row.shop_id)))
       });
     });
     const summary = sumMonthlyBillingRowsMysql(shopRows);
     summary.manual_expense = expenses.total_manual_expense;
     summary.salary_expense = expenses.total_salary_expense;
-    summary.net_profit = roundMoneyMysql(Number(summary.operating_profit || 0) - summary.manual_expense - summary.salary_expense);
+    Object.assign(summary,billingProfitTotals(summary,expenses.rows));
     summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
     return {
       ...range,

@@ -2434,6 +2434,19 @@ Create or edit one current-enterprise payroll item without a workbook. Existing 
   - `404` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `POST /api/finance-submissions/billing-cost`
+
+Create, edit or remove a domestic shipping, packaging or order-payment cost from the billing report by recording an audited difference in finance_expenses. Preserves original order calculation versions and source costs. Requires owned effective-dated company/shop assignment, current source amount and correction revision, a reason, and an open finance period. Target zero removes the billed cost; action restore deletes the correction expense and restores the source amount. Linked vouchers block changes.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/finance-submissions/payroll-delete`
 
 Delete a current-enterprise wage and its corresponding posted expense transactionally. Requires a reason and revision. Paid wages, linked vouchers, closed periods and inconsistent expenses block deletion. Retains before/after audit and payment history; company reports and monthly billing read the same remaining expense records.
@@ -2592,7 +2605,7 @@ Read an owned authorized Ozon shop's official monthly order realization report w
 
 #### `GET /api/monthly-billing-details`
 
-Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
+Reporting formula revenue-less-recorded-costs-v1 returns order_profit after item, logistics, platform, packaging and order-payment costs (including manual corrections); net_profit subtracts every recorded expense exactly once. Pending payroll, AI usage estimates and loss reference totals are not extra deductions. Source order profits/calculation versions are preserved. Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Query parameters:
