@@ -206,6 +206,37 @@ test('monthly billing reads only the current enterprise, including every financi
       await q("DELETE FROM product_components WHERE product_id IN(240,241,244)");
       await q("DELETE FROM products WHERE id IN(240,241,242,243,244,340)");
     });
+    await t.test('deleted local products do not block capital review while historical records remain',async()=>{
+      await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,active) VALUES(250,2,'Deleted deficit','DELETED-250',2,0),(251,2,'Deleted positive','DELETED-251',3,0),(252,2,'Active deficit','ACTIVE-252',4,1)");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,250,'deleted-capital-fixture',-1,'UNKNOWN','posted'),(2,251,'deleted-capital-fixture',10,'LOCAL','posted'),(2,252,'deleted-capital-fixture',-2,'LOCAL','posted')");
+      const before=await q("SELECT * FROM inventory_movements WHERE source_type='deleted-capital-fixture' ORDER BY id");
+      const all=await financeInventoryCapitalDetailsMysql({kind:'local',pageSize:100},'2');
+      assert.ok(!all.rows.some(r=>[250,251].includes(r.product_id)));
+      assert.ok(all.rows.some(r=>r.product_id===252));
+      assert.equal(all.summary.categories.local.unclassified_count,0);
+      assert.equal(all.summary.categories.local.availability_unknown_count,1);
+      assert.deepEqual((await financeInventoryCapitalDetailsMysql({kind:'local',review:'availability'},'2')).rows.map(r=>r.product_id),[252]);
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',query:'DELETED-250'},'2')).total,0);
+      await q("UPDATE products SET active=0 WHERE id=252");
+      const summary=await financeInventoryCapitalMysql({},'2');
+      assert.equal(summary.categories.local.value,40);
+      assert.equal(summary.categories.local.quantity,20);
+      assert.equal(summary.categories.local.availability_unknown_count,0);
+      assert.deepEqual(await q("SELECT * FROM inventory_movements WHERE source_type='deleted-capital-fixture' ORDER BY id"),before);
+      await q("DELETE FROM inventory_movements WHERE source_type='deleted-capital-fixture'");
+      await q("DELETE FROM products WHERE id IN(250,251,252)");
+    });
+    await t.test('purchase gap filter includes shipped products even with zero remaining stock',async()=>{
+      await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(253,2,'Missing purchase child','GAP253',2,'GAP253')");
+      await q("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku) VALUES(253,2,20,253,'gap253')");
+      await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at,delivered_at) VALUES(253,20,'gap-posting','delivered','delivered','2026-10-03','2026-10-04')");
+      await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(253,253,253,'gap253',3,20)");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,related_order_item_id,quantity_delta,stock_location,status) VALUES(2,253,'order_outbound',253,-3,'LOCAL','posted'),(2,253,'manual_adjustment',NULL,3,'LOCAL','posted')");
+      const gaps=await financeInventoryCapitalDetailsMysql({kind:'local',review:'purchase'},'2');
+      const gap=gaps.rows.find(r=>r.product_id===253);assert.ok(gap);assert.equal(gap.missing_purchase_quantity,3);assert.equal(gap.shipped_quantity,3);assert.equal(gap.missing_receipt_quantity,0);assert.ok(gaps.summary.categories.local.missing_purchase_count>0);
+      assert.equal((await financeInventoryCapitalDetailsMysql({kind:'local',review:'purchase',query:'GAP253'},'3')).total,0);
+      await q("DELETE FROM inventory_movements WHERE product_id=253");await q("DELETE FROM order_items WHERE id=253");await q("DELETE FROM orders WHERE id=253");await q("DELETE FROM sku_mappings WHERE id=253");await q("DELETE FROM products WHERE id=253");
+    });
     await t.test('unknown available quantity is not capitalized as zero',async()=>{
       await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(25,2,'Unverified negative stock','P-25',2,'STOCK-25')");
       await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,25,'capital-unknown',-5,'LOCAL','posted')");

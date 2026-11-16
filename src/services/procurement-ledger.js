@@ -1,3 +1,4 @@
+import {purchaseOrderDate} from '../shared/purchase-backfill-defaults.js';
 import {withOrderHandlingContext} from './order-handling-context.js';
 import { receiptEvidence, assertEvidenceOwnership } from './procurement-evidence.js';
 import { hasPermission } from '../shared/permissions.js';
@@ -200,6 +201,8 @@ export function planLedgerAction(snapshot, body) {
     result.shipping_amount = money(body.shipping_amount || 0);
     result.purchased_at = historicalPurchaseTime(body.purchased_at);
     if (body.inventory_effect !== 'already_accounted') throw new Error('历史补齐只能补记录（inventory_effect=already_accounted），不能重复增加库存');
+    const orderDateBasis=body.purchase_date_basis==='order_date';
+    if(orderDateBasis&&(!Array.isArray(body.order_item_ids)||body.reconcile_stock===true))throw new Error('按订单日期补录须明确选择订单，不能同时修改库存');
     let selectedIds = null;
     if (body.order_item_ids !== undefined) {
       if (!Array.isArray(body.order_item_ids) || !body.order_item_ids.length || body.order_item_ids.length > 500) throw new Error('请在历史核对中勾选 1～500 条订单（order_item_ids）');
@@ -210,7 +213,8 @@ export function planLedgerAction(snapshot, body) {
     const candidates = snapshot.orders.filter(row => row.entered_transport && row.stock_location !== 'FBP' && Number(row.missing_purchase_quantity) > 0 && (!selectedIds || selectedIds.has(Number(row.order_item_id))))
       .sort((a, b) => new Date(a.transport_at || 0) - new Date(b.transport_at || 0) || a.order_item_id - b.order_item_id);
     const missing = candidates.reduce((sum, row) => sum + Number(row.missing_purchase_quantity), 0);
-    if (selectedIds && (candidates.length !== selectedIds.size || result.quantity !== missing)) throw new Error(`所选订单缺采购记录共 ${missing} 件，订单或数量已变化，请刷新历史核对后重新勾选；不能包含已有采购仅缺收货的订单`);
+    if(orderDateBasis&&candidates.some(order=>!purchaseOrderDate(order.ordered_at)||purchaseOrderDate(order.ordered_at)!==String(body.purchased_at).slice(0,10)))throw new Error('采购日期与所选订单下单日期不一致，请重新读取并按日期分组');
+    if (selectedIds && (candidates.length !== selectedIds.size || (!orderDateBasis&&result.quantity !== missing))) throw new Error(`所选订单缺采购记录共 ${missing} 件，订单或数量已变化，请刷新历史核对后重新勾选；不能包含已有采购仅缺收货的订单`);
     if (result.quantity > missing) throw new Error(`本库存实际缺采购记录 ${missing} 件，本次数量不能超过缺口；已有采购但缺收货的部分请核对历史收货`);
     let left = result.quantity, assigned = 0, goodsAssigned = 0, freightAssigned = 0;
     result.allocations = [];
