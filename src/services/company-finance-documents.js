@@ -1,3 +1,4 @@
+import { paidPayrollAccruals } from "./finance-payroll-accruals.js";
 import crypto from 'node:crypto';
 import { createFinanceReconciliation } from './finance-reconciliation.js';
 import { deduplicateFinanceCash } from './finance-cash-dedup.js';
@@ -236,10 +237,15 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    if(input.period_mode&&period.from.slice(0,4)!==period.to.slice(0,4))fail('期间分类报表请在同一年度内选择范围（from/to），跨年资料请分别导出');
    const documents=await getDocs(ctx,period),shops=await shopsFor(ctx,period),summary=summarizeImportedDocuments(documents,period);
    // Read the same posted salary expense as monthly billing; vouchers never add a second cost.
-   const salaryExpenses=await query(`SELECT e.id,e.amount_cny,e.description,DATE_FORMAT(e.expense_date,'%Y-%m') month_key,e.source_type,e.source_id,i.detail_json
+   const salaryExpenses=await (query===mysqlQuery?async operation=>(await import('../mysql-pool.js')).withMysqlReadSnapshot(operation,{interactive:true}):async operation=>operation(query))(async read=>{
+   const booked=await read(`SELECT e.id,e.amount_cny,e.description,DATE_FORMAT(e.expense_date,'%Y-%m') month_key,e.source_type,e.source_id,i.detail_json
      FROM finance_expenses e LEFT JOIN finance_submission_items i ON e.source_type='finance_submission' AND i.id=e.source_id AND i.tenant_id=? AND i.company_id=e.company_id
      WHERE e.company_id=? AND e.category='salary' AND (e.tenant_id=? OR (?=1 AND (e.tenant_id IS NULL OR e.tenant_id=0)))
        AND e.expense_date>=? AND e.expense_date<=LAST_DAY(CONCAT(?,'-01')) ORDER BY e.expense_date,e.id`,[ctx.tenantId,ctx.companyId,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0,period.from+'-01',period.to]);
+   const salaryTo=new Date(Date.UTC(Number(period.to.slice(0,4)),Number(period.to.slice(5)),0)).toISOString().slice(0,10);
+   const paidWages=await paidPayrollAccruals({tenantId:ctx.tenantId,legacy:ctx.s.tenant.slug==='default',companyId:ctx.companyId,from:period.from+'-01',to:salaryTo},read);
+   return booked.concat(paidWages.map(row=>({...row,month_key:row.expense_date.slice(0,7)})));
+   });
    for(const expense of salaryExpenses){
      const detail=expense.detail_json?(typeof expense.detail_json==='string'?JSON.parse(expense.detail_json):expense.detail_json):null;
      const reconciled=detail&&Number.isFinite(Number(detail.base))&&Number.isFinite(Number(detail.employer))&&Math.abs(rounded(Number(detail.base)+Number(detail.employer))-Number(expense.amount_cny))<0.005;
@@ -247,7 +253,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
      const known=contributions&&keys.every(k=>typeof contributions[k]==='number'&&Number.isFinite(contributions[k])&&contributions[k]>=0)&&Math.abs(rounded(keys.reduce((n,k)=>n+contributions[k],0))-Number(detail.employer))<0.005;
      const parts=reconciled&&known?[['工资',Number(detail.base)],['公司承担社保',rounded(Number(detail.employer)-contributions.housing_fund)],['公司承担公积金',contributions.housing_fund]]:reconciled?[['工资',Number(detail.base)],['公司承担缴费',Number(detail.employer)]]:[['工资',Number(expense.amount_cny)]];
      for(const [metric,amount] of parts){
-       const line={metric,amount,currency:'CNY',month:expense.month_key,shop_id:0,expense_id:expense.id,payroll_item_id:expense.source_type==='finance_submission'?expense.source_id:null,source_type:'payroll',source:expense.description+'；已审批入账，发放登记不重复计费',display_name:'工资管理 · '+expense.description,original_name:'工资费用记录',review_status:'pending',linked_evidence:[]};
+       const line={metric,amount,currency:'CNY',month:expense.month_key,shop_id:0,expense_id:expense.id,payroll_item_id:expense.source_type==='finance_submission'?expense.source_id:null,source_type:'payroll',source:expense.description+(expense.salary_recognition==='paid_pending'?'；已发放按归属月计成本，待归档，不重复计费':'；已审批入账，发放登记不重复计费'),display_name:'工资管理 · '+expense.description,original_name:'工资费用记录',review_status:'pending',linked_evidence:[]};
        summary.lines.push(line);summary.metrics[metric]=rounded((summary.metrics[metric]||0)+amount);
      }
    }

@@ -1,13 +1,12 @@
 <script setup>
-import {overviewCards,overviewAmounts} from "./billing-overview.js";
 import { billingProfitTotals } from "../../../../src/shared/billing-profit.js";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Edit, Plus, View } from "@element-plus/icons-vue";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
 import { shanghaiDateKey, shanghaiDateText } from "../../utils/shanghai-date.js";
-import { billingDateRange } from "../../utils/billing-period.js";
+import { billingDateRange, billingCalendarRange, billingCalendarSelection } from "../../utils/billing-period.js";
 import BillingSourceRecords from "./BillingSourceRecords.vue";
 import { buildBillingGroups } from "./billing-groups.js";
 import BillingMetricLabel from "./BillingMetricLabel.vue";
@@ -32,6 +31,14 @@ const state = reactive({
   month: { summary: {}, shops: [], expenses: [] }
 });
 
+const initialCalendar=billingCalendarSelection(state.dateRange),quickYear=ref(initialCalendar.year),quickMonth=ref(initialCalendar.month);
+function selectCalendarYear(value){quickMonth.value='';if(value){state.dateRange=billingCalendarRange(value);applyBillingFilters();}}
+function selectCalendarMonth(value){if(quickYear.value){state.dateRange=billingCalendarRange(quickYear.value,value||'');applyBillingFilters();}}
+function selectCustomRange(){quickYear.value='';quickMonth.value='';}
+function syncCalendar(){const value=billingCalendarSelection(state.dateRange);quickYear.value=value.year;quickMonth.value=value.month;}
+const formatAmountInput=value=>value==null||value===''?'':String(value).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+const parseAmountInput=value=>String(value??'').replace(/,/g,'');
+const entryProgress=computed(()=>Number(selectedSummary.value.order_count)>0?Number(selectedSummary.value.accrued_order_count||0)/Number(selectedSummary.value.order_count):0);
 const expenseDialog = ref(false);
 const expenseDrawer = ref(false);
 const expenseCategoryFilter = ref("");
@@ -43,7 +50,7 @@ const payrollDetails = computed(()=>payrollMonth.value==='period'?visiblePayroll
 watch(payrollOpen,open=>{if(open)payrollMonth.value=visiblePayroll.value.length?'period':'all';});
 const payrollCost = row => Math.round((Number(row.base||0)+Number(row.employer||0))*100)/100;
 const visiblePayroll = computed(() => payrollRows.value.filter(row => row.month>=state.dateRange[0].slice(0,7) && row.month<=state.dateRange[1].slice(0,7) && (state.companyId==='all'||String(row.company_id)===state.companyId)));
-const pendingPayroll = computed(() => visiblePayroll.value.filter(row=>row.approval_status==='pending').reduce((n,row)=>n+Math.round(payrollCost(row)*100),0)/100);
+const pendingPayroll = computed(() => visiblePayroll.value.filter(row=>row.approval_status==='pending'&&!row.cost_confirmed&&Number(row.paid_amount||0)<=0).reduce((n,row)=>n+Math.round(payrollCost(row)*100),0)/100);
 async function loadPayroll(signal) {
   payrollLoading.value=true;payrollError.value='';payrollRows.value=[];
   try {
@@ -60,6 +67,7 @@ const itemNames = {purchase_cost:'采购成本',international_shipping_cost:'跨
 const inlineItems = group => group.children.filter(item => item.source !== 'expenses' || item.amount !== 0);
 function toolbarCommand(command) {
   if(command==='overview') router.push('/finance-center');
+  if(command==='ai') aiOpen.value=true;
   if(command==='capital') capitalDrawer.value=true;
   if(command==='payroll') router.push({path:'/finance/payroll',query:{month:state.dateRange[0].slice(0,7),companyId:state.companyId,action:'import'}});
 }
@@ -73,6 +81,9 @@ const orderRecordDrawer = ref(false);
 const recordItem = ref(null);
 const orderRecords = reactive({ loading: false, error: "", rows: [], total: 0, page: 1, keyword: "", outcomeType:"" });
 let recordController;
+const recordCache=new Map();
+const fastCostFields=new Set(['purchase_cost','domestic_shipping_cost','international_shipping_cost','packaging_cost','commission_fee','ozon_service_fee','other_fee']);
+const isCostRecord=computed(()=>fastCostFields.has(recordItem.value?.key));
 const sourceFilters = computed(() => ({ from: state.dateRange[0], to: state.dateRange[1], shopId: String(state.shopId || "all"), companyId: state.companyId }));
 const savingExpense = ref(false);
 const expenseForm = reactive({
@@ -91,7 +102,6 @@ const expenseForm = reactive({
 
 const selectedPeriodTitle = computed(() => `${state.dateRange?.[0] || "-"} 至 ${state.dateRange?.[1] || "-"}`);
 const selectedSummary = computed(() => ({...(state.month?.summary||{}),...billingProfitTotals(state.month?.summary||{},expenseRows.value)}));
-const headerAmounts=computed(()=>overviewAmounts(selectedSummary.value,aiUsage.value,{companyId:state.companyId,shopId:state.shopId}));
 const procurementInventory = computed(() => state.month?.procurement_inventory || {});
 const aiUsage = computed(() => state.month?.ai_usage || {});
 const aiUsagePeople = computed(() => Array.isArray(aiUsage.value.people) ? aiUsage.value.people : []);
@@ -102,14 +112,22 @@ const classifiedExpenseTotal = computed(() => expenseGroups.value.reduce((sum, g
 const unclassifiedDifference = computed(() => Math.round((Number(selectedSummary.value.revenue || 0) - Number(selectedSummary.value.net_profit || 0) - classifiedExpenseTotal.value) * 100) / 100);
 function openSource(source = "platform") { sourceKind.value = source; sourceDrawer.value = true; }
 async function loadOrderRecords() {
-  recordController?.abort(); recordController = new AbortController(); const signal = recordController.signal;
-  orderRecords.loading = true; orderRecords.error = "";
-  try {
-    const result = await apiClient.get(`/api/monthly-billing-orders?${new URLSearchParams({ ...sourceFilters.value, page: orderRecords.page, pageSize: 30, keyword: orderRecords.keyword, outcomeType:orderRecords.outcomeType })}`, { signal, noCache: true });
-    if (!signal.aborted) { orderRecords.rows = (result.rows || []).map(row=>({...row,recognized_loss:Math.max(0,-Number(row.profit||0))})); orderRecords.total = Number(result.total || 0); }
-  } catch (error) { if (!signal.aborted) { orderRecords.error = error.message || "订单明细读取失败"; orderRecords.rows = []; orderRecords.total = 0; } }
-  finally { if (recordController?.signal === signal) orderRecords.loading = false; }
+  recordController?.abort();recordController=new AbortController();const signal=recordController.signal,scope=currentApiCacheScope();
+  const params=new URLSearchParams({...sourceFilters.value,page:orderRecords.page,pageSize:30,keyword:orderRecords.keyword,outcomeType:orderRecords.outcomeType,field:fastCostFields.has(recordItem.value?.key)?recordItem.value.key:''});
+  const key=scope+':'+params,cached=recordCache.get(key);
+  orderRecords.error='';orderRecords.rows=[];
+  if(cached&&Date.now()-cached.at<15000){Object.assign(orderRecords,{...cached.data,loading:false});return;}
+  orderRecords.loading=true;
+  try{
+    const result=await apiClient.get('/api/monthly-billing-orders?'+params,{signal,noCache:true});
+    if(!signal.aborted&&scope===currentApiCacheScope()){
+      const data={rows:(result.rows||[]).map(row=>({...row,recognized_loss:Math.max(0,-Number(row.profit||0))})),total:Number(result.total||0)};
+      Object.assign(orderRecords,data);recordCache.set(key,{at:Date.now(),data});if(recordCache.size>8)recordCache.delete(recordCache.keys().next().value);
+    }
+  }catch(error){if(!signal.aborted&&scope===currentApiCacheScope())orderRecords.error=error.message||'订单明细读取失败';}
+  finally{if(recordController?.signal===signal)orderRecords.loading=false;}
 }
+
 function showGroupItem(item) {
   if (item.source === "expenses") return showExpenses(item.key);
   if (item.source === "advertising") return openSource("advertising");
@@ -152,7 +170,7 @@ const aiSubscription = computed(() => expenseBreakdown.value.find((item) => item
 
 function formatAiMoney(value) {
   const amount = Number(value || 0);
-  return Number.isFinite(amount) ? amount.toFixed(3) : "0.000";
+  return Number.isFinite(amount) ? amount.toLocaleString('zh-CN',{minimumFractionDigits:3,maximumFractionDigits:3}) : '0.000';
 }
 
 function formatRatio(value) {
@@ -187,6 +205,7 @@ function applyBillingFilters() {
     path: route.path,
     query: {
       ...route.query,
+      year:undefined,month:undefined,selectedMonth:undefined,
       from: state.dateRange[0],
       to: state.dateRange[1],
       shopId: String(state.shopId || "all"),
@@ -304,6 +323,7 @@ async function removeExpense(row) {
 }
 
 async function loadData() {
+  recordCache.clear();
   abortController?.abort();
   abortController = new AbortController();
   const { signal } = abortController;
@@ -337,7 +357,8 @@ async function loadData() {
 }
 
 function handleReset() {
-  state.dateRange = initialDateRange();
+  state.dateRange = billingCalendarRange(shanghaiDateKey().slice(0,4),shanghaiDateKey().slice(5,7));
+  syncCalendar();
   state.shopId = "all";
   applyBillingFilters();
 }
@@ -352,32 +373,43 @@ watch(
     const nextCompanyId = String(companyId || "all");
     if (nextRange[0] === state.dateRange[0] && nextRange[1] === state.dateRange[1] && nextShopId === state.shopId && nextCompanyId === state.companyId) return;
     state.dateRange = nextRange;
+    syncCalendar();
     state.shopId = nextShopId;
     state.companyId = nextCompanyId;
     loadData();
   }
 );
 watch(sourceFilters, () => { if (orderRecordDrawer.value) { orderRecords.page = 1; loadOrderRecords(); } });
-onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
+watch(()=>currentApiCacheScope(),()=>{recordCache.clear();recordController?.abort();abortController?.abort();orderRecords.rows=[];payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';loadData();});
+onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); recordCache.clear(); });
 </script>
 
 <template>
   <div class="page-stack monthly-billing-page">
     <section class="billing-toolbar">
       <h1>经营账单</h1>
-      <el-date-picker v-model="state.dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" :clearable="false" aria-label="统计时间" class="period-input" />
+      <el-date-picker v-model="quickYear" type="year" value-format="YYYY" format="YYYY年" placeholder="年份" clearable aria-label="账单年份" class="year-input" :disabled-date="date=>date.getFullYear()<2000||date.getFullYear()>2099" @change="selectCalendarYear"/>
+      <el-select v-model="quickMonth" :disabled="!quickYear" aria-label="账单月份" placeholder="月份" class="month-input" @change="selectCalendarMonth"><el-option label="全年" value=""/><el-option v-for="month in 12" :key="month" :label="month+'月'" :value="String(month)"/></el-select>
+      <el-date-picker v-model="state.dateRange" @change="selectCustomRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" :clearable="false" aria-label="统计时间" class="period-input" />
       <el-select v-model="state.companyId" filterable aria-label="公司" class="company-input"><el-option label="全部公司" value="all"/><el-option v-for="company in state.companies" :key="company.id" :label="company.name" :value="String(company.id)"/></el-select>
       <el-select v-model="state.shopId" filterable aria-label="店铺" class="shop-input"><el-option label="全部店铺" value="all"/><el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)"/></el-select>
       <el-button type="primary" :loading="state.loading" @click="applyBillingFilters">查询</el-button>
       <el-button @click="handleReset">重置</el-button>
-      <div class="toolbar-links"><el-button :icon="Plus" @click="openExpense(null,'other')">录入费用</el-button><el-dropdown @command="toolbarCommand"><el-button>更多 ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="overview">年度总览</el-dropdown-item><el-dropdown-item command="capital">采购与库存</el-dropdown-item><el-dropdown-item command="payroll">工资审核</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
+      <div class="toolbar-links"><el-button :icon="Plus" @click="openExpense(null,'other')">录入费用</el-button><el-dropdown @command="toolbarCommand"><el-button>更多 ▾</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="overview">年度总览</el-dropdown-item><el-dropdown-item command="capital">采购与库存</el-dropdown-item><el-dropdown-item command="ai">AI 用量</el-dropdown-item><el-dropdown-item command="payroll">工资归档</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div>
     </section>
     <section v-loading="state.loading" class="billing-overview">
-      <div class="summary-grid aligned-summary"><div v-for="card in overviewCards" :key="card.key" class="summary-card" :class="{'is-profit':card.key==='net_profit'}"><BillingMetricLabel :label="card.label" :hint="card.hint"/><strong :class="{'negative-money':headerAmounts[card.key]<0}">{{headerAmounts[card.key]==null?(card.key==='ai_cost'&&(state.companyId!=='all'||state.shopId!=='all')?'待分摊':'待补'):'¥'+(card.key==='ai_cost'?formatAiMoney(headerAmounts[card.key]):formatMoney(headerAmounts[card.key]))}}</strong><el-button v-if="card.key==='ai_cost'" link @click="aiOpen=true">按量估算 · 查看用量</el-button></div></div>
-      <div class="billing-secondary"><el-button link @click="openOrderDetails()">订单 {{formatInteger(selectedSummary.order_count)}} →</el-button><el-button link @click="shopsOpen=true">店铺 {{shopRows.length}} →</el-button><el-button link @click="settlementOpen=true">结算比例 {{formatRatio(selectedSummary.settlement_rate)}} →</el-button></div>
+      <div class="summary-grid">
+        <button class="summary-card interactive" @click="openOrderDetails()"><BillingMetricLabel label="订单" :hint="billingMetrics.order_count.hint"/><strong>{{formatInteger(selectedSummary.order_count)}}</strong><small>查看订单 →</small></button>
+        <button class="summary-card interactive" @click="showGroupItem(incomeGroup.children[0])"><BillingMetricLabel label="营业额" :hint="billingMetrics.revenue.hint"/><strong>¥{{formatMoney(selectedSummary.revenue)}}</strong><small>查看收入 →</small></button>
+        <div class="summary-card"><BillingMetricLabel metric="order_profit"/><strong>¥{{formatMoney(selectedSummary.order_profit)}}</strong><small>订单相关费用已扣除</small></div>
+        <div class="summary-card is-profit"><BillingMetricLabel label="净利润" :hint="billingMetrics.net_profit.hint"/><strong :class="{'negative-money':Number(selectedSummary.net_profit)<0}">¥{{formatMoney(selectedSummary.net_profit)}}</strong><small>{{formatRatio(selectedSummary.net_profit_margin)}} 净利率</small></div>
+        <button class="summary-card interactive" @click="shopsOpen=true"><span>店铺</span><strong>{{shopRows.length}}</strong><small>查看账单 →</small></button>
+        <button class="summary-card interactive" @click="settlementOpen=true"><BillingMetricLabel label="入账进度" hint="已入账订单数 ÷ 所选范围的订单总数，按Ozon财务记录识别，不是银行到账比例。取消订单可能不产生入账记录。"/><strong>{{formatRatio(entryProgress)}}</strong><small>查看结算 →</small></button>
+
+      </div>
       <div class="profit-workspace">
         <div class="formula-card">
-          <div class="income-group"><BillingMetricLabel label="收入" :hint="incomeGroup.hint"/><el-button link type="primary" aria-label="查看收入记录" @click="showGroupItem(incomeGroup.children[0])">¥{{formatMoney(incomeGroup.amount)}} <span class="amount-arrow">→</span></el-button></div>
+
           <div class="expense-panels">
             <article v-for="group in expenseGroups" :key="group.key" class="expense-panel">
               <header><BillingMetricLabel :label="groupNames[group.key]" :hint="group.hint"/><strong>¥{{formatMoney(group.amount)}}</strong></header>
@@ -387,11 +419,11 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
                 <div v-if="pendingPayroll" class="expense-line pending-payroll"><BillingMetricLabel label="待审批工资" hint="按所选公司和工资月份读取；待审批金额仅供核对，不计入上方支出和净利润。"/><span>¥{{formatMoney(pendingPayroll)}}</span></div>
                 <span v-if="payrollError" class="payroll-hint">工资暂未读取</span><span v-else-if="!payrollLoading && !visiblePayroll.length" class="payroll-hint">所选月份暂无工资记录</span>
                 <el-button link type="primary" class="payroll-entry" :loading="payrollLoading" @click="payrollOpen=true">工资明细<span v-if="visiblePayroll.length">（{{visiblePayroll.length}}条）</span> →</el-button>
-                <span class="payroll-hint">总计仅含已入账费用；待审批工资不扣利润</span>
+                <span class="payroll-hint">已发放工资按归属月计成本，审批后不重复扣除</span>
               </template>
             </article>
           </div>
-          <div class="loss-review"><BillingMetricLabel label="退货与取消" hint="损失已包含在商品、物流和平台等费用中，仅在这里核对，不再重复扣除。未履约取消不默认记为损失，具体以实际记录为准。"/><el-button link type="primary" @click="showLossRecords('returns')">退货 / 拒收 →</el-button><el-button link type="primary" @click="showLossRecords('cancelled_pre_fulfillment')">取消订单 →</el-button><small>已含在费用中，不再扣一次</small></div>
+          <div class="loss-review"><BillingMetricLabel label="退货与取消" hint="这里核对订单记录的损失；商品、运费等若已在上方列支，不再重复加减。缺少来源或尚未入账的损失仍需另行核对。未履约取消不默认记为损失。"/><el-button link type="primary" @click="showLossRecords('returns')">退货 / 拒收 →</el-button><el-button link type="primary" @click="showLossRecords('cancelled_pre_fulfillment')">取消订单 →</el-button><small>核对已计入费用，避免重复扣除</small></div>
           <el-tooltip placement="top"><template #content>分类差额保留待核对，不重复扣费。退货损失可能含货值与运费，不作为另一类支出相加。</template><p v-if="unclassifiedDifference" class="group-note">待核对差额 ¥{{formatMoney(unclassifiedDifference)}} ⓘ</p></el-tooltip>
         </div>
       </div>
@@ -405,37 +437,16 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
         <el-table-column label="基本工资" align="right" width="120"><template #default="{row}">{{formatMoney(row.base)}}</template></el-table-column>
         <el-table-column label="公司缴费" align="right" width="120"><template #default="{row}">{{formatMoney(row.employer)}}</template></el-table-column>
         <el-table-column label="公司成本" align="right" width="120"><template #default="{row}">{{formatMoney(payrollCost(row))}}</template></el-table-column>
-        <el-table-column label="状态" width="100"><template #default="{row}"><el-tag :type="row.approval_status==='approved'?'success':'warning'">{{row.approval_status==='approved'?'已审批':'待审批'}}</el-tag></template></el-table-column>
+        <el-table-column label="状态" width="100"><template #default="{row}"><el-tag :type="row.approval_status==='approved'||row.cost_confirmed||Number(row.paid_amount||0)>0?'success':'warning'">{{row.approval_status==='approved'?'已入账':Number(row.paid_amount||0)>0?'已发待归档':row.cost_confirmed?'已确认待归档':'待确认'}}</el-tag></template></el-table-column>
         <el-table-column label="操作" width="110"><template #default="{row}"><el-button link type="primary" @click="router.push({path:'/finance/payroll',query:{month:row.month,companyId:String(row.company_id)}})">查看原记录</el-button></template></el-table-column>
       </el-table>
     </el-dialog>
     <el-dialog v-model="settlementOpen" title="结算" width="min(94vw, 520px)" destroy-on-close>
         <aside class="settlement-card">
-
-          <p>按 Ozon 财务入账状态区分；待结算单独展示，不作为成本再次扣除。</p>
-          <div class="settlement-value is-settled">
-            <BillingMetricLabel metric="accrued_profit" />
-            <b>¥{{ formatMoney(selectedSummary.accrued_profit) }}</b>
-          </div>
-          <div class="settlement-meta">
-            <BillingMetricLabel metric="accrued_order_count" />
-            <strong>{{ formatInteger(selectedSummary.accrued_order_count) }} 单</strong>
-          </div>
-          <div class="settlement-value is-pending">
-            <BillingMetricLabel metric="pending_profit" />
-            <b>¥{{ formatMoney(selectedSummary.pending_profit) }}</b>
-          </div>
-          <div class="settlement-meta">
-            <BillingMetricLabel metric="pending_order_count" />
-            <strong>{{ formatInteger(selectedSummary.pending_order_count) }} 单</strong>
-          </div>
-          <div class="settlement-meta">
-            <BillingMetricLabel metric="settlement_rate" />
-            <strong>{{ formatRatio(selectedSummary.settlement_rate) }}</strong>
-          </div>
-          <el-alert type="info" :closable="false" show-icon>
-            <template #title>公司共用经营费用只计入总体净利润，不自动分摊到店铺。</template>
-          </el-alert>
+          <p>按 Ozon 财务入账记录统计订单数量，不表示货款已到账。</p>
+          <div class="settlement-meta"><span>已入账</span><strong>{{formatInteger(selectedSummary.accrued_order_count)}} 单</strong></div>
+          <div class="settlement-meta"><span>待入账</span><strong>{{formatInteger(selectedSummary.pending_order_count)}} 单</strong></div>
+          <div class="settlement-meta"><BillingMetricLabel label="其他订单" hint="取消等尚无明确财务入账状态的订单，不默认记为已入账。"/><strong>{{formatInteger(Math.max(0,Number(selectedSummary.order_count||0)-Number(selectedSummary.accrued_order_count||0)-Number(selectedSummary.pending_order_count||0)))}} 单</strong></div>
         </aside>
     </el-dialog>
 
@@ -571,7 +582,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
           <el-table-column label="下单日期" width="115"><template #default="{ row }">{{ shanghaiDateText(row.ordered_at) }}</template></el-table-column>
           <el-table-column prop="posting_number" label="订单号" min-width="175" />
           <el-table-column prop="shop_name" label="店铺" min-width="130" />
-          <el-table-column prop="product_name" label="商品" min-width="200" />
+          <el-table-column v-if="!isCostRecord" prop="product_name" label="商品" min-width="200" />
           <el-table-column label="结算状态" width="110"><template #default="{ row }">{{ row.settlement_state === 'finance_accrued' ? '已结算' : '预估 / 待核实' }}</template></el-table-column>
           <el-table-column :label="editableOrderField ? '来源金额（CNY）' : recordItem?.label + '（CNY）'" min-width="160" align="right"><template #default="{ row }">{{ formatMoney(row[recordItem?.key]) }}</template></el-table-column>
           <el-table-column v-if="editableOrderField" label="账单金额" width="130" align="right"><template #default="{row}">{{formatMoney(orderCost(row))}}</template></el-table-column>
@@ -625,7 +636,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
 
     <el-dialog v-model="correctionDialog" title="更正费用" width="min(94vw,520px)" :close-on-click-modal="!correctionSaving">
       <el-alert type="info" :closable="false" title="填写这笔费用的最终金额；填0表示移除。系统保留来源金额并记录更正差额，只扣一次。"/>
-      <el-form label-position="top"><el-form-item label="公司"><el-select v-model="correctionForm.company_id"><el-option v-for="company in state.companies" :key="company.id" :label="company.name" :value="String(company.id)"/></el-select></el-form-item><el-form-item label="账单金额"><el-input-number v-model="correctionForm.amount" aria-label="更正后金额" :min="0" :precision="2"/></el-form-item><el-form-item label="原因"><el-input v-model="correctionForm.reason" aria-label="更正原因" type="textarea" maxlength="500"/></el-form-item></el-form>
+      <el-form label-position="top"><el-form-item label="公司"><el-select v-model="correctionForm.company_id"><el-option v-for="company in state.companies" :key="company.id" :label="company.name" :value="String(company.id)"/></el-select></el-form-item><el-form-item label="账单金额"><el-input-number v-model="correctionForm.amount" aria-label="更正后金额" :formatter="formatAmountInput" :parser="parseAmountInput" :min="0" :precision="2"/></el-form-item><el-form-item label="原因"><el-input v-model="correctionForm.reason" aria-label="更正原因" type="textarea" maxlength="500"/></el-form-item></el-form>
       <template #footer><el-button @click="correctionDialog=false">取消</el-button><el-button type="primary" :loading="correctionSaving" @click="saveCostCorrection()">保存</el-button></template>
     </el-dialog>
     <el-dialog v-model="expenseDialog" :title="expenseForm.id ? '编辑经营费用' : '补录经营费用'" width="680px" align-center>
@@ -640,7 +651,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
             </el-select>
           </el-form-item>
           <el-form-item label="费用金额（CNY）">
-            <el-input-number v-model="expenseForm.amount_cny" :precision="2" :min="0" controls-position="right" />
+            <el-input-number v-model="expenseForm.amount_cny" :formatter="formatAmountInput" :parser="parseAmountInput" :precision="2" :min="0" controls-position="right" />
           </el-form-item>
           <el-form-item label="发生时间">
             <el-date-picker v-model="expenseForm.expense_date" type="date" value-format="YYYY-MM-DD" />
@@ -793,3 +804,5 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
 <style scoped>.summary-grid{grid-template-columns:repeat(6,minmax(0,1fr))}@media(max-width:1100px){.summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:650px){.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}</style>
 
 <style scoped>.loss-review{display:flex;align-items:center;gap:24px;padding:16px 4px 0;flex-wrap:wrap}.loss-review small{color:var(--el-text-color-secondary)}</style>
+
+<style scoped>.billing-toolbar .year-input{width:110px;flex:0 0 110px}.billing-toolbar .month-input{width:90px;flex:0 0 90px}.billing-toolbar .company-input{width:155px}.billing-toolbar .shop-input{width:145px}.billing-toolbar :deep(.el-date-editor--daterange){width:250px;max-width:250px;flex:0 0 250px}</style>
