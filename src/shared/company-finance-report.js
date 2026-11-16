@@ -3,7 +3,7 @@ export const FINANCE_GROUPS = [
  {id:'income',name:'销售与其他收入',sign:1,metrics:['已确认商品销售额','销售退回冲减额','合作伙伴补贴收入','平台赔偿收入']},
  {id:'goods',name:'已售商品成本',sign:-1,metrics:['已售商品采购成本']},
  {id:'platform',name:'平台费用',sign:-1,metrics:['佣金','国际物流费','平台物流连接服务费','尾程派送费','点击广告费','星级商品推广费','一般收单支付服务费','国际货代合同管理服务费','国际运输合同缔约服务费','客户部分补偿扣款','缺件扣款','退货处理及货损费用','平台其他费用']},
- {id:'labor',name:'人工与社保',sign:-1,metrics:['工资','加班及补贴','公司承担社保','公司承担公积金']},
+ {id:'labor',name:'人工与社保',sign:-1,metrics:['工资','加班及补贴','公司承担社保','公司承担公积金','公司承担缴费']},
  {id:'premises',name:'场地费用',sign:-1,metrics:['场地租金','水电物业费']},
  {id:'software',name:'AI与软件费用',sign:-1,metrics:['AI使用费','软件订阅费']},
  {id:'office',name:'国内物流与办公设备费用',sign:-1,metrics:['国内物流费','办公耗材费','设备折旧费']},
@@ -22,7 +22,7 @@ export const UPLOAD_TYPES = [
  {value:'collection-cash',label:'连连入账 / 提现流水',kinds:['collection-cash'],shared:true,hint:'公司共用上传一次；流水按实际交易日期筛选，CNY与CNH分列。'},
  {value:'manual-expense',label:'公司或店铺费用 · 手工录入',hint:'单笔录入CNY金额并附账单、合同或付款记录；发票可随后作为配套凭证补传。工资从现有工资管理录入。'},
  {value:'support',label:'发票 / 配套凭证（仅归档）',hint:'仅补充凭证，不再记一笔费用。可关联已有业务单据；俄文发票不直接折算重复入账。'},
- {value:'payroll',label:'工资社保表（仅归档）',hint:'这里只存凭证；工资金额继续在工资管理核对，本页暂不重复导入。'}
+ {value:'payroll',label:'工资社保表（仅归档）',hint:'这里只存凭证；已审批工资自动进入公司报表，不重复记费。'}
 ];
 const round=n=>Math.round((n+Number.EPSILON)*100)/100;
 export function financePeriods(year,mode='month') {

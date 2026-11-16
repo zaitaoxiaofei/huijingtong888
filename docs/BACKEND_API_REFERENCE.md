@@ -2434,6 +2434,19 @@ Create or edit one current-enterprise payroll item without a workbook. Existing 
   - `404` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `POST /api/finance-submissions/payroll-delete`
+
+Delete a current-enterprise wage and its corresponding posted expense transactionally. Requires a reason and revision. Paid wages, linked vouchers, closed periods and inconsistent expenses block deletion. Retains before/after audit and payment history; company reports and monthly billing read the same remaining expense records.
+
+- Auth: `authenticated current-enterprise finance reviewer`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/finance-submissions/payroll-paid-batch`
 
 Atomically register up to 500 selected wages as fully paid using each row's current net pay. Rows already fully paid are skipped. Stale wage/payment snapshots or inaccessible rows reject the entire batch. Does not execute transfers or change booked salary expenses.

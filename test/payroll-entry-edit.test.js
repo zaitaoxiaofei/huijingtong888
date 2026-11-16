@@ -23,3 +23,8 @@ test('only finance reviewers use exact manual-entry and batch-payment routes',()
   assert.equal(authorizeApiRequest({_session:{...session,tenant:{...session.tenant,subscription_status:'trial'}},method:'POST'},path).allowed,false);
  }
 });
+
+test('payroll deletion remains an exact reviewer-only enterprise route',()=>{
+  assert.equal(financeSubmissionRoute(['api','finance-submissions','payroll-delete'],'POST'),'reviewer');
+  assert.equal(financeSubmissionRoute(['api','finance-submissions','payroll-delete','extra'],'POST'),null);
+});

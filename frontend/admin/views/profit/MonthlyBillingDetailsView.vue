@@ -384,7 +384,7 @@ onBeforeUnmount(() => { abortController?.abort(); recordController?.abort(); });
           <el-button class="erp-btn erp-btn-secondary" @click="router.push('/finance-center')">返回年度总览</el-button>
           <el-button class="erp-btn erp-btn-secondary" @click="capitalDrawer = true">采购支出与库存资金</el-button>
           <el-button class="erp-btn erp-btn-secondary" :icon="Plus" @click="openExpense(null, 'other')">补录费用</el-button>
-          <el-button class="erp-btn erp-btn-secondary" @click="router.push({path:'/finance/payroll',query:{month:state.dateRange[0].slice(0,7),companyId:state.companyId,action:'import'}})">补录本月工资</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="router.push({path:'/finance/payroll',query:{month:state.dateRange[0].slice(0,7),companyId:state.companyId,action:'import'}})">导入与审核工资</el-button><el-button class="erp-btn erp-btn-secondary" @click="router.push({path:'/finance/payroll',query:{month:state.dateRange[0].slice(0,7),companyId:state.companyId}})">查看与新增工资明细</el-button>
           <el-button class="erp-btn erp-btn-primary" type="primary" :icon="View" @click="openOrderDetails()">订单明细</el-button>
         </div>
       </div>

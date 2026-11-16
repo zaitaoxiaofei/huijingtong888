@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
@@ -10,7 +10,7 @@ import { shanghaiDateKey } from "../../utils/shanghai-date.js";
 
 const PayrollItemEditor = defineAsyncComponent(() => import("../../components/finance/PayrollItemEditor.vue"));
 const FinanceImportPanel = defineAsyncComponent(() => import("../../components/finance/FinanceImportPanel.vue"));
-const auth = useAuthStore(), route = useRoute(), today = shanghaiDateKey();
+const auth = useAuthStore(), route = useRoute(), router = useRouter(), today = shanghaiDateKey();
 const routeMonth = () => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(route.query.month || "")) ? String(route.query.month) : today.slice(0,7);
 const allowed = computed(() => canAccessPage(auth.user, "/finance/payroll"));
 const year = ref(routeMonth().slice(0, 4)), companyId = ref(String(route.query.companyId || "all")), companies = ref([]), rows = ref([]), selectedMonth = ref(routeMonth());
@@ -34,6 +34,22 @@ const details = computed(() => rows.value.filter(row => row.month === selectedMo
 const annual = computed(() => ({ net: sum(rows.value, "net"), cost: totalCost(rows.value), employer: sum(rows.value, "employer"), paid: sum(rows.value, "paid_amount"), remaining: sum(rows.value, "remaining_amount") }));
 const employerFields = PAYROLL_EMPLOYER_FIELDS;
 const employeeFields = PAYROLL_EMPLOYEE_FIELDS;
+function openFinance(path) {
+  const query=path==='/finance/company-statements'?{company_id:companyId.value,month:selectedMonth.value}:{companyId:companyId.value,from:selectedMonth.value+'-01',to:selectedMonth.value+'-'+String(new Date(Date.UTC(Number(selectedMonth.value.slice(0,4)),Number(selectedMonth.value.slice(5)),0)).getUTCDate())};
+  router.push({path,query});
+}
+async function deleteItem(row) {
+  const token=generation;
+  try {
+    const {value}=await ElMessageBox.prompt(`删除${row.person_name}的工资明细，并同步移除对应已入账费用。修改历史会保留。已有发放金额、凭证或已关账的记录需先核对。`, '删除工资明细', {inputPlaceholder:'填写删除原因',inputValidator:v=>Boolean(String(v||'').trim())&&String(v).length<=500||'请填写原因，最多500字',confirmButtonText:'确认删除',cancelButtonText:'取消',type:'warning'});
+    if(token!==generation)return;
+    batchSaving.value=true;
+    await apiClient.post('/api/finance-submissions/payroll-delete',{item_id:row.id,expected_revision:row.revision,reason:value});
+    if(token!==generation)return;
+    batchSaving.value=false;ElMessage.success('工资及对应费用已同步删除');await load();
+  }catch(error){if(token===generation&&!['cancel','close'].includes(error))ElMessage.error(error.message||'删除失败');}
+  finally{if(token===generation)batchSaving.value=false;}
+}
 const selectable = row => Number(row.remaining_amount) > 0;
 function openDetails(month) { if(loading.value || batchSaving.value)return; selectedMonth.value = month; selectedRows.value = []; detailsOpen.value = true; }
 function openEditor(row = null, copy = false) { editingRow.value = row ? JSON.parse(JSON.stringify(row)) : null; copyingRow.value = copy; editorOpen.value = true; }
@@ -106,7 +122,8 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
 
 <template>
   <div v-if="allowed" class="payroll-ledger">
-    <header class="ledger-header"><div><h1>工资管理</h1><p>按公司查看全年1—12月工资汇总，点击明细查看或编辑记录。</p></div><div class="detail-actions"><el-button @click="openEditor()">新增工资明细</el-button><el-button type="primary" @click="importOpen=true">导入工资表</el-button></div></header>
+    <header class="ledger-header"><div><h1>工资管理</h1><p>按公司查看全年1—12月工资汇总，点击明细查看或编辑记录。</p></div><div class="detail-actions"><el-button type="primary" @click="openEditor()">新增工资明细</el-button><el-button type="primary" @click="importOpen=true">导入工资表</el-button></div></header>
+    <div class="detail-actions"><el-button :disabled="companyId==='all'" title="先选择归属公司，再查看公司账单" @click="openFinance('/finance/company-statements')">公司账单与凭证</el-button><el-button @click="openFinance('/profit/monthly-billing')">月度账单</el-button><el-button @click="router.push({path:'/finance-center',query:{companyId,year}})">经营总览</el-button></div>
     <el-alert type="info" :closable="false" title="可直接新增工资明细，也可导入工资表。点击月份查看明细、批量登记发放或逐条编辑；审批通过后计入工资成本，发放登记不重复扣费。" />
     <div class="ledger-filters"><el-date-picker v-model="year" type="year" value-format="YYYY" format="YYYY年" aria-label="工资年份" :clearable="false" @change="load" /><el-select v-model="companyId" aria-label="工资归属公司" @change="load"><el-option label="全部公司" value="all" /><el-option v-for="company in companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select><el-button :loading="loading" @click="load">刷新</el-button></div>
     <el-alert v-if="errorText" :title="errorText" type="error" :closable="false" />
@@ -133,7 +150,7 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
     </section>
     <el-dialog v-model="detailsOpen" :title="selectedMonth + ' 工资明细'" width="min(96vw, 1540px)" :close-on-click-modal="!batchSaving" :close-on-press-escape="!batchSaving" :show-close="!batchSaving" destroy-on-close>
     <section class="details-section">
-      <div class="details-header"><div><h2>{{ selectedMonth }} 工资明细 · {{ details.length }}人</h2><p>勾选未发完的记录可批量登记；登记后仍可逐条编辑工资或修正已发金额。</p></div><div class="detail-actions"><el-button :disabled="batchSaving || loading" @click="openEditor()">新增一条</el-button><el-button :disabled="batchSaving" @click="importOpen=true">导入与审核</el-button><el-button type="primary" :disabled="!selectedRows.length || batchSaving || loading" :loading="batchSaving" @click="saveBatchPayment">批量登记发放{{ selectedRows.length ? `（${selectedRows.length}条）` : '' }}</el-button><el-select v-model="selectedMonth" :disabled="batchSaving" aria-label="明细月份" style="width:130px"><el-option v-for="month in months" :key="month.month" :value="month.month" :label="`${month.label}（${month.count}人）`" /></el-select><el-switch v-model="contributionDetails" active-text="工资与缴费明细" /><el-button :disabled="!details.length" @click="exportMonth">导出本月</el-button></div></div>
+      <div class="details-header"><div><h2>{{ selectedMonth }} 工资明细 · {{ details.length }}人</h2><p>勾选未发完的记录可批量登记；登记后仍可逐条编辑工资或修正已发金额。</p></div><div class="detail-actions"><el-button type="primary" :disabled="batchSaving || loading" @click="openEditor()">新增工资明细</el-button><el-button :disabled="batchSaving" @click="importOpen=true">导入与审核</el-button><el-button type="primary" :disabled="!selectedRows.length || batchSaving || loading" :loading="batchSaving" @click="saveBatchPayment">批量登记发放{{ selectedRows.length ? `（${selectedRows.length}条）` : '' }}</el-button><el-select v-model="selectedMonth" :disabled="batchSaving" aria-label="明细月份" style="width:130px"><el-option v-for="month in months" :key="month.month" :value="month.month" :label="`${month.label}（${month.count}人）`" /></el-select><el-switch v-model="contributionDetails" active-text="工资与缴费明细" /><el-button :disabled="!details.length" @click="exportMonth">导出本月</el-button></div></div>
       <el-table v-loading="loading" :data="details" empty-text="本月暂无记录，可点击新增一条，或导入工资表。" class="salary-details" max-height="60vh" @selection-change="value => selectedRows=value">
         <el-table-column type="selection" width="44" fixed :selectable="selectable" />
         <el-table-column prop="person_name" label="姓名" width="90" fixed /><el-table-column prop="company_name" label="公司" width="180" show-overflow-tooltip /><el-table-column v-if="contributionDetails" prop="department" label="部门" min-width="90" />
@@ -147,7 +164,7 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
         <el-table-column label="已发金额" width="110" align="right"><template #default="{row}">{{ money(row.paid_amount) }}</template></el-table-column>
         <el-table-column label="未发差额" width="110" align="right"><template #default="{row}">{{ money(row.remaining_amount) }}</template></el-table-column>
         <el-table-column label="审批状态" width="90"><template #default="{row}">{{ row.approval_status==='approved' ? '已审批' : '待审批' }}</template></el-table-column>
-        <el-table-column label="操作" width="230" fixed="right"><template #default="{row}"><el-button type="primary" link :disabled="batchSaving" :aria-label="`编辑${row.person_name}工资明细`" @click="openEditor(row)">编辑</el-button><el-button type="primary" link :disabled="batchSaving" @click="openEditor(row,true)">复制新增</el-button><el-button type="primary" link :disabled="batchSaving" :aria-label="`登记${row.person_name}已发金额`" @click="openPayment(row)">登记发放</el-button></template></el-table-column>
+        <el-table-column label="操作" width="290" fixed="right"><template #default="{row}"><el-button type="primary" link :disabled="batchSaving" :aria-label="`编辑${row.person_name}工资明细`" @click="openEditor(row)">编辑</el-button><el-button type="primary" link :disabled="batchSaving" @click="openEditor(row,true)">复制新增</el-button><el-button type="primary" link :disabled="batchSaving" :aria-label="`登记${row.person_name}已发金额`" @click="openPayment(row)">登记发放</el-button><el-button type="danger" link :disabled="batchSaving" @click="deleteItem(row)">删除</el-button></template></el-table-column>
       </el-table>
       <p v-if="contributionDetails && details.some(row => !row.employer_items)" class="ledger-note">部分旧导入记录未保存缴费分项，以“—”显示，合计金额仍保留。</p>
     </section>

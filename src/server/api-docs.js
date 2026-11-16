@@ -1395,6 +1395,11 @@ const endpoints = [
       requestBody: body(objectOf("company_id, month, person_name, department, base, tax, employer_items/employee_items (recorded parts) or legacy employer/employee totals. Optional item_id and required expected_revision for edits. Server derives net pay and company cost; client totals are not authoritative.")),
       responses: [response(200, "application/json", objectOf("ok, id, status and revision; identical create retries return unchanged.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
     }),
+    endpoint("POST", "/api/finance-submissions/payroll-delete", "Delete a current-enterprise wage and its corresponding posted expense transactionally. Requires a reason and revision. Paid wages, linked vouchers, closed periods and inconsistent expenses block deletion. Retains before/after audit and payment history; company reports and monthly billing read the same remaining expense records.", {
+      auth: "authenticated current-enterprise finance reviewer",
+      requestBody: body(objectOf("item_id, expected_revision and reason (1-500 characters).")),
+      responses: [response(200, "application/json", objectOf("ok")), response(400, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("POST", "/api/finance-submissions/payroll-paid-batch", "Atomically register up to 500 selected wages as fully paid using each row's current net pay. Rows already fully paid are skipped. Stale wage/payment snapshots or inaccessible rows reject the entire batch. Does not execute transfers or change booked salary expenses.", {
       auth: "authenticated current-enterprise finance reviewer",
       requestBody: body(objectOf("items: array of item_id, expected_paid_amount and expected_revision snapshots.")),

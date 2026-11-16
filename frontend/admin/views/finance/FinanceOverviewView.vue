@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRouter, useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import { ArrowRight, Refresh } from "@element-plus/icons-vue";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
@@ -9,10 +9,10 @@ import { canAccessPage } from "../../../../src/shared/permissions.js";
 import { shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 
 const FinanceCompanySettings = defineAsyncComponent(() => import("../../components/finance/FinanceCompanySettings.vue"));
-const auth = useAuthStore(), router = useRouter();
+const auth = useAuthStore(), router = useRouter(), route = useRoute();
 const today = shanghaiDateKey();
-const year = ref(today.slice(0, 4)), shopId = ref("all"), shops = ref([]), months = ref([]);
-const companyId = ref("all"), companies = ref([]);
+const year = ref(/^20\d{2}$/.test(String(route.query.year||''))?String(route.query.year):today.slice(0, 4)), shopId = ref("all"), shops = ref([]), months = ref([]);
+const companyId = ref(String(route.query.companyId||"all")), companies = ref([]);
 const loading = ref(false), loaded = ref(false), loadError = ref("");
 const inventory = ref(null), inventoryLoading = ref(false), inventoryError = ref("");
 const companyOpen = ref(false);
@@ -70,7 +70,7 @@ function bill(row) {
 watch(() => [auth.user?.id, auth.user?.tenant?.id, allowed.value, currentApiCacheScope()], () => {
   generation++; inventoryGeneration++; controller?.abort(); inventoryController?.abort();
   shops.value = []; months.value = []; inventory.value = null; loaded.value = false;
-  companyOpen.value = false; shopId.value = "all"; companyId.value = "all"; companies.value = [];
+  companyOpen.value = false; shopId.value = "all"; companyId.value = String(route.query.companyId||"all"); companies.value = [];
   refresh();
 }, { immediate: true });
 onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort(); inventoryController?.abort(); });
@@ -78,7 +78,7 @@ onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort()
 
 <template>
   <div v-if="allowed" class="finance-overview">
-    <header class="overview-header"><div><h1>经营总览</h1><p>经营结果与库存资金，一页看清。</p></div><div class="page-actions"><el-button text @click="companyOpen=true">公司设置</el-button></div></header>
+    <header class="overview-header"><div><h1>经营总览</h1><p>经营结果与库存资金，一页看清。</p></div><div class="page-actions"><el-button @click="router.push({path:'/finance/payroll',query:{companyId,month:year+'-'+today.slice(5,7)}})">工资明细</el-button><el-button text @click="companyOpen=true">公司设置</el-button></div></header>
     <section class="inventory-summary" aria-label="当前库存占用">
       <button class="inventory-total inventory-link" @click="capital()" aria-label="查看全部库存占用明细"><div class="section-label">当前库存占用 <span>全部公司</span></div><strong v-if="inventory && !inventoryError">{{ inventory.inventory_total_value==null?'待核实':`¥${money(inventory.inventory_total_value)}` }}</strong><span v-else class="metric-placeholder">{{ inventoryError ? '暂不可用' : '加载中' }}</span><p>国内可用库存 + FBP仓 + 采购在途 · 查看明细 →</p></button>
       <button v-for="(part,index) in inventoryParts" :key="part.value" class="inventory-part inventory-link" @click="capital(['local','fbp','transit'][index])" :aria-label="`查看${part.label}库存明细`"><span>{{ part.label }}</span><b>{{ inventory && !inventoryError ? (inventory[part.value]==null?'待核实':`¥${money(inventory[part.value])}`) : '—' }}</b><small>{{ inventory && !inventoryError ? (inventory[part.quantity]==null?'数量待核实':`${integer(inventory[part.quantity])} 件 · 查看明细 →`) : '当前库存' }}</small></button>
