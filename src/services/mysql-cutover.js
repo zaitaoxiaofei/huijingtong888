@@ -1,5 +1,6 @@
+import {billingOverviewCache} from './billing-overview-cache.js';
 import {financeAiCostPolicy,allocateBillingAiCost} from './finance-ai-cost-policy.js';
-import { billingProfitTotals, fixedAiExpenseTotal } from "../shared/billing-profit.js";
+import { billingProfitTotals, fixedAiExpenseTotal, billingMonthStatus } from "../shared/billing-profit.js";
 import {scopedBillingWithdrawal} from '../shared/billing-withdrawal.js';
 import {billingDrilldown,withBillingCostAdjustments} from './billing-drilldown.js';
 import {readBillingProjection,billingProjectionDeltas,billingCostKeys,billingAllocationSale,BILLING_PROJECTION_VERSION} from './billing-ledger-projection.js';
@@ -28204,13 +28205,15 @@ async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
   return months;
 }
 
-async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: requestedCompany, includeOverviewAi=false, aiCostPolicy=null }) {
+async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: requestedCompany, includeOverviewAi=false, aiCostPolicy=null, forceRefresh=false }) {
   const from = ranges[0].from, to = ranges.at(-1).to;
   await ensureFinanceCenterSchema();
   const companies = await mysqlQuery(`SELECT c.id,c.name FROM finance_companies c WHERE c.status!='deleted' AND ${monthlyFinanceTenantPredicateMysql("c", tenantScope)} ORDER BY c.id`);
   const companyId = requestedCompany && requestedCompany !== "all" ? Number(requestedCompany) : 0;
   if (companyId && (!Number.isSafeInteger(companyId) || !companies.some(c => Number(c.id) === companyId))) throw Object.assign(new Error("公司不存在或不属于当前企业"), { statusCode: 404 });
   if (requestedCompany && requestedCompany !== "all" && !companyId) throw Object.assign(new Error("公司标识无效"), { statusCode: 400 });
+  const cacheKey=JSON.stringify({tenantId:tenantScope.id,defaultTenant:tenantScope.defaultTenant,companyId,shopId,ranges,selectedMonthKey,includeOverviewAi,aiCostPolicy});
+  return billingOverviewCache.read(cacheKey,async()=>{
   const [ranking, expenses, ai,projection,withdrawalAssignments] = await Promise.all([
     profitRankingMysql({ dimension: "shop", from, to, shopId, fast: "1" }, tenantId, { groupByMonth: true, companyId }),
     annualBillingExpensesMysql(from, to, shopId, tenantScope, companyId),
@@ -28235,11 +28238,12 @@ async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMon
     Object.assign(summary,scopedBillingWithdrawal(byMonth.get(range.month_key)||[],expense.expense_totals||[],withdrawalAssignments,companyId));
     Object.assign(summary,billingProfitTotals(summary,expense.expense_totals||[]));
     summary.net_profit_margin = summary.net_profit==null?null:summary.revenue ? summary.net_profit / summary.revenue : 0;
-    return { ...range, label: `${Number(range.month_key.slice(5))}月`, summary, expense_totals:expense.expense_totals||[], procurement_inventory: {}, ai_usage: ai ? {...(ai.available?(ai.months[range.month_key]||{request_count:0,cost:0}):{request_count:null,cost:null}),available:ai.available,scope:'enterprise'} : {} };
+    return { ...range, completion_status:billingMonthStatus(summary,range.month_key,todayDateKeyMysql()), label: `${Number(range.month_key.slice(5))}月`, summary, expense_totals:expense.expense_totals||[], procurement_inventory: {}, ai_usage: ai ? {...(ai.available?(ai.months[range.month_key]||{request_count:0,cost:0}):{request_count:null,cost:null}),available:ai.available,scope:'enterprise'} : {} };
   });
   return { year, fromMonth, toMonth, selectedMonth, selectedMonthKey, shopId, companyId: companyId || "all", companies,
     shops: shops.map(shop => ({ id: shop.id, name: shop.name })), months,
     selected: months.find(row => row.month_key === selectedMonthKey) || months[0] };
+  },{force:forceRefresh});
 }
 
 async function monthlyBillingPendingByShopMysql(from = "", to = "", shopId = "", scope, companyId = 0) {
@@ -28826,7 +28830,7 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   }
   const selectedMonthKey = `${year}-${String(selectedMonth).padStart(2, "0")}`;
   const overviewOnly = query.overviewOnly === "1";
-  if (overviewOnly) return annualBillingOverviewMysql({ ranges: monthRanges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: query.companyId || query.company_id, includeOverviewAi:query.includeOverviewAi==='1',aiCostPolicy });
+  if (overviewOnly) return annualBillingOverviewMysql({ ranges: monthRanges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: query.companyId || query.company_id, includeOverviewAi:query.includeOverviewAi==='1',aiCostPolicy,forceRefresh:query.refresh==='1' });
 
   const monthRows = await Promise.all(monthRanges.map(async (range) => {
     const includeOrders = (query.includeOrders === "1" || query.include_orders === "1") && range.month_key === selectedMonthKey;

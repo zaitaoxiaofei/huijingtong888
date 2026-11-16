@@ -38,7 +38,7 @@ const inventoryParts = [
   { label: "FBP仓", value: "fbp_inventory_value", quantity: "fbp_inventory_quantity" },
   { label: "采购在途", value: "in_transit_value", quantity: "in_transit_quantity" }
 ];
-async function load() {
+async function load(force=false) {
   const token = ++generation;
   controller?.abort(); controller = new AbortController();
   loadError.value = "";
@@ -46,7 +46,7 @@ async function load() {
   loading.value = true; loaded.value = false;
   try {
     const end = year.value === today.slice(0, 4) ? Number(today.slice(5, 7)) : 12;
-    const response = await apiClient.get(`/api/monthly-billing-details?year=${year.value}&fromMonth=1&toMonth=${end}&companyId=${encodeURIComponent(companyId.value)}&shopId=${encodeURIComponent(shopId.value)}&overviewOnly=1&includeOverviewAi=1`, { noCache: true, signal: controller.signal });
+    const response = await apiClient.get(`/api/monthly-billing-details?year=${year.value}&fromMonth=1&toMonth=${end}&companyId=${encodeURIComponent(companyId.value)}&shopId=${encodeURIComponent(shopId.value)}&overviewOnly=1&includeOverviewAi=1${force===true?'&refresh=1':''}`, { noCache: true, signal: controller.signal });
     if (token !== generation || !allowed.value) return;
     months.value = response.months || []; shops.value = response.shops || []; companies.value = response.companies || []; loaded.value = true;
   } catch (error) { if (token === generation && error.name !== "AbortError") loadError.value = error.message || "经营账单加载失败"; }
@@ -92,17 +92,17 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",load); g
         <el-date-picker v-model="year" type="year" value-format="YYYY" format="YYYY年" aria-label="经营年份" :clearable="false" :disabled-date="date => date.getFullYear() > Number(today.slice(0,4)) || date.getFullYear()<2020" @change="load" />
         <el-select v-model="companyId" aria-label="公司筛选" class="company-filter" @change="shopId='all'; load()"><el-option label="全部公司" value="all" /><el-option v-for="company in companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select>
         <el-select v-model="shopId" aria-label="店铺筛选" @change="load"><el-option label="全部店铺" value="all" /><el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" /></el-select>
-        <el-button text :icon="Refresh" :loading="loading" aria-label="刷新经营账单" @click="load" /><el-button type="primary" @click="router.push('/profit/monthly-billing')">自选日期查账</el-button>
+        <el-button text :icon="Refresh" :loading="loading" aria-label="刷新经营账单" @click="load(true)" /><el-button type="primary" @click="router.push('/profit/monthly-billing')">自选日期查账</el-button>
       </div></div>
       <div v-if="loadError" class="statement-error"><span>{{ loadError }}</span><el-button link type="primary" @click="load">重新加载</el-button></div>
       <template v-else>
-        <div class="annual-totals"><div v-for="card in overviewCards" :key="card.key"><BillingMetricLabel :label="'累计'+card.label" :hint="card.hint"/><strong :class="{negative:loaded&&totals[card.key]<0}">{{loaded?amountText(totals[card.key],card.key):'—'}}</strong><small>{{card.key==='ai_cost'?'按公司归属计费 · 估算':' '}}</small></div></div>
+        <div class="annual-totals"><div v-for="card in overviewCards" :key="card.key"><BillingMetricLabel :label="'累计'+card.label" :hint="card.hint"/><strong :class="{negative:loaded&&totals[card.key]<0}">{{loaded?amountText(totals[card.key],card.key):'—'}}</strong><small>{{card.key==='ai_cost'?'按公司归属计费 · 估算':card.key==='net_profit'&&totals.net_profit_provisional?'暂估 · '+totals.income_pending_count+'单退款待核对':' '}}</small></div></div>
         <el-skeleton v-if="!loaded" class="statement-skeleton" :rows="8" animated />
         <el-table v-else :data="calendar" row-key="month_key" class="month-table">
           <el-table-column type="expand" width="38"><template #default="{row}"><div v-if="!row.future&&row.summary" class="month-costs"><button v-for="cost in costDetails(row)" :key="cost.key" @click="bill(row)"><BillingMetricLabel :label="cost.label" :hint="cost.hint"/><b>{{amountText(cost.amount)}}</b></button></div><p v-else class="statement-note">该月份尚无账单</p></template></el-table-column>
-          <el-table-column label="月份" min-width="145"><template #default="{row}"><div class="month-cell"><el-button link @click="bill(row)">{{ row.label }}</el-button><span v-if="row.future">尚未开始</span><span v-else-if="row.month_key===today.slice(0,7)" class="current-month">进行中</span></div></template></el-table-column>
+          <el-table-column label="月份" min-width="145"><template #default="{row}"><div class="month-cell"><el-button link @click="bill(row)">{{ row.label }}</el-button><span v-if="row.future">尚未开始</span><span v-else-if="row.completion_status==='completed'" class="current-month">已完成</span><span v-else-if="row.month_key===today.slice(0,7)" class="current-month">进行中</span><span v-else-if="row.completion_status==='pending'">待核对</span></div></template></el-table-column>
           <el-table-column label="订单数" align="right" min-width="100"><template #default="{row}">{{ row.future ? '—' : integer(row.summary?.order_count) }}</template></el-table-column>
-          <el-table-column v-for="key in ['revenue','order_profit','net_profit','recorded_expenses','ai_cost']" :key="key" align="right" :min-width="key==='recorded_expenses'?150:140"><template #header><BillingMetricLabel :label="overviewCards.find(c=>c.key===key).label" :hint="overviewCards.find(c=>c.key===key).hint"/></template><template #default="{row}"><el-button v-if="!row.future" link :class="{negative:scopedAmounts(row)[key]<0}" @click="bill(row)">{{row.summary?amountText(scopedAmounts(row)[key],key):'待补'}}</el-button><span v-else>—</span></template></el-table-column>
+          <el-table-column v-for="key in ['revenue','order_profit','net_profit','recorded_expenses','ai_cost']" :key="key" align="right" :min-width="key==='recorded_expenses'?150:140"><template #header><BillingMetricLabel :label="overviewCards.find(c=>c.key===key).label" :hint="overviewCards.find(c=>c.key===key).hint"/></template><template #default="{row}"><el-button v-if="!row.future" link :class="{negative:scopedAmounts(row)[key]<0}" @click="bill(row)">{{row.summary?amountText(scopedAmounts(row)[key],key):'待补'}}<small v-if="key==='net_profit'&&scopedAmounts(row).net_profit_provisional" class="profit-provisional">暂估 · {{scopedAmounts(row).income_pending_count}}单待核对</small></el-button><span v-else>—</span></template></el-table-column>
           <el-table-column label="" width="66"><template #default="{row}"><el-button v-if="!row.future" text :icon="ArrowRight" :aria-label="`查看${row.label}账单`" @click.stop="bill(row)" /></template></el-table-column>
         </el-table>
       </template>
@@ -121,4 +121,8 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",load); g
 @media(max-width:1100px){.inventory-summary{gap:16px;padding:24px 22px 42px}.inventory-link{border:0;background:none;color:inherit;text-align:left;font:inherit;cursor:pointer}.inventory-link:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:5px}.inventory-link:hover{color:var(--el-color-primary)}.inventory-total strong{font-size:26px}.inventory-part{padding-left:16px}.inventory-part b{font-size:18px}.annual-totals{margin:0 20px 10px;padding:20px}.annual-totals strong{font-size:20px}.statement-header{padding:22px 20px}.month-table{width:calc(100% - 40px);margin:0 20px}}
 @media(max-width:720px){.finance-overview{gap:16px}.overview-header{flex-wrap:wrap}.overview-header h1{font-size:20px}.inventory-summary{grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;padding:22px 18px 42px}.inventory-total{grid-column:1/-1}.inventory-part{padding-left:0;border-left:0}.inventory-part b{font-size:15px}.annual-totals{grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.statement-filters{width:100%;justify-content:flex-start}.statement-note{padding:16px 22px}.month-table{width:calc(100% - 24px);margin:0 12px}.statement-header{padding:20px}.inventory-status{right:14px}}
 .annual-totals small{font-size:11px;color:var(--el-text-color-secondary)}.month-costs{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;padding:18px 24px;background:var(--el-fill-color-lighter)}.month-costs button{display:grid;gap:10px;border:0;background:var(--el-bg-color);border-radius:8px;padding:16px;text-align:left;color:inherit;cursor:pointer}.month-costs b{font-size:16px;font-variant-numeric:tabular-nums}.month-costs button:hover{color:var(--el-color-primary)}.page-actions{flex-wrap:wrap}
+</style>
+
+<style scoped>
+.profit-provisional{display:block;font-size:11px;margin-left:8px;color:var(--el-text-color-secondary);}
 </style>

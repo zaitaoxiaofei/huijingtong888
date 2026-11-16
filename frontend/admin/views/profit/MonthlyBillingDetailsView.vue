@@ -1,5 +1,5 @@
 <script setup>
-import { billingProfitTotals } from "../../../../src/shared/billing-profit.js";
+import { billingProfitTotals, billingNetProfitDisplay } from "../../../../src/shared/billing-profit.js";
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -114,6 +114,7 @@ const expenseForm = reactive({
 
 const selectedPeriodTitle = computed(() => `${state.dateRange?.[0] || "-"} 至 ${state.dateRange?.[1] || "-"}`);
 const selectedSummary = computed(() => ({...(state.month?.summary||{}),...billingProfitTotals(state.month?.summary||{},expenseRows.value)}));
+const selectedNetProfit = computed(() => billingNetProfitDisplay(selectedSummary.value));
 const procurementInventory = computed(() => state.month?.procurement_inventory || {});
 const aiUsage = computed(() => state.month?.ai_usage || {});
 const aiUsagePeople = computed(() => Array.isArray(aiUsage.value.people) ? aiUsage.value.people : []);
@@ -417,12 +418,12 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
     </section>
     <section v-loading="state.loading" class="billing-overview">
       <el-alert v-if="selectedSummary.disposed_return_count" :title="selectedSummary.disposed_return_count+'单已退货销毁，已冲减销售收入 ¥'+formatMoney(selectedSummary.disposed_revenue_removed)+'；商品成本保留，费用按扣款与返还净额计入。'" type="info" :closable="false"/>
-      <el-alert v-if="selectedSummary.income_pending_count" :title="selectedSummary.income_pending_count+'单售后收入仍待核对；已退货销毁的收入已归零，不受退款账单缺失影响。'" type="warning" :closable="false"/>
+      <el-alert v-if="selectedSummary.income_pending_count" :title="selectedSummary.income_pending_count+'单退款收入尚未对齐；净利润按现有账单暂估，补齐退款后更新。'" type="warning" :closable="false"/>
       <div class="summary-grid">
         <button class="summary-card interactive" @click="openOrderDetails()"><BillingMetricLabel label="订单" :hint="billingMetrics.order_count.hint"/><strong>{{formatInteger(selectedSummary.order_count)}}</strong><small>查看订单 →</small></button>
         <button class="summary-card interactive" @click="showGroupItem(incomeGroup.children[0])"><BillingMetricLabel label="营业额" :hint="billingMetrics.revenue.hint"/><strong>¥{{formatMoney(selectedSummary.revenue)}}</strong><small>查看收入 →</small></button>
         <div class="summary-card"><BillingMetricLabel metric="order_profit"/><strong>¥{{formatMoney(selectedSummary.order_profit)}}</strong><small>订单相关费用已扣除</small></div>
-        <div class="summary-card is-profit"><BillingMetricLabel label="净利润" :hint="billingMetrics.net_profit.hint"/><strong :class="{'negative-money':Number(selectedSummary.net_profit)<0}">{{selectedSummary.net_profit==null?'待核定':'¥'+formatMoney(selectedSummary.net_profit)}}</strong><small>{{selectedSummary.net_profit_margin==null?'待核定':formatRatio(selectedSummary.net_profit_margin)}} 净利率</small></div>
+        <div class="summary-card is-profit"><BillingMetricLabel label="净利润" :hint="billingMetrics.net_profit.hint"/><strong :class="{'negative-money':Number(selectedNetProfit.value)<0}">{{selectedNetProfit.value==null?'待核定':'¥'+formatMoney(selectedNetProfit.value)}}</strong><small>{{selectedNetProfit.value==null?'待核定':formatRatio(selectedSummary.revenue?selectedNetProfit.value/selectedSummary.revenue:0)}} 净利率<span v-if="selectedNetProfit.provisional"> · 暂估（{{selectedNetProfit.pending_count}}单退款待核对）</span></small></div>
         <button class="summary-card interactive" @click="shopsOpen=true"><span>店铺</span><strong>{{shopRows.length}}</strong><small>查看账单 →</small></button>
         <button class="summary-card interactive" @click="settlementOpen=true"><BillingMetricLabel label="入账进度" hint="已入账订单数 ÷ 所选范围的订单总数，按Ozon财务记录识别，不是银行到账比例。取消订单可能不产生入账记录。"/><strong>{{formatRatio(entryProgress)}}</strong><small>查看结算 →</small></button>
 
@@ -539,10 +540,10 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
           <template #default="{ row }">{{ formatMoney(row.grouped_expense_total) }}</template>
         </el-table-column>
         <el-table-column prop="net_profit" :label="billingMetrics.net_profit.label" min-width="118" align="right"><template #header><BillingMetricLabel metric="net_profit" /></template>
-          <template #default="{ row }"><strong :class="{ 'negative-money': Number(row.net_profit || 0) < 0 }">{{ row.net_profit==null?'待核定':formatMoney(row.net_profit) }}</strong></template>
+          <template #default="{ row }"><strong :class="{ 'negative-money': Number(billingNetProfitDisplay(row).value) < 0 }">{{ billingNetProfitDisplay(row).value==null?'待核定':formatMoney(billingNetProfitDisplay(row).value) }}<small v-if="billingNetProfitDisplay(row).provisional"> · 暂估</small></strong></template>
         </el-table-column>
         <el-table-column :label="billingMetrics.net_profit_margin.label" width="106" align="right"><template #header><BillingMetricLabel metric="net_profit_margin" /></template>
-          <template #default="{ row }">{{ formatRatio(row.revenue ? Number(row.net_profit || 0) / Number(row.revenue) : 0) }}</template>
+          <template #default="{ row }">{{ billingNetProfitDisplay(row).value==null?'待核定':formatRatio(row.revenue ? billingNetProfitDisplay(row).value / Number(row.revenue) : 0) }}</template>
         </el-table-column>
         <el-table-column prop="operating_expense" :label="billingMetrics.operating_expense.label" min-width="112" align="right"><template #header><BillingMetricLabel metric="operating_expense" /></template>
           <template #default="{ row }">{{ formatMoney(row.operating_expense) }}</template>

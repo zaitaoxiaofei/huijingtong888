@@ -1,3 +1,4 @@
+import {billingSourceMutation,noteBillingSourceMutation,billingOverviewCache} from './services/billing-overview-cache.js';
 import {decodeListingMysqlResult,listingStorageReadConnection} from "./services/listing-json-sections.js";
 import mysql from "mysql2/promise";
 import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits, waitForMysqlInteractiveReads, withMysqlBackgroundReadAdmission, withMysqlInteractiveRead } from "./mysql-workload.js";
@@ -183,6 +184,7 @@ async function runMysqlQuery(sql, params) {
     await ensureMysqlSessionUtc(connection);
     await waitForMysqlInteractiveReads();
     const [rows] = decodeListingMysqlResult(await connection.query(sql, params));
+    noteBillingSourceMutation(sql,rows);
     return rows;
   } finally {
     releaseMysqlConnection(connection);
@@ -231,7 +233,9 @@ export async function mysqlExecute(sql, params = []) {
     const connection = await getMysqlConnection();
     try {
       await ensureMysqlSessionUtc(connection);
-      return await executeMysqlStatementWithRetry(connection, sql, params);
+      const result=await executeMysqlStatementWithRetry(connection, sql, params);
+      noteBillingSourceMutation(sql,result);
+      return result;
     } finally {
       releaseMysqlConnection(connection);
     }
@@ -252,6 +256,7 @@ export async function mysqlExecuteReadCommitted(sql, params = []) {
           await connection.beginTransaction();
           const [result] = decodeListingMysqlResult(await connection.execute(sql, params));
           await connection.commit();
+          noteBillingSourceMutation(sql,result);
           return result;
         } catch (error) {
           await connection.rollback();
@@ -283,6 +288,7 @@ export async function executeMysqlStatementWithRetry(connection, sql, params = [
 }
 
 export async function closeMysqlPool() {
+  billingOverviewCache.invalidate();
   const pools = [...mysqlPools.values()];
   mysqlPools.clear();
   await Promise.all(pools.map(pool => pool.end()));
@@ -299,8 +305,12 @@ async function runMysqlTransaction(callback) {
   try {
     await ensureMysqlSessionUtc(connection);
     await connection.beginTransaction();
-    const result = await callback(listingStorageReadConnection(connection));
+    let billingChanged=false;
+    const source=listingStorageReadConnection(connection);
+    const tracked=new Proxy(source,{get(target,key){const value=Reflect.get(target,key);if(['execute','query'].includes(key))return async(...args)=>{const result=await value.apply(target,args);if(billingSourceMutation(args[0],result[0]))billingChanged=true;return result;};return typeof value==='function'?value.bind(target):value;}});
+    const result = await callback(tracked);
     await connection.commit();
+    if(billingChanged)billingOverviewCache.invalidate();
     return result;
   } catch (error) {
     await connection.rollback();

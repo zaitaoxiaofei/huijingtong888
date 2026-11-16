@@ -25,3 +25,10 @@ test('FBP stocking freight is visible, grouped in logistics and deducted only fr
  const totals=billingProfitTotals(summary,expenses);assert.equal(totals.order_profit,887);assert.equal(totals.net_profit,854.7);
  assert.equal(Math.round(groups.slice(1).reduce((n,g)=>n+g.amount,0)*100),14530);
 });
+
+test('unmatched refunds expose a provisional profit without confirming it or losing known costs',()=>{
+ const summary={revenue:1000,purchase_cost:300,salary_expense:200,manual_expense:100,ai_cost_applied:true,ai_usage_cost:20,income_pending_count:5};
+ const result=billingProfitTotals(summary);assert.equal(result.net_profit,null);assert.equal(result.net_profit_margin,null);assert.equal(result.estimated_net_profit,368);
+ const confirmed=billingProfitTotals({...summary,income_pending_count:0});assert.equal(confirmed.net_profit,368);assert.equal(confirmed.estimated_net_profit,null);
+ const unavailable=billingProfitTotals({...summary,ai_usage_cost:null});assert.equal(unavailable.net_profit,null);assert.equal(unavailable.estimated_net_profit,null);
+});
