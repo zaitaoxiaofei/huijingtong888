@@ -25,9 +25,9 @@ export function buildBillingGroups(summary = {}, expenses = []) {
     { key: "goods", label: "商品成本", hint: "本期订单消耗的商品采购成本。", children: [metric("purchase_cost")] },
     { key: "logistics", label: "物流费用", hint: "国内运输、跨境运输及平台配送。", children: [editableCost("domestic_shipping_cost","domestic_shipping"), metric("international_shipping_cost", "跨境及平台配送费")] },
     { key: "platform", label: "平台费用", hint: "佣金、推广及其他服务费；物流和支付手续费另列。", children: [metric("commission_fee"), metric("ozon_service_fee"), { ...metric("advertising_cost"), source: "advertising" }] },
-    { key: "operating", label: "日常经营费用", hint: "场地、水电、包装、设备及软件等日常支出。", children: [editableCost("packaging_cost","packaging"), ...categories("operating")] },
+    { key: "operating", label: "日常经营费用", hint: "场地、水电、包装、设备及软件等日常支出。", children: [editableCost("packaging_cost","packaging"), ...categories("operating"),...(summary.ai_cost_company_id?[{key:"ai_metered",label:"系统图片按量费用",amount:summary.ai_cost_applied?summary.ai_usage_cost:0,source:"ai_usage",hint:"按企业归属设置计入公司费用；历史无调用记录月份使用已确认估算，不与固定GPT订阅重复。"}]:[])] },
     { key: "personnel", label: "人员费用", hint: "工资、临时工、补贴、团建和差旅。", children: categories("personnel") },
     { key: "funds", label: "支付与结算费用", hint: "平台支付、收款、提现、换汇和银行手续费。", children: [editableCost("other_fee","order_payment"), ...categories("funds")] }
   ];
-  return groups.map(group => ({ ...group, amount: group.children.reduce((sum, child) => sum + money(child.amount), 0) / 100 }));
+  return groups.map(group => ({ ...group, amount: group.children.some(c=>c.source==='ai_usage'&&c.amount==null)?null:group.children.reduce((sum, child) => sum + money(child.amount), 0) / 100 }));
 }

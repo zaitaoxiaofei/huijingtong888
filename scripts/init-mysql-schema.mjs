@@ -1,3 +1,4 @@
+import {FINANCE_AI_COST_SCHEMA} from '../src/services/finance-ai-cost-policy.js';
 import { FINANCE_CALIBRATION_SCHEMA } from '../src/services/finance-reconciliation-schema.js';
 import { OZON_RETURN_SCHEMA } from "../src/services/ozon-return-schema.js";
 import { WB_SCHEMA } from "../src/services/wb-schema.js";
@@ -27,6 +28,7 @@ import { FINANCE_SUBMISSIONS_SCHEMA } from "../src/services/finance-submissions-
 
 const mysqlSchemaSql = `
 ${FINANCE_CALIBRATION_SCHEMA};
+${FINANCE_AI_COST_SCHEMA}
 ${OZON_RETURN_SCHEMA};
 ${TENANT_LOGIN_DELIVERY_SCHEMA};
 ${TENANT_PURGE_SCHEMA.join(";\n")};

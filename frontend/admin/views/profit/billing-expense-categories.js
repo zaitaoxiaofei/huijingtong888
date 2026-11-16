@@ -1,4 +1,6 @@
 export const billingExpenseCategories = [
+  {value:"internet",label:"网络费用",hint:"宽带费用按公司分摊的当月费用，不重复计入全年付款。"},
+  {value:"ai_tokens",label:"外部AI Token费用",hint:"历史外部AI调用费用，估算与实际账单分别核对。"},
   { value:"order_payment",label:"订单手续费",hint:"订单支付手续费的补充与更正，不含公司提现或转账手续费。" },
   { value: "domestic_shipping", label: "国内运费", hint: "手工录入或更正的国内物流费用；订单已分摊的金额不要重复录入。" },
   { value: "packaging", label: "包装费用", hint: "补充包装费用或订单包装费用更正，不与订单已分摊金额重复录入。" },

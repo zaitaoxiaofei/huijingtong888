@@ -7,8 +7,8 @@ import { useAuthStore } from "../../stores/auth";
 import { canReviewFinance } from "../../../../src/shared/finance-submissions.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 
-const props = defineProps({ kind: { type: String, default: "reimbursement" }, month: {type:String,default:""}, companyId:{type:String,default:"all"} });
-const emit = defineEmits(["changed"]);
+const props = defineProps({ submissionId:{type:Number,default:null}, kind: { type: String, default: "reimbursement" }, month: {type:String,default:""}, companyId:{type:String,default:"all"} });
+const emit = defineEmits(["changed","closed"]);
 const auth = useAuthStore();
 const payroll = computed(() => props.kind === "payroll");
 const reviewer = computed(() => canReviewFinance(auth.user));
@@ -18,7 +18,7 @@ const rows = ref([]), status = ref(""), loading = ref(false), busy = ref(false),
 const preview = ref(null), upload = ref(null), detail = ref(null), detailOpen = ref(false), errorText = ref("");
 let generation = 0, listSequence = 0, detailSequence = 0, controller;
 const money = value => Number(value || 0).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const statusText = value => ({ pending: "待审批", approved: "已通过", rejected: "已退回" })[value] || value;
+const statusText = value => ({ pending: "待审批", approved: "已通过", rejected: "已退回",voided:"已作废（历史保留）" })[value] || value;
 const picture = image => `data:image/${image.extension};base64,${image.base64}`;
 function current(token) { return token === generation && allowed.value; }
 const templatePath = computed(() => `/api/finance-submissions/template?${new URLSearchParams({kind:props.kind,...(payroll.value?{month:props.month,company_id:props.companyId}:{})})}`);
@@ -85,26 +85,26 @@ async function review(nextStatus) {
   try {
     let note = "";
     if (nextStatus === "rejected") note = (await ElMessageBox.prompt("请说明需要补充或修改的内容", "退回申请", { confirmButtonText: "确认退回", cancelButtonText: "取消", inputValidator: value => Boolean(value?.trim()) || "请填写退回原因" })).value;
-    else await ElMessageBox.confirm("审批通过后，申请金额将计入对应日期的经营账单。", "确认审批通过", { type: "warning", confirmButtonText: "确认通过", cancelButtonText: "取消" });
+    else await ElMessageBox.confirm(`确认整批 ${detail.value.item_count} 笔、合计 ¥${money(detail.value.total_amount)} 按各自公司和月份计入费用。发放记录保持不变，不执行转账。`, "确认审批通过", { type: "warning", confirmButtonText: "确认通过", cancelButtonText: "取消" });
     if (!current(token)) return;
     busy.value = true;
-    await apiClient.post("/api/finance-submissions/review", { id, status: nextStatus, note });
+    await apiClient.post("/api/finance-submissions/review", { id, status: nextStatus, note, expected_revision:detail.value.revision });
     if (!current(token)) return;
     detailOpen.value = false; detail.value = null;
     ElMessage.success(nextStatus === "approved" ? "审批已通过" : "申请已退回"); await load(); emit("changed");
   } catch (error) { if (current(token) && error !== "cancel" && error !== "close") ElMessage.error(error.message || "审批失败"); }
   finally { if (current(token)) busy.value = false; }
 }
-watch(() => [auth.user?.id, auth.user?.tenant?.id, currentApiCacheScope(), props.kind, allowed.value, reviewer.value], () => {
+watch(() => [auth.user?.id, auth.user?.tenant?.id, currentApiCacheScope(), props.kind, props.submissionId, allowed.value, reviewer.value], () => {
   generation++; controller?.abort(); rows.value = []; preview.value = null; upload.value = null; detail.value = null; detailOpen.value = false; busy.value = false; errorText.value = "";
-  load();
+  if(props.submissionId)showDetail({id:props.submissionId});else load();
 }, { immediate: true });
 onBeforeUnmount(() => { generation++; controller?.abort(); });
 </script>
 
 <template>
   <section v-if="allowed" class="finance-import-panel">
-    <div class="import-toolbar">
+    <template v-if="!submissionId"><div class="import-toolbar">
       <div><h2>{{ payroll ? '工资表导入' : '填写表格，上传报销' }}</h2><p>{{ payroll ? '读取公司抬头与工资月份，核对后提交审批；人工成本为基本工资加单位承担费用。' : '下载企业模板，填写费用并插入凭证截图，上传核对后提交待审批。' }}</p></div>
       <div class="buttons">
         <el-button :icon="Download" @click="download(templatePath, `企业${label}模板.xlsx`)">下载{{ label }}模板</el-button>
@@ -134,16 +134,16 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
       <el-table-column label="提交时间" width="180"><template #default="{row}">{{ shanghaiDateTimeText(row.created_at, {assumeUtcWhenNaive:true}) }}</template></el-table-column>
       <el-table-column label="操作" width="160"><template #default="{row}"><el-button link type="primary" @click="showDetail(row)">{{ reviewer && row.status==='pending' ? '查看并审批' : '查看明细' }}</el-button><el-button link @click="download(`/api/finance-submissions/export?id=${row.id}`, `${label}明细-${row.id}.xlsx`)">导出</el-button></template></el-table-column>
     </el-table>
-    <el-drawer v-model="detailOpen" :title="`${label}申请详情`" size="min(100%, 1050px)" destroy-on-close>
+    </template><el-drawer v-model="detailOpen" @closed="submissionId&&emit('closed')" :title="`${label}申请详情`" size="min(100%, 1050px)" destroy-on-close>
       <template v-if="detail">
-        <div class="detail-summary"><el-tag>{{ statusText(detail.status) }}</el-tag><strong>{{ detail.applicant_name }} · {{ detail.item_count }}笔 · ¥{{ money(detail.total_amount) }}</strong><p v-if="detail.review_note">审批意见：{{ detail.review_note }}</p></div>
+        <div class="detail-summary"><p>{{detail.file_name}} · 本批包含全部列出的公司及月份</p><el-tag>{{ statusText(detail.status) }}</el-tag><strong>{{ detail.applicant_name }} · {{ detail.item_count }}笔 · ¥{{ money(detail.total_amount) }}</strong><p v-if="detail.review_note">审批意见：{{ detail.review_note }}</p></div>
         <article v-for="item in detail.items" :key="item.id" class="detail-item">
           <div><strong>{{ item.person_name }} · {{ item.company_name }}</strong><p>{{ item.expense_date }} · {{ item.category }} · {{ item.description }}</p><p v-if="item.note">备注：{{ item.note }}</p><b>¥{{ money(item.amount) }}</b></div>
           <p v-if="payroll">基本工资 ¥{{ money(item.base) }} ＋ 单位缴费 ¥{{ money(item.employer) }}；个人缴费 ¥{{ money(item.employee) }}，个税 ¥{{ money(item.tax) }}，实发 ¥{{ money(item.net) }}</p>
           <el-image v-for="(image, index) in item.images" :key="index" class="detail-receipt" :src="picture(image)" :preview-src-list="item.images.map(picture)" :initial-index="index" preview-teleported fit="contain" />
         </article>
       </template>
-      <template #footer><div v-if="detail" class="buttons"><el-button @click="download(`/api/finance-submissions/export?id=${detail.id}`, `${label}明细-${detail.id}.xlsx`)">导出明细与截图</el-button><template v-if="reviewer && detail.status==='pending'"><el-button :disabled="busy" @click="review('rejected')">退回修改</el-button><el-button type="primary" :loading="busy" :disabled="busy" @click="review('approved')">审批通过</el-button></template></div></template>
+      <template #footer><div v-if="detail" class="buttons"><el-button @click="download(`/api/finance-submissions/export?id=${detail.id}`, `${label}明细-${detail.id}.xlsx`)">导出明细与截图</el-button><template v-if="reviewer && detail.status==='pending'"><el-button :disabled="busy" @click="review('rejected')">退回修改</el-button><el-button type="primary" :loading="busy" :disabled="busy" @click="review('approved')">{{payroll?'确认本批并入账':'审批通过'}}</el-button></template></div></template>
     </el-drawer>
   </section>
 </template>

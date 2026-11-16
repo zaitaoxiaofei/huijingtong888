@@ -230,5 +230,35 @@ test("reimbursement and payroll approvals are transactional, idempotent and isol
       await service.deletePayrollItem({item_id:pending.id,expected_revision:row.revision,reason:'作废待审记录'},owner);
       assert.equal((await ledger()).rows.some(r=>Number(r.id)===pending.id),false);
     });
+    await t.test('pending paid batches can be explicitly voided with revision and permanent history, never silently approved or deleted',async()=>{
+      const added=await service.savePayrollItem(manual('作废整批测试',{month:'2026-05'}),owner),item=(await ledger()).rows.find(r=>Number(r.id)===added.id);
+      await service.recordPayrollPaid({item_id:item.id,paid_amount:item.net,expected_paid_amount:0,expected_revision:item.revision},owner);
+      const [parent]=await q('SELECT submission_id FROM finance_submission_items WHERE id=?',[item.id]);
+      const detail=await service.detail(parent.submission_id,owner);assert.equal(detail.status,'pending');assert.equal((await ledger()).rows.find(r=>Number(r.id)===item.id).submission_id,Number(parent.submission_id));
+      await assert.rejects(service.voidPayroll({id:parent.submission_id,expected_revision:detail.revision,reason:'旧表确认作废'},foreign),{statusCode:404});
+      await assert.rejects(service.voidPayroll({id:parent.submission_id,expected_revision:'0'.repeat(64),reason:'旧表确认作废'},owner),{statusCode:409});
+      const before=(await q('SELECT COUNT(*) n FROM finance_payroll_payment_updates WHERE item_id=?',[item.id]))[0].n;
+      await service.voidPayroll({id:parent.submission_id,expected_revision:detail.revision,reason:'用户确认旧批次作废，保留历史'},owner);
+      assert.equal((await service.detail(parent.submission_id,owner)).status,'voided');assert.equal((await ledger()).rows.some(r=>Number(r.id)===item.id),false);
+      assert.equal((await q('SELECT COUNT(*) n FROM finance_submission_items WHERE id=?',[item.id]))[0].n,1);assert.equal((await q('SELECT COUNT(*) n FROM finance_payroll_payment_updates WHERE item_id=?',[item.id]))[0].n,before);
+      assert.equal((await q("SELECT COUNT(*) n FROM finance_payroll_item_revisions WHERE item_id=? AND operation='void_batch'",[item.id]))[0].n,1);
+      await assert.rejects(service.review({id:parent.submission_id,status:'approved'},owner),{statusCode:409});
+    });
+    await t.test('approving a changed payroll snapshot fails before booking any cost',async()=>{
+      const added=await service.savePayrollItem(manual('版本保护',{month:'2026-04'}),owner),[parent]=await q('SELECT submission_id FROM finance_submission_items WHERE id=?',[added.id]);const detail=await service.detail(parent.submission_id,owner);
+      const row=(await ledger()).rows.find(r=>Number(r.id)===added.id);await service.savePayrollItem(manual('版本保护',{month:'2026-04',base:2100,item_id:added.id,expected_revision:row.revision}),owner);
+      await assert.rejects(service.review({id:parent.submission_id,status:'approved',expected_revision:detail.revision},owner),{statusCode:409});
+      const fresh=await service.detail(parent.submission_id,owner);await service.review({id:parent.submission_id,status:'approved',expected_revision:fresh.revision},owner);
+      assert.equal((await q("SELECT COUNT(*) n FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[added.id]))[0].n,1);
+    });
+    await t.test('approved payroll void preserves original expense, adds one protected reversal and keeps paid history',async()=>{
+      const added=await service.savePayrollItem(manual('已入账作废',{month:'2026-03'}),owner),[parent]=await q('SELECT submission_id FROM finance_submission_items WHERE id=?',[added.id]);await service.review({id:parent.submission_id,status:'approved'},owner);
+      let row=(await ledger()).rows.find(r=>Number(r.id)===added.id);await service.recordPayrollPaid({item_id:row.id,paid_amount:row.net,expected_paid_amount:0,expected_revision:row.revision},owner);const detail=await service.detail(parent.submission_id,owner),body={id:parent.submission_id,expected_revision:detail.revision,reason:'用户确认错误旧工资作废冲销'};
+      const [original]=await q("SELECT * FROM finance_expenses WHERE source_type='finance_submission' AND source_id=?",[added.id]);
+      await q("UPDATE finance_periods SET status='closed' WHERE company_id=20 AND month_key='2026-03'");await assert.rejects(service.voidPayroll(body,owner),{statusCode:409});await q("UPDATE finance_periods SET status='preparing' WHERE company_id=20 AND month_key='2026-03'");
+      const voucher=await query("INSERT INTO finance_vouchers(tenant_id,company_id,expense_id,voucher_type) VALUES(2,20,?,'salary')",[original.id]);await assert.rejects(service.voidPayroll(body,owner),{statusCode:409});await q('DELETE FROM finance_vouchers WHERE id=?',[voucher.insertId]);
+      await service.voidPayroll(body,owner);const rows=await q("SELECT * FROM finance_expenses WHERE source_id=? AND source_type IN('finance_submission','payroll_void') ORDER BY id",[added.id]);assert.equal(rows.length,2);assert.equal(rows.reduce((n,r)=>n+Number(r.amount_cny),0),0);assert.equal(Number(rows[0].amount_cny),Number(original.amount_cny));
+      const {deleteFinanceExpense}=await import('../src/services/finance-center.js');await assert.rejects(deleteFinanceExpense(rows[1].id,'2'),{statusCode:409});assert.equal((await q('SELECT COUNT(*) n FROM finance_payroll_payment_updates WHERE item_id=?',[added.id]))[0].n,1);await assert.rejects(service.voidPayroll(body,owner),{statusCode:409});
+    });
   }finally{await pool.end();await closeMysqlPool?.();await fixture.cleanup();}
 });
