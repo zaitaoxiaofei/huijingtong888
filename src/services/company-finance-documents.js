@@ -192,6 +192,22 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const ctx=await company(input,session),period=range(input);
    if(input.period_mode&&period.from.slice(0,4)!==period.to.slice(0,4))fail('期间分类报表请在同一年度内选择范围（from/to），跨年资料请分别导出');
    const documents=await getDocs(ctx,period),shops=await shopsFor(ctx,period),summary=summarizeImportedDocuments(documents,period);
+   // Read the same posted salary expense as monthly billing; vouchers never add a second cost.
+   const salaryExpenses=await query(`SELECT e.id,e.amount_cny,e.description,DATE_FORMAT(e.expense_date,'%Y-%m') month_key,e.source_type,e.source_id,i.detail_json
+     FROM finance_expenses e LEFT JOIN finance_submission_items i ON e.source_type='finance_submission' AND i.id=e.source_id AND i.tenant_id=? AND i.company_id=e.company_id
+     WHERE e.company_id=? AND e.category='salary' AND (e.tenant_id=? OR (?=1 AND (e.tenant_id IS NULL OR e.tenant_id=0)))
+       AND e.expense_date>=? AND e.expense_date<=LAST_DAY(CONCAT(?,'-01')) ORDER BY e.expense_date,e.id`,[ctx.tenantId,ctx.companyId,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0,period.from+'-01',period.to]);
+   for(const expense of salaryExpenses){
+     const detail=expense.detail_json?(typeof expense.detail_json==='string'?JSON.parse(expense.detail_json):expense.detail_json):null;
+     const reconciled=detail&&Number.isFinite(Number(detail.base))&&Number.isFinite(Number(detail.employer))&&Math.abs(rounded(Number(detail.base)+Number(detail.employer))-Number(expense.amount_cny))<0.005;
+     const contributions=detail?.employer_items,keys=['pension','medical','supplementary_medical','unemployment','injury','housing_fund'];
+     const known=contributions&&keys.every(k=>typeof contributions[k]==='number'&&Number.isFinite(contributions[k])&&contributions[k]>=0)&&Math.abs(rounded(keys.reduce((n,k)=>n+contributions[k],0))-Number(detail.employer))<0.005;
+     const parts=reconciled&&known?[['工资',Number(detail.base)],['公司承担社保',rounded(Number(detail.employer)-contributions.housing_fund)],['公司承担公积金',contributions.housing_fund]]:reconciled?[['工资',Number(detail.base)],['公司承担缴费',Number(detail.employer)]]:[['工资',Number(expense.amount_cny)]];
+     for(const [metric,amount] of parts){
+       const line={metric,amount,currency:'CNY',month:expense.month_key,shop_id:0,expense_id:expense.id,payroll_item_id:expense.source_type==='finance_submission'?expense.source_id:null,source_type:'payroll',source:expense.description+'；已审批入账，发放登记不重复计费',display_name:'工资管理 · '+expense.description,original_name:'工资费用记录',review_status:'pending',linked_evidence:[]};
+       summary.lines.push(line);summary.metrics[metric]=rounded((summary.metrics[metric]||0)+amount);
+     }
+   }
    const covered=new Set(documents.filter(d=>d.parse_status==='confirmed'&&payload(d).kind==='sales').map(d=>Number(d.shop_key)));
    const evidence=new Map();
    for(const d of documents){
@@ -199,9 +215,11 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     const key=Number(p.related_document_id),items=evidence.get(key)||[];
     items.push({document_id:d.id,original_name:d.original_name,display_name:p.display_name||d.original_name,attachment_url:d.attachment_url,review_status:d.review_status});evidence.set(key,items);
    }
-   for(const line of summary.lines)line.linked_evidence=evidence.get(Number(line.document_id))||[];
+   for(const line of summary.lines)line.linked_evidence=line.source_type==='payroll'
+     ?documents.filter(d=>d.parse_status==='confirmed'&&d.month_key===line.month&&payload(d).kind==='payroll').map(d=>({document_id:d.id,original_name:d.original_name,display_name:'本月工资资料 · '+(payload(d).display_name||d.original_name),attachment_url:d.attachment_url,review_status:d.review_status}))
+     :evidence.get(Number(line.document_id))||[];
    const year=period.from.slice(0,4),mode=['month','quarter','year'].includes(input.period_mode)?input.period_mode:'month';
-   return {matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d),categories:financeDocumentCategories(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:covered.size,company_complete:false},gaps:['仅汇总已确认导入资料，不与现有订单利润再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
+   return {matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d),categories:financeDocumentCategories(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:covered.size,company_complete:false},gaps:['汇总已确认导入资料与已入账工资；不与订单利润或月度账单再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
   },
   async export(input,session){
    const ctx=await company(input,session),period=range(input),report=await this.report(input,ctx.s);
@@ -209,8 +227,8 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const zip=new JSZip(),base=`${safeName(ctx.c.name)}/${period.from}_${period.to}`,book=new ExcelJS.Workbook();let bytes=0;
    const addSheet=(name,headers,rows)=>{const s=book.addWorksheet(name);s.addRow(headers);for(const r of rows)s.addRow(r.map(neutral));s.columns.forEach(c=>c.width=28);s.getRow(1).font={bold:true};};
    addSheet('期间分类汇总',['项目',...report.matrix.periods.map(p=>p.label)],report.matrix.rows.flatMap(g=>[[g.name,...report.matrix.periods.map(p=>g.cells[p.id])],...g.children.map(c=>[`  ${c.name}`,...report.matrix.periods.map(p=>c.cells[p.id])])]));
-   addSheet('公司已采集汇总',['项目','金额CNY','范围'],Object.entries(report.metrics).map(([k,v])=>[k,v,'仅已确认导入资料；公司未齐']));
-   addSheet('店铺费用来源',['月份','店铺ID','项目','金额','币种','原件编号','原文件名','提取位置'],report.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.currency,l.document_id,l.original_name,l.source]));
+   addSheet('公司已采集汇总',['项目','金额CNY','范围'],Object.entries(report.metrics).map(([k,v])=>[k,v,'已确认资料与已入账工资；公司未齐']));
+   addSheet('店铺费用来源',['月份','店铺ID','项目','金额','币种','原件编号','原文件名','提取位置','费用编号','工资明细编号'],report.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.currency,l.document_id,l.original_name,l.source,l.expense_id,l.payroll_item_id]));
    addSheet('凭证审核',['原件编号','月份','原文件名','显示名称','文件分类','上传类型','关联业务编号','导入状态','会计审核','审核意见'],report.documents.map(d=>[d.id,d.month_key,d.original_name,d.payload_json.display_name,(d.categories||[]).map(id=>FINANCE_FILE_CATEGORIES.find(c=>c.id===id)?.name||id).join('、'),d.payload_json.upload_type||'auto',d.payload_json.related_document_id,d.parse_status,d.review_status,d.review_note]));
    addSheet('手工草稿修改历史',['原件编号','修改时间（北京时间）','经办人ID','原项目','原金额CNY','原用途'],report.documents.flatMap(d=>(d.payload_json.preview_history||[]).map(h=>[d.id,new Date(h.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),h.person_id,h.manual?.metric,h.manual?.amount,h.manual?.note])));
    addSheet('会计审核历史',['原件编号','审核时间（北京时间）','经办人ID','状态','意见'],report.documents.flatMap(d=>(d.payload_json.review_history||[]).map(r=>[d.id,new Date(r.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),r.person_id,r.status,r.note])));

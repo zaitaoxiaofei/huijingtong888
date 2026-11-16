@@ -9,6 +9,7 @@ test('company import persistence, duplicate keys, closing, review and tenant iso
  const fixture=await createTenantMysqlFixture('company_docs');
  try{
   const q=fixture.query;
+  for(const ddl of (await import('../src/services/finance-submissions-schema.js')).FINANCE_SUBMISSIONS_SCHEMA)await q(ddl);
   await q("INSERT INTO tenants(id,slug,name,status) VALUES(2,'a','Tenant A','active'),(3,'b','Tenant B','active')");
   await q("INSERT INTO finance_companies(id,tenant_id,name) VALUES(20,2,'Company A'),(30,3,'Company B')");
   await q("INSERT INTO shops(id,name,tenant_id) VALUES(200,'Test Z',2),(300,'Test Foreign',3)");
