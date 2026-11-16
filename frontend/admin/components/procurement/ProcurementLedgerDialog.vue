@@ -412,7 +412,7 @@ async function save() {
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['purchases','history'].includes(props.initialTab)&&!inventoryOnly.value;showOrderBreakdown.value=false; activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !inventoryOnly.value ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !inventoryOnly.value && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; ++fbpVersion; stopFbpPoll(); fbpLoading.value = false; fbpSyncing.value = false; } }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { recordsVisible.value=props.initialTab==='movements'||(['purchases','history'].includes(props.initialTab)&&!inventoryOnly.value);showOrderBreakdown.value=false; activeTab.value = props.initialTab==='movements'?'movements':['current', 'purchases', 'history'].includes(props.initialTab) && !inventoryOnly.value ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !inventoryOnly.value && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; ++fbpVersion; stopFbpPoll(); fbpLoading.value = false; fbpSyncing.value = false; } }, { immediate: true });
 </script>
 
 <template>
