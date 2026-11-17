@@ -1,5 +1,5 @@
 import "./core.js";
-import {readRenderedOrders, readInvoicePage} from "./page-reader.js";
+import {readRenderedOrders, readInvoicePage, readPurchasePage} from "./page-reader.js";
 const C = globalThis.PddInvoice;
 const KEY = "pddInvoiceV1";
 const ALARM = "pdd-invoice-recover";
@@ -106,14 +106,14 @@ async function scan(message) {
   scanBusy = true;
   scanContext = {tabId: tab.id, accountId: a.id, fingerprint: a.fingerprint, from: message.from || "", to: message.to || ""};
   try {
-    const result = await pageMessage(tab.id, {type: "PDD_INVOICE_SCAN", loadMore: Boolean(message.loadMore), history: Boolean(message.history), from: message.from || "", to: message.to || ""});
+    const result = await pageMessage(tab.id, {type: "PDD_INVOICE_SCAN", loadMore: Boolean(message.loadMore), history: Boolean(message.history), purchase: Boolean(message.purchase), from: message.from || "", to: message.to || ""});
     await assertSession(a);
     if (!result?.ok) throw new Error(result?.error || "未能读取订单，请刷新拼多多页面后重试");
     a.orders = C.mergeOrders(a.orders, result.rows);
     store.lastScanProgress = {...scanContext.progress, running: false, note: result.note, complete: result.complete};
     a.scannedAt = Date.now();
     await save();
-    return {...await state(), scanProgress: store.lastScanProgress, scan: {count: result.count ?? result.rows.length, note: result.note}};
+    return {...await state(), scanProgress: store.lastScanProgress, scan: {count: result.count ?? result.rows.length, note: result.note, complete: Boolean(result.complete)}};
   } catch (error) {
     store.lastScanProgress = {...scanContext?.progress, running: false, complete: false, note: error.message};
     await save(); throw error;
@@ -216,6 +216,9 @@ async function runQueue() {
         if (["authorized", "confirmed"].includes(item.stage)) {
           try {
             await assertSession(a, q.fingerprint);
+            // Merchant applications navigate to chat and destroy the reply channel.
+            // Recover only through the official invoice detail, never by re-submitting.
+            await visit(q.tabId, C.invoiceUrl(item.id));
             const inspected = await pageMessage(q.tabId, {type: "PDD_INVOICE_INSPECT", orderId: item.id});
             if (inspected?.ok && ["submitted", "issued", "rejected"].includes(inspected.status)) {
               item.status = inspected.status; item.note = inspected.note; item.facts = inspected.facts;
@@ -277,6 +280,12 @@ async function handle(message, sender) {
     store.lastScanProgress = {...scanContext.progress, running: true};
     await save(); return {};
   }
+  if (message.type === "PDD_INVOICE_PURCHASE_PAGE") {
+    if (!scanContext || sender.tab?.id !== scanContext.tabId || sender.frameId !== 0 || !C.pddUrl(sender.url) || new URL(sender.url).pathname !== "/orders.html") throw new Error("没有匹配的采购读取任务");
+    await assertSession(account(scanContext.accountId), scanContext.fingerprint);
+    const [result] = await chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readPurchasePage, args: [String(message.offset || "")]});
+    return result?.result;
+  }
   if (message.type === "PDD_INVOICE_RENDERED_ROWS") {
     if (!scanContext || sender.tab?.id !== scanContext.tabId || sender.frameId !== 0 || !C.pddUrl(sender.url)) throw new Error("没有进行中的订单读取任务");
     await assertSession(account(scanContext.accountId), scanContext.fingerprint);
@@ -323,11 +332,19 @@ async function handle(message, sender) {
       // Read the purchase list first: invoice history often omits purchase dates,
       // shop names and paid amounts. Merge official records by exact order ID.
       const purchase = await chrome.tabs.create({url: C.ORIGIN + "/orders.html", active: false});
-      const loaded = await scan({...message, tabId: purchase.id, history: false, loadMore: true});
+      const loaded = await scan({...message, tabId: purchase.id, history: false, purchase: true, loadMore: true});
       if (loaded.scan.note.startsWith("已停止")) return loaded;
+      account(message.accountId).purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
+      await save();
       await chrome.tabs.update(purchase.id, {url: C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3", active: false});
       const tab = purchase;
-      return scan({...message, tabId: tab.id, history: true, loadMore: true});
+      const invoices = await scan({...message, tabId: tab.id, history: true, loadMore: true});
+      const a = account(message.accountId);
+      a.purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
+      store.lastScanProgress = {...invoices.scanProgress, running: false, purchaseComplete: Boolean(loaded.scan.complete),
+        note: `采购订单 ${loaded.scan.count} 笔，${loaded.scan.complete ? "已读到实际最早记录" : "本次尚未确认全部读完"}；${invoices.scan.note}`};
+      await save();
+      return {...await state(), scanProgress: store.lastScanProgress, scan: {count: loaded.scan.count, note: store.lastScanProgress.note}};
     }
     case "SCAN": return scan(message);
     case "IMPORT_INVOICES": {

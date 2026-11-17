@@ -69,6 +69,7 @@
     scanStopped = false;
     const error = blocker();
     if (error) throw new Error(error);
+    if (options.purchase) return scanPurchases(options);
     if (options.history) {
       if (!/commercial_pre_orders/.test(location.pathname)) throw new Error("请打开官方发票助手再同步采购订单");
       const pending = uniqueTarget(["待申请"]);
@@ -99,7 +100,7 @@
       const candidates = [...document.querySelectorAll('*')].filter(e => visible(e) && e.scrollHeight > e.clientHeight + 30 && /auto|scroll/.test(getComputedStyle(e).overflowY));
       const scroller = candidates.find(e => e.classList.contains('common-pop-panel')) || candidates.at(-1) || document.scrollingElement;
       const atEnd = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 5;
-      const terminal = /没有更多|暂无更多|已经到底|已显示全部|没有相关订单|暂无订单/.test(clean(scroller.innerText));
+      const terminal = /没有更多|暂无更多|已经到底|已显示全部|没有更多的订单|没有相关订单|暂无订单/.test(clean(scroller.innerText));
       const limited = /已显示近.{0,8}个月.{0,8}订单/.test(clean(scroller.innerText));
       if (atEnd && limited && idle >= 2) reason = "官方发票列表仅显示近 6 个月；更早记录请从采购订单核对，本次不标记全部历史已读完";
       if (atEnd && terminal && idle >= 2) { complete = true; reason = "平台已显示列表末尾"; }
@@ -114,6 +115,29 @@
     if (scanStopped) reason = "已停止，已读取记录已保存；可继续读取";
     if (!reason) reason = "读取达到本轮时间上限，已保存结果；请继续读取";
     return {rows: [], count: all.size, note: reason, complete};
+  }
+  async function scanPurchases(options) {
+    let offset = "", complete = false, count = 0, oldest = "", reason = "";
+    const seen = new Set(), deadline = Date.now() + 20 * 60 * 1000;
+    while (!scanStopped && Date.now() < deadline) {
+      if (blocker()) { reason = blocker(); break; }
+      const response = await rpc({type: "PDD_INVOICE_PURCHASE_PAGE", offset});
+      if (!response?.ok || !response.value) { reason = response?.error || "采购分页读取失败，请重试"; break; }
+      const page = response.value;
+      for (const row of page.rows) {
+        if (!seen.has(row.id)) { seen.add(row.id); count++; }
+        if (row.date && (!oldest || row.date < oldest)) oldest = row.date;
+      }
+      complete = page.complete;
+      const rows = page.rows.filter(row => !row.date || (!options.from || row.date >= options.from) && (!options.to || row.date <= options.to));
+      await rpc({type: "PDD_INVOICE_SCAN_PROGRESS", rows, progress: {count, loaded: count, oldest, complete,
+        note: complete ? `采购历史已读取到末尾，共 ${count} 笔` : `正在读取历年采购订单，已读取 ${count} 笔${oldest ? `，最早 ${oldest}` : ""}`}});
+      if (complete) break;
+      offset = page.nextOffset;
+      await sleep(750);
+    }
+    if (scanStopped) reason = "已停止，已读取记录已保存；可继续读取";
+    return {rows: [], count, complete, note: reason || (complete ? `采购历史已读取到末尾，共 ${count} 笔` : "本轮读取达到时间上限，已保存结果；请继续读取")};
   }
   function nextLink(id, kind) {
     const links = [...document.querySelectorAll("a[href]")].map(el => ({el, url: C.pddUrl(el.href)}))

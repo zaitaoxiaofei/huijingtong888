@@ -80,3 +80,39 @@ export function readInvoicePage() {
   if (raw?.invoice?.orderSn && typeof raw.invoice.hasApplied === "boolean") return pick(raw, raw.invoice);
   return {ready: false};
 }
+
+// Read-only buyer order pagination, observed on the official purchase page.
+// Keep login credentials in the browser; return only invoice-ledger fields.
+export function readPurchasePage(offset = "") {
+  return (async () => {
+    if (location.origin !== "https://mobile.pinduoduo.com" || location.pathname !== "/orders.html") throw new Error("请在官方采购订单页同步历史记录");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch("/proxy/api/api/aristotle/order_list_v4", {method: "POST", credentials: "same-origin", signal: controller.signal,
+        headers: {"content-type": "application/json"}, body: JSON.stringify({type: "all", page: 1, origin_host_name: location.hostname,
+          scene: "order_list_h5", page_from: 0, pay_front_supports: [], size: 50, offset})});
+      const data = await response.json();
+      if (!response.ok || data.error_code) throw new Error(data.error_msg || `采购订单读取失败（HTTP ${response.status}），请检查登录状态后重试`);
+      if (!Array.isArray(data.orders)) throw new Error("平台未返回采购订单列表，已停止；不会当作历史已读完");
+      const rows = [];
+      for (const order of data.orders) {
+        const id = String(order.order_sn || "");
+        if (!/^[\d-]{10,40}$/.test(id)) continue;
+        const goods = Array.isArray(order.order_goods) ? order.order_goods : [];
+        const prompt = String(order.order_status_prompt || "");
+        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭/.test(prompt);
+        const time = Number(order.order_time);
+        rows.push({id, url: `https://mobile.pinduoduo.com/order.html?order_sn=${encodeURIComponent(id)}`,
+          product: goods.map(g => String(g.goods_name || "")).join("；").slice(0, 250),
+          thumbnail: String(goods[0]?.thumb_url || ""), shop: String(order.mall?.mall_name || "").slice(0,100),
+          amount: Number.isSafeInteger(order.display_amount) ? (order.display_amount / 100).toFixed(2) : "",
+          date: time > 0 ? new Intl.DateTimeFormat("sv-SE", {timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(time*1000)) : "",
+          status: skip ? "skipped" : "pending", note: skip ? `页面订单状态：${prompt}` : "已读取采购订单，申请前会核对实际开票状态"});
+      }
+      const nextOffset = String(data.orders.at(-1)?.offset || "");
+      if (data.orders.length && (!nextOffset || nextOffset === offset || !rows.length)) throw new Error("平台分页游标未推进，已保留记录；请重试，尚不能确认全部历史已读完");
+      return {rows, nextOffset, complete: data.orders.length === 0};
+    } finally { clearTimeout(timer); }
+  })();
+}
