@@ -1,3 +1,4 @@
+import { normalizeProductAlias } from "../shared/product-alias.js";
 import {billingEvidenceIndex} from './billing-evidence-index.js';
 import {createInventoryBatchStocktake} from './inventory-batch-stocktake.js';
 import {billingOverviewCache} from './billing-overview-cache.js';
@@ -1183,6 +1184,7 @@ async function ensureFbpReplenishmentBatchSchemaMysql() {
 async function ensureProductNamingSchemaMysql() {
   if (productNamingSchemaReadyMysql) return;
   await ensureMysqlColumns("products", [
+    "ALTER TABLE products ADD COLUMN product_alias VARCHAR(500) NOT NULL DEFAULT ''",
     "ALTER TABLE products ADD COLUMN vehicle_brand VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN vehicle_model VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN inventory_category VARCHAR(255) NOT NULL DEFAULT ''",
@@ -12787,12 +12789,12 @@ export async function productsMysql(query = {}, tenantId = "admin") {
     where.push("0=1");
   } else if (searchText && searchMode === "name") {
     for (const term of searchTerms) {
-      where.push(`(p.name LIKE ? ESCAPE '=' OR EXISTS (
+      where.push(`((p.name LIKE ? ESCAPE '=' OR p.product_alias LIKE ? ESCAPE '=') OR EXISTS (
         SELECT 1 FROM product_name_aliases name_alias
         WHERE name_alias.product_id = p.id AND name_alias.active = 1 AND name_alias.alias_name LIKE ? ESCAPE '='
       ))`);
       const pattern = inventoryNamePattern(term);
-      params.push(pattern, pattern);
+      params.push(pattern, pattern, pattern);
     }
   } else if (searchText) {
     const terms = searchTerms;
@@ -12801,7 +12803,7 @@ export async function productsMysql(query = {}, tenantId = "admin") {
     for (const term of terms) {
       const like = `%${term}%`;
       const clause = `(
-        LOWER(COALESCE(p.name, '')) LIKE ?
+        LOWER(CONCAT(COALESCE(p.name, ''), ' ', COALESCE(p.product_alias, ''))) LIKE ?
         OR LOWER(COALESCE(p.code, '')) LIKE ?
         OR LOWER(COALESCE(pe.name, '')) LIKE ?
         OR LOWER(COALESCE(p.inventory_category, '')) LIKE ?
@@ -13663,7 +13665,7 @@ async function tenantSelectionProductsMysql(query = {}, tenantId) {
     WHERE ${where.join(" AND ")}`;
   const selectSql = `SELECT p.id, p.selection_id, p.code,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
-      p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
+      p.name, p.product_alias, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
       p.image_url, p.detail_image_urls, p.material, p.color, p.development_type, p.vehicle_brand, p.vehicle_model, p.vehicle_model_key,
       p.selling_points, p.inventory_category, p.fitment_type, p.accessory_name, p.product_quantity, p.package_mode,
       p.package_contents, p.included_accessories, p.gift_contents, p.listing_title_ru, p.listing_tags_ru, p.listing_description_ru,
@@ -13780,7 +13782,7 @@ export async function selectionProductsMysql(query = {}, tenantId = "admin") {
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS inventory_id,
-      p.name, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
+      p.name, p.product_alias, p.ozon_category_id, p.ozon_description_category_id, p.ozon_type_id, p.ozon_category_name,
       CASE
         WHEN p.image_url LIKE 'data:image/%' THEN CONCAT('/api/products/', p.id, '/image?thumb=1')
         ELSE p.image_url
@@ -14878,7 +14880,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
     const developmentMeta = resolveDevelopmentMeta(body, "new");
     const productColumns = [
       ...(tenantScoped ? ["tenant_id"] : []),
-      "selection_id", "code", "name", "ozon_category_id", "ozon_description_category_id", "ozon_type_id", "ozon_category_name",
+      "product_alias", "selection_id", "code", "name", "ozon_category_id", "ozon_description_category_id", "ozon_type_id", "ozon_category_name",
       "image_url", "detail_image_urls", "material", "color", "development_type", "vehicle_brand", "vehicle_model", "vehicle_model_key", "selling_points",
       "listing_title_ru", "listing_tags_ru", "listing_description_ru", "listing_title_prompt", "listing_tags_prompt", "listing_description_prompt",
       "purchase_url", "supplier_note", "source_platform", "supplier_id", "shipping_method", "logistics_rule_id", "recommended_shipping_method",
@@ -14889,6 +14891,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
     ];
     const productValues = [
       ...(tenantScoped ? [tenantPk] : []),
+      normalizeProductAlias(body.product_alias ?? ""),
       selectionId,
       code,
       name,

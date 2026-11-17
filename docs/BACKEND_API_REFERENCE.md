@@ -3010,6 +3010,27 @@ Replace order quality-check prefix rules in bulk.
 
 ### Catalog
 
+#### `GET /api/inventory-workflow/product-aliases`
+
+Read current product aliases for 1–200 product_ids in the fresh current enterprise. Requires inventory.read, procurement or packing. Returns only product_id and product_alias; foreign products are omitted.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_ids` (`string`, required): Comma-separated product IDs
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-workflow/product-aliases`
+
+Edit or clear one owned inventory product alias. Fresh inventory.write, procurement or packing permission required. Locks product and compares expected_alias; stale edits return 409. Only product_alias changes; quantity and purchase fields remain untouched.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `GET /api/products`
 
 Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.
