@@ -23,10 +23,11 @@
     <label><input id="overwrite" type="radio" name="download-mode">重新下载并覆盖</label>
   </section>
   <div id="month-results" class="month-results" hidden><table><thead><tr><th>下载</th><th>月份</th><th>公司主体</th><th>本地文件</th></tr></thead><tbody id="months"></tbody></table></div>
-  <footer class="archive-footer"><div class="actions"><button id="check" type="button">检查已有文件</button><button id="download" type="button" disabled>开始下载</button><button id="stop" type="button" disabled hidden>停止</button></div><p id="status" role="status" aria-live="polite"></p></footer>
+  <label class="system-sync-option"><input id="auto-sync" type="checkbox" checked>下载后同步到系统</label>
+  <footer class="archive-footer"><div class="actions"><button id="check" type="button">检查已有文件</button><button id="download" type="button" disabled>开始下载</button><button id="sync-system" type="button" disabled>同步本地文件</button><a id="view-system" target="_blank" rel="noopener noreferrer" hidden>查看系统凭证</a><button id="stop" type="button" disabled hidden>停止</button></div><p id="status" role="status" aria-live="polite"></p></footer>
   <details class="download-log"><summary>下载记录</summary><pre id="results"></pre></details>
   <details class="other-options"><summary>其他入口</summary><a href="finance-documents.html">单月下载</a></details>
 </main>
 <script src="finance-documents-core.js"></script><script src="finance-documents-transport.js"></script>
-<script src="finance-documents-archive.js"></script><script src="finance-erp-context.js"></script><script src="finance-archive.js"></script>
+<script src="finance-documents-archive.js"></script><script src="finance-erp-context.js"></script><script src="finance-system-sync.js"></script><script src="finance-archive.js"></script>
 </body></html>

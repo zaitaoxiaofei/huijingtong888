@@ -33,7 +33,7 @@ export function createFinanceCenterRoutes({ readJson, services }) {
     "GET /api/finance-center/document-report": (req,url) => companyFinanceDocuments.report(Object.fromEntries(url.searchParams),req._session),
     "POST /api/finance-center/document-import": async req => {
       const body=await readJson(req,{limitBytes:64*1024});
-      if(!['preview','confirm','review'].includes(body.action))throw Object.assign(new Error('请选择上传解析、确认归档或凭证审核操作'),{statusCode:400});
+      if(!['lookup','preview','confirm','review'].includes(body.action))throw Object.assign(new Error('请选择上传解析、确认归档或凭证审核操作'),{statusCode:400});
       return companyFinanceDocuments[body.action](body,req._session);
     },
     "POST /api/finance-center/ozon-posting-accruals": async req => readOzonPostingFinanceMysql(await readJson(req, { limitBytes: 64 * 1024 }), req._session, { signal: req._abortSignal }),

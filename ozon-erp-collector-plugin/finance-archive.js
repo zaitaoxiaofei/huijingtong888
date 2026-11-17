@@ -7,12 +7,12 @@ const sourceErp = Number(new URLSearchParams(location.search).get('erpTab'));
 el('language').value = 'en';
 const picked = new Set(), folderChecks = [], monthChecks = [];
 el('year').value = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(0, 4);
-function invalidate() { plan = null; el('months').replaceChildren(); el('download').disabled = true; el('status').textContent = ''; el('month-results').hidden = true; }
+function invalidate() { plan = null; el('months').replaceChildren(); el('download').disabled = true; el('sync-system').disabled = true; el('view-system').hidden = true; el('status').textContent = ''; el('month-results').hidden = true; }
 function setBusy(value) {
   busy = value;
-  for (const id of ['check', 'refresh', 'erp-tab', 'seller-tab', 'year', 'language', 'choose-folder', 'select-all', 'select-ten', 'select-none', 'identify', 'only-missing', 'overwrite']) el(id).disabled = value;
+  for (const id of ['check', 'refresh', 'erp-tab', 'seller-tab', 'year', 'language', 'choose-folder', 'select-all', 'select-ten', 'select-none', 'identify', 'auto-sync', 'only-missing', 'overwrite']) el(id).disabled = value;
   for (const input of [...monthChecks, ...folderChecks]) input.disabled = value;
-  el('stop').disabled = !value; el('stop').hidden = !value; el('download').disabled = value || !plan; render();
+  el('stop').disabled = !value; el('stop').hidden = !value; el('download').disabled = value || !plan; el('sync-system').disabled = value || !plan; render();
 }
 function updateSelectionCount() { el('selection-count').textContent = `已选 ${picked.size} 个月`; }
 function selectMonths(count) {
@@ -136,6 +136,7 @@ async function check() {
       }
       plan.rows.push(row); render();
     }
+    updateSystemLink();
     const existing = plan.rows.filter(r => r.local.status === 'complete').map(r => r.binding.month);
     el('status').textContent = `${stopped ? '检查已停止' : '检查完成'}：已有 ${existing.length} 个月，已勾选 ${plan.rows.filter(r => r.selected).length} 个月待下载。`;
   } catch (error) { el('status').textContent = error.message; if (directory && !plan) showIdentity('尚未匹配：' + error.message, 'error'); }
@@ -197,13 +198,54 @@ async function runDownload() {
   }
   el('status').textContent = `${stopped ? '已停止' : '归档结束'}：下载 ${downloaded} 份，复用 ${reused} 份，文件失败 ${failed} 份；每月结果和索引已保存。`;
 }
+async function updateSystemLink() {
+  const currentPlan = plan, row = plan?.rows.find(r => !r.error);
+  if (!row) return;
+  // ERP tab was origin-checked by the context request; use only its supported origin.
+  try {
+    const tab = await chrome.tabs.get(plan.erp_tab);
+    if (plan !== currentPlan || plan.erp_tab !== tab.id) return;
+    const origin = new URL(tab.url).origin;
+    if (!['https://erp.hjt888.xyz','http://localhost:8788','http://127.0.0.1:8788'].includes(origin)) return;
+    el('view-system').href = origin + '/admin.html#/finance/company-statements?' + new URLSearchParams({ company_id: row.binding.company.id, month: row.binding.month, tab: 'documents' });
+    el('view-system').hidden = false;
+  } catch {}
+}
+async function runSystemSync() {
+  let synced = 0, existing = 0, errors = 0, pending = 0, support = 0;
+  for (const row of plan.rows.filter(r => !r.error)) {
+    if (stopped) break;
+    const result = await globalThis.OzonFinanceSystemSync.syncMonth({ directory, plan, row, execute, verifySeller: () => seller(),
+      folderIds: folderChecks.filter(c => c.checked).map(c => c.folderId), stopped: () => stopped,
+      onProgress: message => { el('status').textContent = message; },
+      onFileResult: doc => { el('results').textContent += `${doc.download_name || doc.name || doc.id}：${doc.system_sync_error || (doc.system?.parse_status === 'error' ? '已同步，解析待处理' : doc.system?.kind === 'support' ? '已同步，仅归档未提取金额' : '已同步')}${doc.system?.note ? ' · ' + doc.system.note : ''}\n`; } });
+    synced += result.synced; existing += result.existing; errors += result.errors; pending += result.pending; support += result.support;
+    row.local = await archive.inspect(directory, plan.context, row.binding, plan.language);
+    row.result = `系统新增 ${result.synced} 份，已有 ${result.existing} 份${result.errors ? '，失败 ' + result.errors + ' 份' : ''}`;
+    el('results').textContent += row.binding.month + '：' + row.result + '\n'; render();
+  }
+  el('status').textContent = `${stopped ? '同步已停止' : errors ? '部分文件未同步' : '同步完成'}：新增 ${synced} 份，已有 ${existing} 份，失败 ${errors} 份${pending ? '，解析待处理 ' + pending + ' 份' : ''}${support ? '，仅归档 ' + support + ' 份' : ''}。${errors ? '点击“同步本地文件”重试，详情见下载记录。' : '请到系统凭证中核对确认。'}`;
+  if (!synced && !existing && !errors) el('status').textContent = '未找到可同步原件，请先下载或检查本地文件。';
+  updateSystemLink();
+}
+async function withArchiveLock(action) {
+  if (globalThis.navigator?.locks) return navigator.locks.request('ozon-finance-local-archive', { ifAvailable: true }, async lock => {
+    if (!lock) throw new Error('另一归档页面正在写入，请等待该任务完成'); return action();
+  });
+  return action();
+}
+async function syncSystem() {
+  if (busy || !plan || !directory) return;
+  stopped = false; setBusy(true);
+  try { await withArchiveLock(runSystemSync); }
+  catch (error) { if (/ERP|店铺|企业|主体/.test(error.message)) { invalidate(); showIdentity('请重新核对：' + error.message, 'error'); } else if (/本地/.test(error.message)) invalidate(); el('status').textContent = error.message; }
+  finally { setBusy(false); }
+}
 async function download() {
   if (busy || !plan || !directory) return;
   stopped = false; setBusy(true); el('status').textContent = '正在准备归档并复核ERP主体归属…';
   try {
-    if (globalThis.navigator?.locks) await navigator.locks.request('ozon-finance-local-archive', { ifAvailable: true }, async lock => {
-      if (!lock) throw new Error('另一归档页面正在写入，请等待该任务完成'); await runDownload();
-    }); else await runDownload();
+    await withArchiveLock(async () => { await runDownload(); if (!stopped && el('auto-sync').checked) await runSystemSync(); });
   } catch (error) { invalidate(); showIdentity('归档已停止，请重新识别店铺并检查月份：' + error.message, 'error'); el('status').textContent = error.message; }
   finally { setBusy(false); }
 }
@@ -221,6 +263,7 @@ el('select-all').onclick = () => selectMonths(12); el('select-ten').onclick = ()
 for (const id of ['only-missing', 'overwrite']) el(id).onchange = () => {
   for (const row of plan?.rows || []) row.selected = !row.error && (el('overwrite').checked || row.local.status !== 'complete' || row.local.needs_relocate); render();
 };
+el('sync-system').onclick = syncSystem;
 el('check').onclick = check; el('download').onclick = download;
 el('stop').onclick = () => { stopped = true; el('status').textContent = '正在停止，已归档原件会保留，可重新检查后继续。'; };
 refreshTabs().catch(e => { el('status').textContent = e.message; });

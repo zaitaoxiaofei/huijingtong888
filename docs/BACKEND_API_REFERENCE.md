@@ -2652,6 +2652,17 @@ Save an explicitly reviewed AI cost company assignment and append policy history
   - `200` `application/json` -> `object`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `POST /api/finance-center/document-import`
+
+Preview, explicitly confirm or review enterprise finance originals. Plugin lookup checks an existing original by scoped SHA256 and never confirms amounts. Optional archive_source is validated against current shop/month company bindings and the uploaded file hash; only normalized provenance is stored. Older manual upload clients remain supported.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/finance-center/order-sales-source`
 
 Read an owned authorized Ozon shop's official monthly order realization report without changing Ozon or ERP amounts. Rechecks membership, assignment, credentials and matching company tax number. The returned CNY original can then be uploaded and separately confirmed.
