@@ -1,3 +1,7 @@
+document.getElementById('finance-documents-open')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('finance-archive.html') });
+});
+
 const fields = {
   localPluginToken: document.getElementById('local-plugin-token'),
   save: document.getElementById('save'),

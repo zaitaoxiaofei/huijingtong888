@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "爆单ERP 统一采集插件",
   "description": "商品信息采集、前台数据展示与店铺分析同步，只需填写企业密钥",
-  "version": "1.5.7",
-  "permissions": ["activeTab", "alarms", "cookies", "scripting", "storage", "tabs", "webRequest"],
+  "version": "1.5.9",
+  "permissions": ["activeTab", "alarms", "cookies", "downloads", "scripting", "storage", "tabs", "webRequest"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
