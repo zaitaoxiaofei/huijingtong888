@@ -3,6 +3,9 @@ document.getElementById('finance-documents-open')?.addEventListener('click', asy
   const source = /^https:\/\/seller\.ozon\.ru\//.test(tab?.url || '') ? '?sellerTab=' + tab.id : '';
   chrome.tabs.create({ url: chrome.runtime.getURL('finance-archive.html') + source });
 });
+document.getElementById('pdd-invoice-open')?.addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('pdd-invoice/dashboard.html') });
+});
 
 const fields = {
   localPluginToken: document.getElementById('local-plugin-token'),

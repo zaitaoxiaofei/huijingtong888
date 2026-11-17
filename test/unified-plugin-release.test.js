@@ -6,6 +6,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
+import { supportsTrafficPartitions } from "../frontend/admin/utils/sku-traffic-navigation.js";
 import vm from "node:vm";
 
 const exec = promisify(execFile);
@@ -153,9 +154,10 @@ function viewHarness() {
     addEventListener: (_type, callback) => listeners.add(callback),
     removeEventListener: (_type, callback) => listeners.delete(callback),
     setTimeout: callback => { timers.set(++timer, callback); return timer; },
-    clearTimeout: id => timers.delete(id), postMessage: data => posted.push(data)
+    clearTimeout: id => timers.delete(id), clearInterval() {}, postMessage: data => posted.push(data)
   };
   const context = vm.createContext({ window,
+    dailyPartitionCapable: { value: false }, dailyTimer: undefined, supportsTrafficPartitions,
     pluginInstanceId: { value: "" }, pluginInstanceUnified: false, pluginInstanceEpoch: 0,
     pendingPluginStoreChecks: new Set(), pluginStatus: { value: null }, pluginValidation: { value: null },
     selectedStoreId: { value: "company" }, state: { filters: { shopId: "1" } }, selectedShop: { value: { name: "Shop" } },

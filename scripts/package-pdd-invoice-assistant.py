@@ -12,6 +12,7 @@ import zipfile
 parser = argparse.ArgumentParser()
 parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--release-sha", required=True, help="Exact verified merged remote release commit")
+parser.add_argument("--plugin", choices=["pdd-invoice-assistant", "ozon-erp-collector-plugin"], default="pdd-invoice-assistant")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 
@@ -24,8 +25,8 @@ if sha != args.release_sha:
 remote = git("rev-parse", "origin/release/2026.10.21-task-brand").decode().strip()
 if remote != sha:
     raise SystemExit("Build must use the exact fetched remote release head")
-archive = git("archive", "--format=tar", sha, "pdd-invoice-assistant")
-prefix = "pdd-invoice-assistant/"
+archive = git("archive", "--format=tar", sha, args.plugin)
+prefix = args.plugin + "/"
 files = {}
 with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
     for entry in tar:
@@ -35,7 +36,8 @@ manifest = json.loads(files["manifest.json"])
 version = manifest["version"]
 files["release.json"] = (json.dumps({"version": version, "releaseSha": sha, "channel": "local-pilot"}, ensure_ascii=False, indent=2) + "\n").encode()
 args.output.mkdir(parents=True, exist_ok=True)
-destination = args.output / f"pdd-invoice-assistant-{version}.zip"
+package_prefix = "ozon-baodan-erp-plugin" if args.plugin == "ozon-erp-collector-plugin" else "pdd-invoice-assistant"
+destination = args.output / f"{package_prefix}-{version}.zip"
 with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
     for name, content in sorted(files.items()):
         entry = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))

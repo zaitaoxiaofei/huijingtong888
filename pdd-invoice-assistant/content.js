@@ -2,6 +2,7 @@
   if (globalThis.__pddInvoiceInstalled) return;
   globalThis.__pddInvoiceInstalled = true;
   const C = globalThis.PddInvoice;
+  const rpc = message => chrome.runtime.sendMessage({module: "PDD_INVOICE", ...message});
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const clean = value => String(value || "").replace(/\s+/g, " ").trim();
   const text = () => clean(document.body?.innerText);
@@ -74,7 +75,7 @@
       for (let i = 0; i < passes; i++) {
         const before = all.size;
         for (const row of extractOrders()) all.set(row.id, row);
-        const rendered = await chrome.runtime.sendMessage({type: "PDD_INVOICE_RENDERED_ROWS"});
+        const rendered = await rpc({type: "PDD_INVOICE_RENDERED_ROWS"});
         if (!rendered?.ok) throw new Error(rendered?.error || "读取页面订单失败");
         for (const row of rendered.value) all.set(row.id, row);
         if (!loadMore) break;
@@ -154,7 +155,7 @@
   }
   async function invoiceState() {
     for (let i = 0; i < 16; i++) {
-      const response = await chrome.runtime.sendMessage({type: "PDD_INVOICE_PAGE_STATE"});
+      const response = await rpc({type: "PDD_INVOICE_PAGE_STATE"});
       if (!response?.ok) throw new Error(response?.error || "读取开票状态失败");
       if (response.value.ready) return response.value;
       if (blocker()) throw new Error(blocker());
@@ -217,7 +218,7 @@
     if (state.invoiceKind !== 0) return {status: "review", note: "当前发票类型不是普通发票，请人工核对"};
     const submit = uniqueTarget(["申请发票", "向商家发送申请", "提交申请", "确认申请", "申请开票", "提交开票申请"]);
     if (!submit) return {status: "review", note: "未找到唯一的开票提交按钮，请在处理窗口人工核对"};
-    const auth = await chrome.runtime.sendMessage({type: "PDD_INVOICE_AUTHORIZE", queueId: message.queueId, orderId: message.orderId});
+    const auth = await rpc({type: "PDD_INVOICE_AUTHORIZE", queueId: message.queueId, orderId: message.orderId});
     if (!auth?.ok || !auth.value?.authorized) return {status: "pending", note: auth?.error || "任务已暂停，未提交申请", block: true};
     // Re-check immediately before the irreversible click, including field values and page identity.
     if (blocker() || C.orderId(location.href) !== message.orderId) return {status: "review", note: "提交前页面状态发生变化，未点击提交", block: true};
@@ -233,7 +234,7 @@
         if (company?.value !== title.company || tax?.value.toUpperCase() !== title.taxId) return {status: "review", note: "确认时抬头不匹配，未提交", block: true};
         const confirm = uniqueTarget(["确认", "提交", "确定"]);
         if (!confirm) return {status: "review", note: "未能唯一识别平台二次确认按钮，请人工核对", block: true};
-        const permission = await chrome.runtime.sendMessage({type: "PDD_INVOICE_AUTHORIZE", phase: "confirm", queueId: message.queueId, orderId: message.orderId});
+        const permission = await rpc({type: "PDD_INVOICE_AUTHORIZE", phase: "confirm", queueId: message.queueId, orderId: message.orderId});
         if (!permission?.ok || !permission.value?.authorized) return {status: "review", note: permission?.error || "确认前任务已暂停", block: true};
         confirmed = true; confirm.click();
       }

@@ -9,11 +9,11 @@ let ledgerRef = null;
 let locked = false;
 let pollRunning = false;
 let pageIndex = 0;
-const pageSize = 50;
+let pageSize = 50;
 function active() { return model.accounts.find(a => a.id === model.active); }
 function notice(text, error = false) { $("notice").textContent = text; $("notice").classList.toggle("error", error); }
 async function request(type, payload = {}) {
-  const result = await chrome.runtime.sendMessage({type, ...payload});
+  const result = await chrome.runtime.sendMessage({module: "PDD_INVOICE", type, ...payload});
   if (!result?.ok) throw new Error(result?.error || "助手后台暂时无响应，请重新打开插件");
   return result.value;
 }
@@ -48,6 +48,7 @@ function scopedRows() {
 }
 function rows() { return C.visibleRows(scopedRows(), filter()); }
 function selectedIds() { return rows().filter(row => selected.has(row.id)).map(row => row.id); }
+function resetTableScroll() { document.querySelector('.table-wrap').scrollTop = 0; }
 function openAccount(id = "") {
   editAccount = id;
   $("accountName").value = model.accounts.find(a => a.id === id)?.name || "";
@@ -106,6 +107,8 @@ function render() {
   renderRows();
 }
 function renderRows() {
+  const scroller = document.querySelector('.table-wrap');
+  const scrollTop = scroller.scrollTop;
   const list = rows();
   const overview = C.visibleRows(scopedRows(), {...filter(), status: ""});
   $("total").textContent = overview.length;
@@ -139,9 +142,14 @@ function renderRows() {
   $("filterHint").textContent = [allAccounts ? "全部账号可汇总导出；批量申请请选当前账号" : "", (f.from || f.to) && missingDates ? `${missingDates} 单缺少所选时间，未参与本次筛选` : ""].filter(Boolean).join("；") || "支持按申请、开票或下单时间重新筛选";
   const pages = Math.max(1, Math.ceil(list.length / pageSize));
   pageIndex = Math.min(pageIndex, pages - 1);
-  $("pageInfo").textContent = `第 ${pageIndex + 1} / ${pages} 页 · 每页 ${pageSize} 单；汇总、全选与导出包含全部筛选结果`;
-  $("previousPage").disabled = pageIndex === 0;
-  $("nextPage").disabled = pageIndex >= pages - 1;
+  for (const suffix of ["", "Top"]) {
+    $("pageInfo" + suffix).textContent = `第 ${pageIndex + 1} / ${pages} 页，共 ${list.length} 条记录`;
+    $("previousPage" + suffix).disabled = pageIndex === 0;
+    $("nextPage" + suffix).disabled = pageIndex >= pages - 1;
+    $("pageSize" + suffix).value = String(pageSize);
+    $("pageJump" + suffix).max = pages;
+    if (document.activeElement !== $("pageJump" + suffix)) $("pageJump" + suffix).value = pageIndex + 1;
+  }
   for (const row of list.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize)) {
     const tr = node("tr");
     const checkCell = node("td");
@@ -167,6 +175,7 @@ function renderRows() {
     tr.append(checkCell, product, shop, amount, status, dates, note, actions);
     $("rows").append(tr);
   }
+  scroller.scrollTop = scrollTop;
 }
 const fieldLabels = {status: "开票状态", appliedAt: "申请时间", issuedAt: "开票时间", invoiceAmountCents: "票面金额", applicationAmountCents: "申请金额", invoiceNo: "发票号码", rejectionReason: "开票失败原因", ledgerNote: "台账备注"};
 function historyValue(field, value) {
@@ -227,8 +236,8 @@ $("version").textContent = `v${chrome.runtime.getManifest().version}`;
 $("settingsOpen").addEventListener("click", () => { $("settingsDialog").showModal(); action(refreshTabs); });
 $("closeSettings").addEventListener("click", () => $("settingsDialog").close());
 for (const metric of document.querySelectorAll(".metric[data-status]")) metric.addEventListener("click", () => {
-  $("status").value = metric.dataset.status;
-  selected.clear(); pageIndex = 0; renderRows();
+    $("status").value = metric.dataset.status;
+  selected.clear(); pageIndex = 0; renderRows(); resetTableScroll();
 });
 document.addEventListener("click", event => {
   for (const menu of document.querySelectorAll(".toolbar-menu[open]")) {
@@ -268,10 +277,20 @@ $("importInvoices").addEventListener("click", () => action(async () => {
   setModel(next); notice(`已同步 ${next.scan.count} 条平台发票记录。选择订单后可刷新状态，补齐申请和开票日期。`);
   await refreshTabs();
 }));
-for (const id of ["query", "status", "from", "to", "dateBasis", "scope"]) $(id).addEventListener("input", () => { selected.clear(); pageIndex = 0; renderRows(); });
-$("clearFilters").addEventListener("click", () => { for (const id of ["query", "status", "from", "to"]) $(id).value = ""; selected.clear(); pageIndex = 0; renderRows(); });
-$("previousPage").addEventListener("click", () => { if (pageIndex > 0) pageIndex--; renderRows(); });
-$("nextPage").addEventListener("click", () => { pageIndex++; renderRows(); });
+for (const id of ["query", "status", "from", "to", "dateBasis", "scope"]) $(id).addEventListener("input", () => { selected.clear(); pageIndex = 0; renderRows(); resetTableScroll(); });
+$("clearFilters").addEventListener("click", () => { for (const id of ["query", "status", "from", "to"]) $(id).value = ""; selected.clear(); pageIndex = 0; renderRows(); resetTableScroll(); });
+for (const suffix of ["", "Top"]) {
+  $("previousPage" + suffix).addEventListener("click", () => { if (pageIndex > 0) pageIndex--; renderRows(); resetTableScroll(); });
+  $("nextPage" + suffix).addEventListener("click", () => { pageIndex++; renderRows(); resetTableScroll(); });
+  $("pageSize" + suffix).addEventListener("change", event => {
+    pageSize = [20, 50, 100].includes(Number(event.target.value)) ? Number(event.target.value) : 50;
+    pageIndex = 0; renderRows(); resetTableScroll();
+  });
+  $("pageJump" + suffix).addEventListener("change", event => {
+    pageIndex = Math.max(0, Math.min(Math.ceil(rows().length / pageSize) - 1, Math.floor(Number(event.target.value) || 1) - 1));
+    renderRows(); resetTableScroll();
+  });
+}
 $("selectAll").addEventListener("change", () => { for (const row of rows()) $("selectAll").checked ? selected.add(row.id) : selected.delete(row.id); renderRows(); });
 $("apply").addEventListener("click", () => action(() => confirmBatch("apply")));
 $("download").addEventListener("click", () => action(() => confirmBatch("download")));

@@ -146,7 +146,7 @@ function dualBackground(options = {}) {
     handlers.push(fn); events.set(name, handlers);
   }, removeListener() {} });
   const chrome = {
-    runtime: { id: 'unified-instance', getManifest: () => ({ version: '1.5.0' }), onMessage: { addListener(fn) { listeners.push(fn); } }, onInstalled: event(), onStartup: event() },
+    runtime: { id: 'unified-instance', getURL: path => `chrome-extension://unified-instance/${path}`, getManifest: () => ({ version: '1.5.0' }), onMessage: { addListener(fn) { listeners.push(fn); } }, onInstalled: event(), onStartup: event() },
     storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value) }, onChanged: event('storage') },
     webRequest: { onBeforeSendHeaders: event(), onHeadersReceived: event() },
     action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setTitle() {} },
@@ -155,7 +155,7 @@ function dualBackground(options = {}) {
     cookies: { getAll: async () => [], getAllCookieStores: async () => [], onChanged: event('cookies') }
   };
   const context = vm.createContext({
-    chrome, URL, AbortController,
+    chrome, URL, AbortController, structuredClone,
     console: { error() {} },
     OzonUnifiedConfig: { get: async () => ({ ...config }), saveKey: async (value) => { saves.push(value); config.localPluginToken = value; return { configured: true }; } },
     setTimeout: options.setTimeout || (() => 1), clearTimeout: options.clearTimeout || (() => {}), setInterval: () => 1, clearInterval() {},
@@ -251,6 +251,26 @@ test('actual collector and namespaced analytics backgrounds load together and sh
   const rejected = await h.message({ type: 'OZON_ERP_LOCAL_PLUGIN_FETCH', erpBaseUrl: 'https://other.example', url: 'https://other.example/api/local-plugin/plugin/status' });
   assert.equal(rejected.success, false);
   assert.ok(h.requests.every((item) => item.url.startsWith('https://erp.hjt888.xyz/')));
+});
+
+test('PDD invoice messages coexist with ERP and analytics without changing their connection or storage policy', async () => {
+  const h = dualBackground();
+  await flush();
+  assert.ok(h.imports.includes('pdd-invoice/background.js'));
+  const ownPage = { id: 'unified-instance', url: 'chrome-extension://unified-instance/pdd-invoice/dashboard.html' };
+  // Only the PDD channel handles this generic command; other workers must ignore it.
+  const result = await h.message({ module: 'PDD_INVOICE', type: 'STATE' }, ownPage);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(result.value.accounts.length, 0);
+  const denied = await h.message({ module: 'PDD_INVOICE', type: 'STATE' });
+  assert.equal(denied.ok, false);
+  const analytics = await h.message({ type: 'PIVOT_ERP_PANEL_GET_STATUS' });
+  assert.equal(analytics.config.localPluginToken, 'one-key');
+  assert.equal(analytics.config.erpBaseUrl, 'https://erp.hjt888.xyz');
+  assert.equal((await h.message({ type: 'CHECK_SELLER_TAB' })).hasSellerTab, false);
+  // No extension-wide storage access change or toolbar badge ownership is allowed.
+  const pdd = read('pdd-invoice/background.js');
+  assert.doesNotMatch(pdd, /setAccessLevel|chrome\.action\./);
 });
 
 test('legacy bridge messages wait for analytics navigation and hold the gate through the real callback', async () => {
