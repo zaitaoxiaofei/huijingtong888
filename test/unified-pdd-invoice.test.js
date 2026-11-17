@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 const exec = promisify(execFile);
 const root = 'ozon-erp-collector-plugin/';
@@ -21,8 +23,14 @@ test('the unified manifest packages the invoice workspace and preserves existing
 test('generated invoice assets are deterministic and contain the compact layout and both pagers', async () => {
   const files = ['background.js', 'content.js', 'core.js', 'dashboard.html', 'dashboard.js', 'dashboard.css', 'README.md'];
   const before = await Promise.all(files.map(f => fs.readFile(root + 'pdd-invoice/' + f)));
-  await exec(process.execPath, ['scripts/sync-unified-pdd-invoice.mjs']);
-  for (const [i, file] of files.entries()) assert.deepEqual(await fs.readFile(root + 'pdd-invoice/' + file), before[i], file);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'unified-pdd-sync-'));
+  try {
+    await fs.mkdir(path.join(temp, 'scripts'));
+    await fs.cp('pdd-invoice-assistant', path.join(temp, 'pdd-invoice-assistant'), { recursive: true });
+    await fs.copyFile('scripts/sync-unified-pdd-invoice.mjs', path.join(temp, 'scripts/sync-unified-pdd-invoice.mjs'));
+    await exec(process.execPath, [path.join(temp, 'scripts/sync-unified-pdd-invoice.mjs')]);
+    for (const [i, file] of files.entries()) assert.deepEqual(await fs.readFile(path.join(temp, root, 'pdd-invoice', file)), before[i], file);
+  } finally { await fs.rm(temp, { recursive: true, force: true }); }
   const html = before[3].toString();
   const js = before[4].toString();
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
