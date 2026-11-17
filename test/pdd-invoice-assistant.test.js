@@ -346,3 +346,31 @@ test("content application fills and checks the title, authorizes once, then conf
   const result=await new Promise(resolve=>listener({type:"PDD_INVOICE_PROCESS",kind:"apply",orderId:firstId,queueId:"q",title},{id:"qa"},resolve));
   assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.status,"submitted",JSON.stringify(result));assert.equal(clicks,1);assert.equal(authorizations,1);
 });
+
+test("purchase pagination reads past six months without leaking personal fields and detects the real end", async () => {
+  let request;
+  const ctx = vm.createContext({location:new URL("https://mobile.pinduoduo.com/orders.html"),AbortController,setTimeout,clearTimeout,URL,Intl,Date,
+    fetch:async(url,options)=>{request=JSON.parse(options.body);return {ok:true,json:async()=>({orders:[{order_sn:firstId,order_time:Date.parse("2024-02-03T02:00:00Z")/1000,offset:"older-page",display_amount:2270,mall:{mall_name:"测试商家"},order_goods:[{goods_name:"包装袋",thumb_url:"https://img.pddpic.com/a.jpg"}],address_id:"private-address",tracking_number:"private-tracking"}]})};}});
+  vm.runInContext(reader,ctx);const result=await ctx.readPurchasePage("cursor");
+  assert.equal(request.offset,"cursor");assert.equal(request.size,50);assert.equal(result.rows[0].date,"2024-02-03");assert.equal(result.rows[0].amount,"22.70");assert.equal(result.nextOffset,"older-page");assert.equal(result.complete,false);assert.ok(!JSON.stringify(result).includes("private"));
+  ctx.fetch=async()=>({ok:true,json:async()=>({orders:[]})});assert.equal((await ctx.readPurchasePage("older-page")).complete,true);
+  ctx.fetch=async()=>({ok:true,json:async()=>({orders:[{order_sn:firstId,offset:"cursor"}]})});await assert.rejects(ctx.readPurchasePage("cursor"),/游标未推进/);
+  ctx.fetch=async()=>({ok:true,json:async()=>({error_code:40001,error_msg:"请重新登录"})});await assert.rejects(ctx.readPurchasePage("cursor"),/重新登录/);
+});
+
+test("merchant chat navigation after an authorized submit recovers through invoice detail without replaying application", async () => {
+  let h, processCalls=0;
+  h=await harness(undefined,async(message,tabId)=>{
+    if(message.type==="PDD_INVOICE_PROCESS") {
+      processCalls++;
+      await h.send("PDD_INVOICE_AUTHORIZE",{queueId:h.data().queue.id,orderId:firstId},{id:"test",frameId:0,tab:{id:tabId},url:C.invoiceUrl(firstId,"apply","123")});
+      throw Error("The message port closed before a response was received");
+    }
+    if(message.type==="PDD_INVOICE_INSPECT") {
+      const tab=await h.chrome.tabs.get(tabId);assert.equal(new URL(tab.url).searchParams.get("_t_timestamp"),"transac_invoice");
+      return {ok:true,status:"submitted",note:"商家处理中",facts:{appliedAt:"2026-11-17"}};
+    }
+  });
+  const id=await bound(h);await h.send("START",{accountId:id,ids:[firstId],kind:"apply"});await h.done();
+  assert.equal(processCalls,1);assert.equal(h.data().queue.state,"done");assert.equal(h.data().accounts[0].orders[0].status,"submitted");
+});

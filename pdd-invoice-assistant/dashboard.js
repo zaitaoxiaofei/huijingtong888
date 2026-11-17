@@ -92,7 +92,7 @@ function render() {
   $("scan").disabled = !a?.connected || running || locked;
   $("importInvoices").disabled = $("scan").disabled;
   $("refreshProgress").disabled = !a?.connected || running || locked || $("scope").value === "all";
-  $("lastScan").textContent = a?.scannedAt ? `上次读取 ${C.beijing(a.scannedAt)}` : "尚未读取订单";
+  $("lastScan").textContent = a?.scannedAt ? `上次读取 ${C.beijing(a.scannedAt)}${a.purchaseHistory ? ` · 采购 ${a.purchaseHistory.count} 笔 · 最早 ${a.purchaseHistory.oldest || "日期未知"} · ${a.purchaseHistory.complete ? "已读到末尾" : "尚未读完"}` : ""}` : "尚未读取订单";
   $("queueCard").hidden = !q;
   if (q) {
     const qa = model.accounts.find(a => a.id === q.accountId);

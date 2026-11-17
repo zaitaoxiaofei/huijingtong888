@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "爆单ERP 统一采集插件",
   "description": "商品采集、店铺分析、财务原件归档与拼多多采购开票，统一插件管理",
-  "version": "1.5.13",
+  "version": "1.5.14",
   "permissions": [
     "activeTab",
     "alarms",
