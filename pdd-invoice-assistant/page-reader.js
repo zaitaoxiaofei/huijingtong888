@@ -18,7 +18,7 @@ export function readRenderedOrders() {
           shop: String(order.mall?.mallName || "").slice(0, 100),
           product: (Array.isArray(order.orderGoods) ? order.orderGoods : []).map(g => String(g.goodsName || "")).join("；").slice(0, 250),
           amount: Number.isFinite(order.displayAmount) ? (order.displayAmount / 100).toFixed(2) : "",
-          date, status: skip ? "skipped" : "pending", note: skip ? `页面订单状态：${prompt}` : ""});
+          thumbnail: String(order.orderGoods?.[0]?.thumbUrl || order.orderGoods?.[0]?.goodsThumbUrl || ""), date, status: skip ? "skipped" : "pending", note: skip ? `页面订单状态：${prompt}` : ""});
       } catch { /* Unsupported order shape stays absent, never guess a URL. */ }
       break;
     }
@@ -27,7 +27,7 @@ export function readRenderedOrders() {
   // Its invoice_amount is a decimal yuan string; do not confuse it with cents in orders.
   const seen = new Set();
   for (const el of document.querySelectorAll("div,span")) {
-    if (el.children.length || !["发票详情", "申请发票"].includes(el.textContent?.trim())) continue;
+    if (el.children.length || !["发票详情", "申请发票", "待申请", "申请发票请联系拼多多官方客服"].includes(el.textContent?.trim())) continue;
     const key = Object.keys(el).find(k => k.startsWith("__reactInternalInstance") || k.startsWith("__reactFiber"));
     for (let fiber = key && el[key], depth = 0; fiber && depth < 12; fiber = fiber.return, depth++) {
       if (seen.has(fiber)) break;
@@ -37,13 +37,15 @@ export function readRenderedOrders() {
       const value = String(data.invoice_amount ?? "");
       const match = value.match(/^(\d{1,10})(?:\.(\d{1,2}))?$/);
       const amount = match ? +match[1] * 100 + +(match[2] || "").padEnd(2, "0") : null;
-      const status = +data.invoice_status === 2 ? "issued" : +data.invoice_status === 1 ? "submitted" : +data.invoice_status === 0 ? "rejected" : "pending";
+      const status = data.invoice_status == null ? (data.is_full_refund || data.is_mall_close ? "skipped" : "pending") : +data.invoice_status === 2 ? "issued" : +data.invoice_status === 1 ? "submitted" : +data.invoice_status === 0 ? "rejected" : "pending";
       const facts = {platformCheckedAt: Date.now()};
       if (amount !== null) { facts.applicationAmountCents = amount; if (status === "issued") facts.invoiceAmountCents = amount; }
       if (data.reject_reason) facts.rejectionReason = String(data.reject_reason);
       rows.set(data.order_sn, {id: data.order_sn, url: `https://mobile.pinduoduo.com/order.html?order_sn=${encodeURIComponent(data.order_sn)}`,
-        product: String(data.goods_name || "").slice(0, 250), shop: "", amount: "", date: "", status,
-        note: status === "rejected" ? String(data.reject_reason || "平台显示开票失败") : "已读取官方发票列表", invoiceFacts: facts});
+        mallId: String(data.mall_id || ""), thumbnail: String(data.thumb_url || ""),
+        applicationUrl: data.invoice_status == null && data.mall_id ? `https://mobile.pinduoduo.com/transac_return_compensation.html?_t_timestamp=transac_modify_invoice&order_sn=${encodeURIComponent(data.order_sn)}&mall_id=${encodeURIComponent(data.mall_id)}&from_invoice=1&source=9` : "",
+        product: String(data.goods_name || "").slice(0, 250), shop: "", amount: "", date: Number(data.order_time) > 0 ? new Intl.DateTimeFormat("sv-SE", {timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(Number(data.order_time) * 1000)) : "", status,
+        note: status === "pending" ? "官方待申请订单，可向商家发送申请" : status === "skipped" ? "订单已退款或商家关闭，请核对" : status === "rejected" ? String(data.reject_reason || "平台显示开票失败") : "已读取官方发票列表", invoiceFacts: facts});
       break;
     }
   }

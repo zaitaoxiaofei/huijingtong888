@@ -131,6 +131,8 @@
       // A refreshed page must not erase submitted/uncertain/download history.
       const preserve = old && !["pending", "skipped"].includes(old.status);
       const merged = {...old, id: item.id, url: old?.url || url, shop: item.shop || old?.shop || "", product: item.product || old?.product || "",
+        thumbnail: /^https:\/\//.test(item.thumbnail || "") ? item.thumbnail : old?.thumbnail || "",
+        mallId: item.mallId || old?.mallId || "", applicationUrl: pddUrl(item.applicationUrl) && orderId(item.applicationUrl) === item.id ? pddUrl(item.applicationUrl) : old?.applicationUrl || "",
         amount: item.amount || old?.amount || "", date: item.date || old?.date || "",
         status: preserve ? old.status : item.status || old?.status || "pending", note: preserve ? old.note : item.note || ""};
       if (item.invoiceFacts) recordLedger(merged, {...item.invoiceFacts, status: item.status}, "platform");

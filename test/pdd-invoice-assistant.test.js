@@ -286,3 +286,63 @@ test("download completion comes from Chrome and an existing record prevents dupl
   await h.send("START", {accountId: id, ids: [firstId], kind: "download"}); await h.done();
   assert.equal(h.messages.filter(m => m.type === "PDD_INVOICE_PROCESS").length, before);
 });
+
+test("pending contact-merchant cards retain thumbnail and the observed application route", () => {
+  const el = {children: [], textContent: "申请发票", __reactFiberTest: {memoizedProps: {data: {order_sn: firstId, mall_id: 123, goods_name: "采购包装袋", thumb_url: "https://img.pddpic.com/sample.jpeg", invoice_amount: "185.85", order_time: null}}}};
+  const ctx = vm.createContext({document: {querySelectorAll: selector => selector.includes("data-test") ? [] : [el]}, location: {origin: C.ORIGIN}, URL, Intl, Date});
+  vm.runInContext(reader, ctx);
+  const [row] = ctx.readRenderedOrders();
+  assert.equal(row.status, "pending");
+  assert.equal(row.thumbnail, "https://img.pddpic.com/sample.jpeg");
+  assert.equal(new URL(row.applicationUrl).searchParams.get("mall_id"), "123");
+  assert.equal(row.invoiceFacts.applicationAmountCents, 18585);
+  assert.equal(row.date, "");
+  assert.equal(row.invoiceFacts.invoiceAmountCents, undefined);
+});
+test("history merge enriches pending cards without erasing purchase dates or accepting another order application route", () => {
+  const base = [{id: firstId, url: orderUrl(firstId), date: "2026-11-17", amount: "185.85", status: "pending"}];
+  const [row] = C.mergeOrders(base, [{id: firstId, url: orderUrl(firstId), thumbnail: "https://img.pddpic.com/a.jpeg", applicationUrl: C.invoiceUrl(secondId, "apply", "123")}]);
+  assert.equal(row.date, "2026-11-17");
+  assert.equal(row.amount, "185.85");
+  assert.equal(row.applicationUrl, "");
+});
+test("batch application navigates directly to the matched official merchant application form", async () => {
+  const h = await harness(); const id = await bound(h);
+  const url = C.invoiceUrl(firstId, "apply", "123");
+  await h.eval(`store.accounts[0].orders[0].applicationUrl=${JSON.stringify(url)}`);
+  await h.send("START", {accountId:id, ids:[firstId], kind:"apply"}); await h.done();
+  assert.equal([...await h.chrome.tabs.query()].at(-1).url, url);
+  assert.equal(h.data().accounts[0].orders[0].status, "submitted");
+});
+
+test("history scanner scrolls the popup beyond 18 pages and only reports completion at a visible end marker", async () => {
+  let listener, page = 0, progress = [];
+  const popup = {classList: {contains: n => n === "common-pop-panel"}, getClientRects: () => [1], clientHeight: 100, scrollHeight: 1000, scrollTop: 900, get innerText() {return page >= 25 ? "没有更多订单" : "历史待申请订单";}, scrollTo() {page++;}};
+  const doc = {body: {innerText: "官方发票助手"}, querySelector: () => null, querySelectorAll: selector => selector === "*" ? [popup] : [], scrollingElement: {scrollTo() {throw Error("must not scroll outer page");}}};
+  const chrome = {runtime: {id:"qa", onMessage:{addListener:f=>listener=f}, sendMessage:async m => {
+    if(m.type === "PDD_INVOICE_RENDERED_ROWS") return {ok:true,value:[{id:String(Math.min(page,25)),url:orderUrl(firstId),applicationUrl:C.invoiceUrl(firstId,"apply","1")}]};
+    if(m.type === "PDD_INVOICE_SCAN_PROGRESS") {progress.push(m.progress);return {ok:true};}
+    throw Error("unexpected action");
+  }}};
+  const ctx = vm.createContext({chrome,document:doc,location:{pathname:"/commercial_pre_orders.html"},getComputedStyle:()=>({visibility:"visible",overflowY:"auto"}),Date,URL,setTimeout:fn=>{fn();}});
+  vm.runInContext(core + "\n" + fs.readFileSync(dir+"content.js","utf8"),ctx);
+  const result = await new Promise(resolve => listener({type:"PDD_INVOICE_SCAN",history:true,loadMore:true},{id:"qa"},resolve));
+  assert.equal(result.ok,true);assert.equal(result.complete,true);assert.ok(progress.at(-1).loaded > 18);assert.match(result.note,/末尾/);
+});
+
+test("content application fills and checks the title, authorizes once, then confirms observed platform state", async () => {
+  let listener, clicks = 0, authorizations = 0;
+  class Input {constructor(placeholder) {this.placeholder=placeholder;this.labels=[];this.children=[];this.parentElement={innerText:""};this.tagName="INPUT";this._value="";}get value(){return this._value;}set value(v){this._value=v;}getClientRects(){return [1];}getAttribute(){return "";}dispatchEvent(){}}
+  const company=new Input("请输入抬头名称"),tax=new Input("请输入纳税人识别号");
+  const submit={innerText:"向商家发送申请",children:[],getClientRects:()=>[1],getAttribute:()=>"",click:()=>{clicks++;}};
+  const document={getElementById:()=>null,body:{innerText:"发票 电子发票（普通发票）"},querySelector:()=>null,querySelectorAll:s=>s.startsWith("input:not")?[company,tax]:s==="button,a,[role=button],span,div"?[submit]:[],images:[]};
+  const chrome={runtime:{id:"qa",onMessage:{addListener:f=>listener=f},sendMessage:async m=>{
+    if(m.type==="PDD_INVOICE_AUTHORIZE"){authorizations++;assert.equal(company.value,title.company);assert.equal(tax.value,title.taxId);return {ok:true,value:{authorized:true}};}
+    if(m.type==="PDD_INVOICE_PAGE_STATE")return {ok:true,value:{ready:true,orderId:firstId,hasApplied:clicks>0,invoiceKind:0,displayText:clicks?"申请已发送":"",mallId:"123"}};
+    throw Error("unexpected request");
+  }}};
+  const ctx=vm.createContext({chrome,document,location:new URL(C.invoiceUrl(firstId,"apply","123")),getComputedStyle:()=>({visibility:"visible"}),HTMLInputElement:Input,HTMLTextAreaElement:Input,Event:class{},URL,URLSearchParams,Intl,Date,setTimeout:fn=>fn()});
+  vm.runInContext(core+"\n"+fs.readFileSync(dir+"content.js","utf8"),ctx);
+  const result=await new Promise(resolve=>listener({type:"PDD_INVOICE_PROCESS",kind:"apply",orderId:firstId,queueId:"q",title},{id:"qa"},resolve));
+  assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.status,"submitted",JSON.stringify(result));assert.equal(clicks,1);assert.equal(authorizations,1);
+});

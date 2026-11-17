@@ -18,7 +18,7 @@ async function request(type, payload = {}) {
   return result.value;
 }
 async function action(fn) {
-  if (locked) return;
+  if (locked) { notice("当前任务正在处理，可使用停止读取或查看进度"); return; }
   locked = true;
   document.body.setAttribute("aria-busy", "true");
   try { await fn(); }
@@ -31,9 +31,9 @@ function node(tag, className, text) {
   if (text !== undefined) el.textContent = text;
   return el;
 }
-function button(text, fn, className = "") {
+function button(text, fn, className = "", independent = false) {
   const el = node("button", className, text);
-  el.addEventListener("click", () => action(fn));
+  el.addEventListener("click", () => independent ? Promise.resolve().then(fn).catch(error => notice(error.message, true)) : action(fn));
   return el;
 }
 function setModel(next) {
@@ -57,6 +57,9 @@ function openAccount(id = "") {
 }
 function render() {
   const a = active();
+  const scan = model.scanProgress;
+  $("scanStop").hidden = !scan?.running;
+  if (scan?.running) notice(`${scan.note}；已保留 ${scan.count || 0} 笔${scan.oldest ? `，最早日期 ${scan.oldest}` : "，平台暂未提供下单日期"}`);
   const q = model.queue;
   const running = q?.state === "running";
   $("accounts").replaceChildren();
@@ -88,6 +91,7 @@ function render() {
   for (const key of ["company", "taxId", "email", "saveTitle"]) $(key).disabled = !a || running;
   $("scan").disabled = !a?.connected || running || locked;
   $("importInvoices").disabled = $("scan").disabled;
+  $("refreshProgress").disabled = !a?.connected || running || locked || $("scope").value === "all";
   $("lastScan").textContent = a?.scannedAt ? `上次读取 ${C.beijing(a.scannedAt)}` : "尚未读取订单";
   $("queueCard").hidden = !q;
   if (q) {
@@ -156,19 +160,32 @@ function renderRows() {
     const check = node("input"); check.type = "checkbox"; check.checked = selected.has(row.id); check.disabled = allAccounts; check.setAttribute("aria-label", `选择订单 ${row.id}`);
     check.addEventListener("change", () => { check.checked ? selected.add(row.id) : selected.delete(row.id); renderRows(); });
     checkCell.append(check);
-    const product = node("td"); product.append(node("span", "product", row.product || "商品名称待补充"), node("span", "order-id", row.id));
+    const product = node("td");
+    const card = node("div", "product-card"), thumb = node("button", "thumbnail", "无图"), description = node("div");
+    if (/^https:\/\//.test(row.thumbnail || "")) {
+      const img = node("img"); img.src = row.thumbnail; img.alt = row.product || "商品主图"; img.loading = "lazy"; img.referrerPolicy = "no-referrer";
+      img.addEventListener("error", () => thumb.replaceChildren(document.createTextNode("无图")));
+      thumb.replaceChildren(img); thumb.addEventListener("click", () => { $("imagePreview").src = row.thumbnail; $("imageDialog").showModal(); });
+    }
+    card.append(thumb, description); product.append(card); description.append(node("span", "product", row.product || "商品名称待补充"), node("span", "order-id", row.id));
     const shop = node("td", "row-shop", row.accountName); shop.append(node("span", "order-id", row.shop || "店铺未读取"));
     const amount = node("td"); amount.append(node("span", "", row.amount ? `¥ ${row.amount}` : "金额未读取"), node("span", "order-id", row.date || "日期未读取"));
     const status = node("td"); status.append(node("span", `status ${row.status}`, C.labels[row.status] || row.status));
-    status.append(node("span", "invoice-amount", Number.isSafeInteger(row.invoiceAmountCents) ? `¥ ${C.money(row.invoiceAmountCents)}` : row.status === "issued" ? "票面金额待补充" : ""));
+    status.append(node("span", "invoice-amount", Number.isSafeInteger(row.invoiceAmountCents) ? `¥ ${C.money(row.invoiceAmountCents)}` : row.status === "issued" ? "票面金额待补充" : Number.isSafeInteger(row.applicationAmountCents) ? `申请 ¥ ${C.money(row.applicationAmountCents)}` : "申请金额待核对"));
     if (row.taskStatus) status.append(node("span", "order-id", `助手：${C.labels[row.taskStatus] || row.taskStatus}`));
-    const dates = node("td", "invoice-dates"); dates.append(node("div", "", `申请 ${row.appliedAt || "未取得"}`), node("div", "", `开票 ${row.issuedAt || "未取得"}`));
+    const dates = node("td", "invoice-dates"); dates.append(node("div", "", `申请 ${row.appliedAt || "平台未提供"}`), node("div", "", `开票 ${row.issuedAt || "平台未提供"}`));
     const note = node("td", "row-note", row.note || "尚未处理");
+    if (row.platformCheckedAt) note.append(node("div", "order-id", `最近核对 ${C.beijing(row.platformCheckedAt)}`));
     if (row.downloads?.length) note.append(node("div", "", row.downloads.every(d => d.state === "complete") ? "票据下载完成" : "请查看 Chrome 下载记录"));
     const actions = node("td"); const actionBox = node("div", "row-actions");
     for (const extra of new Set([row.rejectionReason, row.ledgerNote].filter(Boolean))) if (extra !== row.note) note.append(node("div", "", extra));
-    actionBox.append(button("打开订单 ↗", async () => request("OPEN_ORDER", {accountId: row.accountId, orderId: row.id})));
-    actionBox.append(button("发票详情 ↗", async () => request("OPEN_INVOICE", {accountId: row.accountId, orderId: row.id})));
+    actionBox.append(button("打开订单 ↗", async () => { notice("正在打开订单页面…"); await request("OPEN_ORDER", {accountId: row.accountId, orderId: row.id}); }, "", true));
+    actionBox.append(button("查看发票 ↗", async () => request("OPEN_INVOICE", {accountId: row.accountId, orderId: row.id}), "", true));
+    if (["failed", "review"].includes(row.taskStatus || row.status)) {
+      const retry = button("重试读取状态", async () => { setModel(await request("START", {accountId: row.accountId, ids: [row.id], kind: "refresh"})); notice("正在重新读取状态，不会重复提交申请"); });
+      retry.disabled = !a?.connected || model.queue?.state === "running" || allAccounts;
+      actionBox.append(retry);
+    }
     const resolve = button("编辑台账 / 历史", async () => openLedger(row));
     resolve.disabled = model.queue?.state === "running";
     actionBox.append(resolve); actions.append(actionBox);
@@ -219,9 +236,10 @@ async function confirmBatch(kind) {
   const ids = selectedIds();
   if (!ids.length) throw new Error("请先勾选订单");
   const title = kind === "apply" ? C.validateTitle(a.title) : null;
+  if (kind === "apply" && rows().filter(r => ids.includes(r.id)).some(r => r.status !== "pending")) throw new Error("请仅勾选待申请订单；异常订单请先更新开票进度并核对");
   $("confirmTitle").textContent = kind === "apply" ? `申请 ${ids.length} 笔订单的发票` : `下载 ${ids.length} 笔订单的票据`;
   $("confirmBody").textContent = `采购账号：${a.name}。只处理本次勾选的订单。`;
-  $("confirmDetails").textContent = title ? `抬头：${title.company}\n税号：${title.taxId}\n备查邮箱：${title.email || "未设置"}\n类型：企业普通发票` : "文件将保存到 Chrome 下载目录下的「采购发票 / 账号备注」文件夹，按订单号命名。平台仅展示图片时，下载的是预览图；PDF 原件请在发票详情领取。";
+  $("confirmDetails").textContent = title ? `申请金额合计：¥ ${C.money(rows().filter(r => ids.includes(r.id)).reduce((n,r) => n + (r.applicationAmountCents ?? C.cents(r.amount) ?? 0), 0))}（仅已知金额）\n抬头：${title.company}\n税号：${title.taxId}\n备查邮箱：${title.email || "未设置"}\n类型：企业普通发票` : "文件将保存到 Chrome 下载目录下的「采购发票 / 账号备注」文件夹，按订单号命名。平台仅展示图片时，下载的是预览图；PDF 原件请在发票详情领取。";
   $("confirmHint").textContent = kind === "apply" ? "已申请、已开票和待核对订单会跳过。平台表单未提供邮箱字段时，不随申请提交邮箱；原件领取时可另填。" : "仅保存平台提供的票据文件或发票预览图，不截取网页。";
   const dialog = $("confirmDialog");
   dialog.returnValue = "cancel";
@@ -264,12 +282,27 @@ $("titleForm").addEventListener("submit", event => { event.preventDefault(); act
 for (const id of ["openOrders", "firstOpen"]) $(id).addEventListener("click", () => action(async () => { await request("OPEN_ORDERS"); }));
 $("openInvoices").addEventListener("click", () => action(() => request("OPEN_INVOICES")));
 $("refreshTabs").addEventListener("click", () => action(refreshTabs));
-$("scan").addEventListener("click", () => action(async () => {
-  const tabId = Number($("sourceTab").value);
-  if (!tabId) throw new Error("请在右上角设置中打开拼多多订单页，再刷新页面列表");
-  notice("正在读取订单，请暂时保持拼多多页面打开…");
-  const next = await request("SCAN", {accountId: model.active, tabId, loadMore: $("loadMore").checked});
-  setModel(next); notice(`已读取 ${next.scan.count} 单。${next.scan.note}`);
+$("scan").addEventListener("click", () => $("scanDialog").showModal());
+$("scanCancel").addEventListener("click", () => $("scanDialog").close());
+$("imageClose").addEventListener("click", () => $("imageDialog").close());
+$("scanRange").addEventListener("change", () => { $("scanDates").hidden = $("scanRange").value !== "range"; });
+$("scanStop").addEventListener("click", async () => { try { await request("SCAN_STOP"); notice("正在停止，已读取记录会保留"); } catch(e) { notice(e.message, true); } });
+$("scanForm").addEventListener("submit", event => { event.preventDefault(); action(async () => {
+  const range = $("scanRange").value === "range";
+  const from = range ? $("scanFrom").value : "", to = range ? $("scanTo").value : "";
+  if (range && (!from || !to || from > to)) throw new Error("请选择有效的开始和结束日期");
+  $("scanDialog").close(); notice("正在打开官方待申请历史订单…");
+  const next = await request("SCAN_HISTORY", {accountId: model.active, from, to});
+  setModel(next); notice(`${next.scan.note}${next.scanProgress?.missingDates ? `；${next.scanProgress.missingDates} 笔平台未提供下单日期，已保留供核对` : ""}`);
+}); });
+$("refreshProgress").addEventListener("click", () => action(async () => {
+  const ids = selectedIds().length ? selectedIds() : active()?.orders.filter(r => ["submitted", "issued", "rejected"].includes(r.status)).map(r => r.id) || [];
+  if (!ids.length) {
+    notice("正在同步官方开票记录…");
+    const next = await request("IMPORT_INVOICES", {accountId: model.active});
+    setModel(next); notice(`已同步 ${next.scan.count} 条开票记录，可勾选订单继续更新详细进度`); return;
+  }
+  setModel(await request("START", {accountId: model.active, ids, kind: "refresh"})); notice("正在更新开票进度，具体结果在处理记录中显示");
 }));
 $("importInvoices").addEventListener("click", () => action(async () => {
   notice("正在读取官方已有发票记录和金额…");
@@ -322,7 +355,7 @@ $("exportHistory").addEventListener("click", () => {
     ...rows().flatMap(row => (row.history || []).flatMap(entry => entry.changes.map(change => [row.accountName, row.id, C.beijing(entry.at), entry.source === "manual" ? "人工核对" : "平台", fieldLabels[change.field] || change.field, historyValue(change.field, change.before), historyValue(change.field, change.after)])))], `采购开票变更记录_${reportName()}`);
 });
 async function poll() {
-  if (pollRunning || locked) return;
+  if (pollRunning) return;
   pollRunning = true;
   try { setModel(await request("STATE")); }
   catch (error) { notice(error.message, true); }
