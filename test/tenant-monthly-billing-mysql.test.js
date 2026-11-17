@@ -45,6 +45,25 @@ test('monthly billing reads only the current enterprise, including every financi
     }
     await q("INSERT INTO finance_expenses(id,tenant_id,company_id,shop_id,expense_date,category,amount_cny) VALUES(10,NULL,1,10,'2026-10-03','salary',10),(11,1,4,11,'2026-10-03','salary',11),(20,2,2,20,'2026-10-03','salary',20),(30,3,3,30,'2026-10-03','salary',3000),(21,2,2,NULL,'2026-10-03','office',7),(22,2,3,NULL,'2026-10-03','office',9000),(23,2,2,30,'2026-10-03','office',9000)");
     const range = { from:'2026-10-01',to:'2026-10-05' };
+    await t.test('settled orders reuse saved results instead of current price or frozen cost',async()=>{
+      const filters={from:'2026-08-01',to:'2026-08-31',includeAppendices:'0'};
+      await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(940,20,'SETTLED-SAVED','delivered','delivered','2026-08-10')");
+      await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price,frozen_purchase_cost,settlement_state) VALUES(940,940,20,'same-sku',1,999,99,'accrued')");
+      await q("INSERT INTO order_profit_items(order_item_id,sale_amount_cny,purchase_cost_cny,net_profit_cny,profit_status) VALUES(940,123.45,20,17.5,'accrued')");
+      for(let read=0;read<2;read++){const report=(await monthlyBillingDetailsMysql(filters,'2')).selected.summary;assert.equal(report.revenue,123.45);assert.equal(report.purchase_cost,20);assert.equal(report.profit,17.5);}
+      const stored=await q('SELECT sale_amount_cny,purchase_cost_cny,net_profit_cny FROM order_profit_items WHERE order_item_id=940');assert.equal(Number(stored[0].sale_amount_cny),123.45);assert.equal(Number(stored[0].net_profit_cny),17.5);
+      await q('DELETE FROM order_profit_items WHERE order_item_id=940');await q('DELETE FROM order_items WHERE id=940');await q('DELETE FROM orders WHERE id=940');
+    });
+    await t.test('on-demand appendices equal the full report and skip order-profit ranking reads',async()=>{
+      const filters={from:'2026-10-01',to:'2026-10-05',companyId:2};
+      const full=await monthlyBillingDetailsMysql(filters,'2');
+      const only=await monthlyBillingDetailsMysql({...filters,appendicesOnly:'1'},'2');
+      assert.deepEqual(only.procurement_inventory,full.selected.procurement_inventory);assert.deepEqual(only.ai_usage,full.selected.ai_usage);
+      assert.equal(only.selected,undefined);
+      const main=await monthlyBillingDetailsMysql({...filters,includeAppendices:'0'},'2');assert.deepEqual(main.selected.summary,full.selected.summary);assert.deepEqual(main.selected.procurement_inventory,{});
+      await assert.rejects(monthlyBillingDetailsMysql({...filters,companyId:3,appendicesOnly:'1'},'2'),{statusCode:404});
+      await assert.rejects(monthlyBillingDetailsMysql({appendicesOnly:'1'},'2'),{statusCode:400});
+    });
     await t.test('A/B/default summaries, expenses, stocks, procurement and AI remain owned', async () => {
       for (const [tenant, ids] of [['admin',[10,11]],['2',[20]],['3',[30]]]) {
         const value = await monthlyBillingDetailsMysql(range, tenant), selected = value.selected;

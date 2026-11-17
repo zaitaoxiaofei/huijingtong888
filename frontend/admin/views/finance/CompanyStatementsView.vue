@@ -1,8 +1,7 @@
 <script setup>
-import FinanceReconciliation from './FinanceReconciliation.vue';
 import { FINANCE_FILE_CATEGORIES, financeDocumentCategories } from '../../../../src/shared/finance-document-categories.js';
 import { FINANCE_GROUPS, MANUAL_EXPENSE_METRICS, UPLOAD_TYPES, financeMatrix, financeSourceShops, financeLineSign } from '../../../../src/shared/company-finance-report.js';
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { apiClient, currentApiCacheScope, getAuthToken } from '../../utils/api';
@@ -10,6 +9,7 @@ import { useAuthStore } from '../../stores/auth';
 import { canAccessPage } from '../../../../src/shared/permissions.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 
+const FinanceReconciliation=defineAsyncComponent(()=>import('./FinanceReconciliation.vue'));
 const auth=useAuthStore(),router=useRouter(),route=useRoute();
 const allowed=computed(()=>canAccessPage(auth.user,'/finance/company-statements'));
 const initialMonth=/^20\d{2}-(0[1-9]|1[0-2])$/.test(String(route.query.month||''))?String(route.query.month):shanghaiDateKey().slice(0,7);
@@ -24,7 +24,7 @@ let generation=0,controller;
 const money=n=>n==null?'待补':Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const shops=computed(()=>allShops.value.filter(s=>assignments.value.some(a=>Number(a.company_id)===Number(companyId.value)&&Number(a.shop_id)===Number(s.id)&&a.effective_from<=`${uploadMonth.value}-31`&&(!a.effective_to||a.effective_to>=`${uploadMonth.value}-01`))));
 const windowRange=computed(()=>({from:`${year.value}-01`,to:`${year.value}-12`}));
-const query=computed(()=>new URLSearchParams({company_id:companyId.value,...windowRange.value,period_mode:period.value}).toString());
+const query=computed(()=>new URLSearchParams({company_id:companyId.value,...windowRange.value}).toString());
 const categorizedDocuments=computed(()=>(report.value?.documents||[]).map(d=>({...d,categories:d.categories||financeDocumentCategories(d)})));
 const filteredDocuments=computed(()=>categorizedDocuments.value.filter(d=>fileCategory.value==='all'||d.categories.includes(fileCategory.value)));
 const fileCategoryCounts=computed(()=>Object.fromEntries(FINANCE_FILE_CATEGORIES.map(c=>[c.id,categorizedDocuments.value.filter(d=>d.categories.includes(c.id)).length])));
@@ -103,7 +103,8 @@ watch(shopId,()=>{relatedDocumentId.value='';});
 watch(companyId,()=>{uploadType.value='auto';displayName.value='';manual.value={metric:'AI使用费',amount:undefined,currency:'CNY',note:''};relatedDocumentId.value='';});
 watch(uploadMonth,value=>{if(value&&value.slice(0,4)!==year.value)year.value=value.slice(0,4);});
 watch([uploadMonth,uploadType],()=>{relatedDocumentId.value='';if(selectedType.value?.shared)shopId.value=0;});
-watch([companyId,month,period],()=>{shopId.value=0;uploads.value=[];review.value=null;load();});
+watch(query,()=>{shopId.value=0;uploads.value=[];review.value=null;load();});
+watch(period,()=>{selection.value=null;});
 onBeforeUnmount(()=>{generation++;controller?.abort();});
 </script>
 
@@ -121,7 +122,7 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
   <template v-if="report">
    <el-alert v-if="tab!=='reconciliation'" type="warning" :closable="false" :title="`本年度已收到部分销售资料的店铺 ${report.coverage.shops_with_sales}/${report.coverage.shops_expected}。公司账尚未齐全，未提供金额不作零。采购、工资社保和银行到账仍需核对。`" />
    <el-tabs v-model="tab">
-    <el-tab-pane label="公司汇总与店铺明细" name="summary">
+    <el-tab-pane label="公司汇总与店铺明细" name="summary" lazy>
      <div class="totals"><div><span>{{year}}年 · 已采集商品净销售 CNY</span><strong>{{money(netSales)}}</strong></div><div><span>{{year}}年 · 已采集平台费用 CNY</span><strong>{{money(platformFees)}}</strong></div><div><span>公司完整利润 / 税前扣除额</span><strong>待会计核对</strong></div></div>
      <p>收入减去退货冲减；支出按分类单列。金额包含已确认资料与已入账工资的部分合计，采购支出与设备购置不直接计入当期费用。点击分类箭头展开项目，再点金额查看店铺及原件。</p>
      <el-table class="period-matrix" :data="matrix.rows" row-key="id" :expand-row-keys="expandedGroups" :row-class-name="({row})=>row.children?'finance-group-row':''" :tree-props="{children:'children'}" border v-loading="loading" :max-height="650">
@@ -138,7 +139,7 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
      </section>
      <p>公司所属店铺：{{ report.shops.map(s=>s.name).join('、') || '尚未配置' }}。无对应资料的店铺继续列为缺件。</p>
     </el-tab-pane>
-    <el-tab-pane label="上传、解析与归档" name="documents">
+    <el-tab-pane label="上传、解析与归档" name="documents" lazy>
      <div class="toolbar"><el-button @click="guideOpen=!guideOpen">{{guideOpen?'收起文件分类说明':'查看有哪些文件类别'}}</el-button><span>原件 {{categorizedDocuments.length}} 份；综合原件可对应多类，金额按明细只计一次。</span></div>
      <el-table v-if="guideOpen" :data="FINANCE_FILE_CATEGORIES" border class="category-guide"><el-table-column prop="name" label="文件类别" min-width="160"/><el-table-column prop="examples" label="上传什么文件" min-width="260"/><el-table-column prop="effect" label="如何入账 / 避免重复" min-width="300"/></el-table>
      <div class="toolbar"><el-select v-model="fileCategory" aria-label="文件类别筛选"><el-option value="all" :label="`全部类别（${categorizedDocuments.length}份）`"/><el-option v-for="c in FINANCE_FILE_CATEGORIES" :key="c.id" :value="c.id" :label="`${c.name}（${fileCategoryCounts[c.id]||0}份）`"/></el-select><span>待解析的原件已经收到，不等于缺文件；会计审核与金额确认分开。</span></div>
@@ -153,21 +154,21 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
      <el-table v-if="uploads.length" :data="uploads"><el-table-column prop="name" label="本批文件"/><el-table-column prop="status" label="结果"/><el-table-column prop="note" label="提示" min-width="240"/></el-table>
      <el-table :data="filteredDocuments"><el-table-column prop="month_key" label="归档月份" width="110"/><el-table-column label="显示名称 / 原始文件名" min-width="300"><template #default="{row}"><span>{{row.payload_json.display_name||row.original_name}}</span><small v-if="row.payload_json.display_name">{{row.original_name}}</small></template></el-table-column><el-table-column label="文件分类" min-width="190"><template #default="{row}"><el-tag v-for="c in row.categories" :key="c" size="small" class="category-tag">{{categoryName(c)}}</el-tag></template></el-table-column><el-table-column label="用途" min-width="150"><template #default="{row}">{{UPLOAD_TYPES.find(t=>t.value===row.payload_json.upload_type)?.label||'平台自动识别'}}<small v-if="row.payload_json.related_document_id">关联业务 #{{row.payload_json.related_document_id}}</small></template></el-table-column><el-table-column label="解析状态" width="140"><template #default="{row}">{{ statuses[row.parse_status] }}</template></el-table-column><el-table-column label="操作" width="240"><template #default="{row}"><el-button link :aria-label="`预览 ${row.original_name}`" @click="openPreview(row)">预览</el-button><el-button link @click="openFile(row.attachment_url)">原件</el-button><el-button v-if="row.parse_status==='preview'" link type="primary" :disabled="busy" :aria-label="`确认归档 ${row.original_name}`" @click="confirm(row)">确认归档</el-button></template></el-table-column></el-table>
     </el-tab-pane>
-    <el-tab-pane label="逐单对账与校准" name="reconciliation">
+    <el-tab-pane label="逐单对账与校准" name="reconciliation" lazy>
      <FinanceReconciliation v-if="tab==='reconciliation'" :key="companyId" :company-id="companyId" :shops="allShops.filter(s=>assignments.some(a=>Number(a.company_id)===Number(companyId)&&Number(a.shop_id)===Number(s.id)))" :initial-month="month" @documents-changed="refreshDocuments"/>
     </el-tab-pane>
-    <el-tab-pane label="结算与回款" name="cash">
+    <el-tab-pane label="结算与回款" name="cash" lazy>
      <el-collapse><el-collapse-item :title="`重复交易来源（${report.cash_reconciliation.duplicates?.length||0}条）`"><el-table :data="report.cash_reconciliation.duplicates||[]"><el-table-column prop="reference" label="交易编号"/><el-table-column label="原件来源"><template #default="{row}"><el-button v-for="s in row.sources" :key="`${s.document_id}:${s.source}`" link @click="openFile(s.attachment_url)">#{{s.document_id}} {{s.original_name}}</el-button></template></el-table-column></el-table></el-collapse-item></el-collapse><p>相同连连交易号已去重 {{report.cash_reconciliation.duplicates?.length||0}} 条；冲突 {{report.cash_reconciliation.conflicts?.length||0}} 项。重复导出只保留一笔金额，原件全部保留。</p>
      <div v-for="c in report.cash_reconciliation.conflicts||[]" :key="c.key"><el-alert :title="c.note" type="error" :closable="false"/><el-button v-for="s in c.sources" :key="`${s.document_id}:${s.source}`" link @click="openFile(s.attachment_url)">#{{s.document_id}} {{s.original_name}}</el-button></div>
      <el-table :data="report.cash_reconciliation.currencies"><el-table-column prop="currency" label="原币"/><el-table-column label="收款入账"><template #default="{row}">{{money(row.entries)}}</template></el-table-column><el-table-column label="提现本金"><template #default="{row}">{{money(row.withdrawals)}}</template></el-table-column><el-table-column label="提现手续费"><template #default="{row}">{{money(row.fees)}}</template></el-table-column></el-table>
      <el-table :data="report.cash_reconciliation.matches"><el-table-column label="平台转出日期"><template #default="{row}">{{row.payment.date}}</template></el-table-column><el-table-column label="平台转出 CNY"><template #default="{row}">{{money(row.payment.amount)}}</template></el-table-column><el-table-column label="入账日期"><template #default="{row}">{{row.entry?.date||'未匹配'}}</template></el-table-column><el-table-column label="入账 CNH"><template #default="{row}">{{money(row.entry?.amount)}}</template></el-table-column><el-table-column label="状态"><template #default="{row}">{{row.status==='amount_date_candidate'?'金额日期候选，归属待核':row.status==='ambiguous'?'多笔候选，待人工核对':'未匹配'}}</template></el-table-column></el-table>
      <el-alert :title="report.cash_reconciliation.note" type="warning" :closable="false"/><h2>文件内部核对</h2><div v-for="d in report.documents.filter(d=>d.parse_status==='confirmed'&&d.payload_json.controls?.length)" :key="d.id"><p>{{d.original_name}}</p><div v-for="c in d.payload_json.controls" :key="c.name">{{c.name}}：{{c.amount!=null?money(c.amount):money(c.difference)}} {{c.currency}} {{c.amount==null?'（差额）':''}}</div></div>
     </el-tab-pane>
-    <el-tab-pane label="发票与会计审核" name="vouchers">
+    <el-tab-pane label="发票与会计审核" name="vouchers" lazy>
      <p>文件识别为发票不代表已经满足税前扣除条件；会计认可也不是税务审批。综合原件关联多项费用，金额不重复累计。</p>
      <el-table :data="report.documents"><el-table-column prop="original_name" label="文件" min-width="260"/><el-table-column label="审核状态"><template #default="{row}">{{reviews[row.review_status]}}</template></el-table-column><el-table-column prop="review_note" label="审核意见" min-width="200"/><el-table-column label="操作"><template #default="{row}"><el-button link @click="review={...row}">填写意见</el-button></template></el-table-column></el-table>
     </el-tab-pane>
-    <el-tab-pane label="采购库存与缺件" name="gaps"><ul><li v-for="g in report.gaps" :key="g">{{g}}</li></ul><el-button @click="router.push('/profit/monthly-billing')">查看现有订单及采购成本</el-button><el-button @click="router.push('/finance/inventory-capital')">查看库存占用明细</el-button><el-button @click="router.push({path:'/finance/payroll',query:{companyId:companyId,month:uploadMonth}})">查看工资资料</el-button></el-tab-pane>
+    <el-tab-pane label="采购库存与缺件" name="gaps" lazy><ul><li v-for="g in report.gaps" :key="g">{{g}}</li></ul><el-button @click="router.push('/profit/monthly-billing')">查看现有订单及采购成本</el-button><el-button @click="router.push('/finance/inventory-capital')">查看库存占用明细</el-button><el-button @click="router.push({path:'/finance/payroll',query:{companyId:companyId,month:uploadMonth}})">查看工资资料</el-button></el-tab-pane>
    </el-tabs>
   </template>
   <el-dialog v-if="preview" :model-value="true" title="解析预览：检查后确认归档" width="min(900px,95vw)" @close="preview=null"><p>{{preview.original_name}} · {{statuses[preview.parse_status]}}</p><div v-if="editManual" class="upload-context"><strong>修改尚未确认的手工草稿</strong><el-select v-model="editManual.metric" aria-label="草稿费用项目" :disabled="busy"><el-option v-for="m in MANUAL_EXPENSE_METRICS" :key="m" :label="m" :value="m"/></el-select><el-input-number v-model="editManual.amount" :precision="2" :disabled="busy" aria-label="草稿金额CNY"/><el-input v-model="editManual.note" type="textarea" maxlength="1000" :disabled="busy" aria-label="草稿业务依据"/><el-button type="primary" :disabled="busy" @click="saveManualDraft">保存草稿修改</el-button><span>保存后重新预览再确认；下方解析表展示上次保存内容。</span></div><el-alert v-for="w in preview.payload_json.warnings" :key="w" :title="w" type="warning" :closable="false"/><el-table :data="preview.payload_json.facts"><el-table-column prop="metric" label="项目"/><el-table-column prop="amount" label="金额"/><el-table-column prop="currency" label="原币"/><el-table-column prop="source" label="提取位置" min-width="240"/></el-table><p v-if="preview.payload_json.order_rows?.length">已解析 {{preview.payload_json.order_rows.length}} 个逐单商品行，确认归档后到“逐单对账与校准”核对。</p><p v-if="!preview.payload_json.facts?.length&&!preview.payload_json.order_rows?.length">此文件仅作业务/结算配套归档，不增加销售或费用金额。</p><p>原件上传时间：{{preview.created_at?shanghaiDateTimeText(preview.created_at):'本批上传'}}</p></el-dialog>
