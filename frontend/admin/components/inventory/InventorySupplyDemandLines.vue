@@ -1,37 +1,40 @@
 <script setup>
 import {computed} from 'vue';
-import {inventorySupplyLines} from '../../../../src/shared/inventory-supply-lines.js';
+import {inventorySupplyLines,inventorySupplyLineFacts} from '../../../../src/shared/inventory-supply-lines.js';
 const props=defineProps({workflow:Object,group:{type:String,default:'all'},canSync:Boolean,syncing:Boolean,syncError:String});
 const emit=defineEmits(['detail','sync']);
-const lines=computed(()=>inventorySupplyLines(props.workflow).filter(line=>props.group==='all'||(props.group==='local'?['orders','safety']:['fbp','forecast']).includes(line.key)));
+const lines=computed(()=>inventorySupplyLines(props.workflow).filter(line=>props.group==='all'||(props.group==='local'?['orders','safety']:['fbp','forecast']).includes(line.key)).map(line=>({...line,facts:inventorySupplyLineFacts(line)})));
 const quantity=n=>n==null?'待核对':`${Number(n)} 件`;
-function summary(line){
- if(line.quantity==null){if(line.key==='forecast')return props.workflow?.fbp?.sku_count===0?'未绑定SKU':'待同步';if(line.key==='safety'&&props.workflow?.physical_recorded<0)return '需盘点';return '待核实';}
- if(line.key==='fbp'&&line.quantity===0)return '暂无申请';
- if(line.quantity===0)return '已覆盖';
- return `${line.partial?'未覆盖 ':''}${quantity(line.quantity)}`;
+function targetText(line){
+ const target=line.facts[0];
+ if(target.value==null){if(line.key==='forecast')return props.workflow?.fbp?.sku_count===0?'未绑定SKU':'待同步';return `${target.label}待核对`;}
+ return `${target.label} ${quantity(target.value)}`;
 }
 </script>
 <template>
  <div class="compact-demand-lines">
   <div v-for="line in lines" :key="line.key" :class="['compact-demand-line',`is-${line.status}`]">
-   <el-button plain size="small" @click="emit('detail',line.key)">{{line.label}}</el-button>
-   <el-popover trigger="hover" placement="top" :width="330">
-    <template #reference><span class="compact-demand-quantity">{{summary(line)}}</span></template>
-    <p>{{line.label}}：{{quantity(line.target??line.quantity)}}</p>
-    <p v-if="line.partial">按当前未覆盖订单采购；账面差异另行核对，不重复增加采购量。</p>
-    <p v-if="line.incoming!=null">采购在途覆盖 {{quantity(line.incoming)}}</p>
-    <p v-if="line.stock!=null">本地现货覆盖 {{quantity(line.stock)}}</p>
-    <p v-if="line.purchase!=null">{{line.required?'必须采购':'建议采购'}} {{quantity(line.purchase)}}</p>
-    <p v-if="line.key==='forecast'&&!workflow?.fbp?.known">{{workflow?.fbp?.unknown_reason||'官方库存尚未完整同步'}}</p>
-    <p>点击需求名称查看订单、规则或申请明细。</p>
-   </el-popover>
-   <span v-if="line.purchase>0" :class="['compact-demand-buy',line.required?'required':'optional']">{{line.required?'采购':'建议'}} {{line.purchase}}</span>
-   <el-button v-else-if="line.key==='forecast'&&canSync" plain size="small" :loading="syncing" @click="emit('sync')">{{syncing?'同步中':'同步重算'}}</el-button>
+   <div class="compact-demand-heading">
+    <el-button plain size="small" @click="emit('detail',line.key)">{{line.label}}</el-button>
+    <el-popover trigger="hover" placement="top" :width="350">
+     <template #reference><span class="compact-demand-target">{{targetText(line)}}</span></template>
+     <p v-for="fact in line.facts" :key="fact.label">{{fact.label}}：{{quantity(fact.value)}}</p>
+     <p v-if="line.key==='orders'">订单需求是实际库存件数，不是订单笔数；现货和在途已分配后，剩余部分才需要采购。</p>
+     <p v-if="line.key==='safety'">保障目标是按消耗和备货周期计算的安全库存，不是新增订单，补货可选。</p>
+     <p v-if="line.key==='fbp'">已批准的申请进入发仓锁定；没有待审申请不代表没有锁定。锁定已在可用现货中扣除，不再重复加到采购量。</p>
+     <p v-if="line.partial">当前仅确认订单采购缺口；现货分配仍待核实，账面差异不重复增加采购量。</p>
+     <p v-if="line.key==='forecast'&&!workflow?.fbp?.known">{{workflow?.fbp?.unknown_reason||'官方库存尚未完整同步'}}</p>
+     <p>点击需求名称查看订单、规则或申请明细。</p>
+    </el-popover>
+    <el-button v-if="line.key==='forecast'&&!(line.purchase>0)&&canSync" plain size="small" :loading="syncing" @click="emit('sync')">{{syncing?'同步中':'同步重算'}}</el-button>
+   </div>
+   <div class="compact-demand-breakdown">
+    <span v-for="fact in line.facts.slice(1)" :key="fact.label" :class="['compact-demand-fact',{'is-required':fact.kind==='purchase'&&line.required&&fact.value>0,'is-optional':fact.kind==='purchase'&&!line.required&&fact.value>0,'is-locked':fact.kind==='locked'}]">{{fact.label}} <b>{{quantity(fact.value)}}</b></span>
+   </div>
   </div>
   <el-tooltip v-if="syncError&&group!=='local'" :content="syncError"><el-button plain size="small" type="danger" @click="emit('sync')">同步未完成，点击重试</el-button></el-tooltip>
  </div>
 </template>
 <style scoped>
-.compact-demand-lines{display:grid;gap:8px;font-size:12px}.compact-demand-line{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;min-height:28px}.compact-demand-line>.el-button{justify-self:start;margin:0;font-size:12px}.compact-demand-quantity{font-variant-numeric:tabular-nums;cursor:help;white-space:nowrap}.compact-demand-buy{text-align:right;font-size:12px;white-space:nowrap}.required,.is-danger .compact-demand-quantity{color:var(--el-color-danger)}.optional,.is-warning .compact-demand-quantity{color:var(--el-color-warning)}.is-success .compact-demand-quantity{color:var(--el-color-success)}
+.compact-demand-lines{display:grid;gap:10px;font-size:12px}.compact-demand-line{display:grid;gap:4px;min-width:0}.compact-demand-heading{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-height:28px}.compact-demand-heading>.el-button{margin:0;font-size:12px}.compact-demand-target{font-variant-numeric:tabular-nums;cursor:help;white-space:nowrap;color:var(--el-text-color-primary)}.compact-demand-breakdown{display:flex;flex-wrap:wrap;gap:3px 10px;color:var(--el-text-color-secondary);line-height:1.5}.compact-demand-fact{white-space:nowrap;font-variant-numeric:tabular-nums}.compact-demand-fact b{font-weight:500}.is-required{color:var(--el-color-danger)}.is-optional{color:var(--el-color-warning)}.is-locked{color:var(--el-text-color-primary)}
 </style>
