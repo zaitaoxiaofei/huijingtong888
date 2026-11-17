@@ -1,0 +1,38 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><title>开票助手隔离测试夹具</title></head><body>
+<h1>填写发票信息（隔离测试，不连接拼多多）</h1>
+<label>发票抬头<textarea placeholder="请输入抬头名称"></textarea></label>
+<label>税号<input placeholder="请输入纳税人识别号"></label>
+<div>发票类型：电子发票（普通发票）</div>
+<button id="submit">申请发票</button>
+<section id="confirm" hidden><p>确认您的发票信息无误后再提交</p><button id="final">确认</button></section>
+<p id="result"></p>
+<script>
+window.fixture = {pageState: {}, phases: [], clicks: 0, mode: "success"};
+window.chrome = {runtime: {id: "fixture", onMessage: {addListener(fn) { window.fixtureListener = fn; }},
+  async sendMessage(message) {
+    if (message.type === "PDD_INVOICE_PAGE_STATE") return {ok: true, value: window.fixture.pageState};
+    if (message.type === "PDD_INVOICE_AUTHORIZE") {
+      window.fixture.phases.push(message.phase || "initial");
+      if (window.fixture.mode === "paused") return {ok: false, error: "任务已暂停"};
+      return {ok: true, value: {authorized: true}};
+    }
+    return {ok: true, value: []};
+  }
+}};
+document.getElementById("submit").onclick = () => { document.getElementById("confirm").hidden = false; };
+document.getElementById("final").onclick = () => { window.fixture.clicks++; document.getElementById("confirm").hidden = true; document.getElementById("result").textContent = "提交成功"; };
+window.runScenario = async name => {
+  document.getElementById("confirm").hidden = true;
+  document.getElementById("result").textContent = "";
+  document.querySelector("textarea").value = "";
+  document.querySelector("input").value = "";
+  document.querySelector("input").placeholder = name === "missingTax" ? "无法识别的字段" : "请输入纳税人识别号";
+  document.querySelector("input").parentElement.firstChild.textContent = name === "missingTax" ? "未知字段" : "税号";
+  document.getElementById("duplicate")?.remove();
+  if (name === "ambiguous") { const button = document.createElement("button"); button.id = "duplicate"; button.textContent = "申请发票"; document.body.append(button); }
+  window.fixture = {pageState: {ready: true, orderId: name === "mismatch" ? "261117-999999999999999" : "261117-123456789012345", hasApplied: name === "alreadyApplied", invoiceKind: 0, displayText: "商家处理中"}, phases: [], clicks: 0, mode: name};
+  const reply = await new Promise(resolve => window.fixtureListener({type: "PDD_INVOICE_PROCESS", queueId: "test-queue", orderId: "261117-123456789012345", kind: "apply", title: {company: "测试采购有限公司", taxId: "91310113MA12345678", email: ""}}, {id: "fixture"}, resolve));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return {scenario: name, reply, phases: window.fixture.phases, finalClicks: window.fixture.clicks};
+};
+</script><script src="../../pdd-invoice-assistant/core.js"></script><script src="../../pdd-invoice-assistant/content.js"></script></body></html>
