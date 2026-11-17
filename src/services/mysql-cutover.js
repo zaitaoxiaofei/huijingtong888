@@ -1,3 +1,7 @@
+import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
+import {createInventoryBundleConversion} from './inventory-bundle-conversion.js';
+import {createBundleOrderReconciliation} from './bundle-order-reconciliation.js';
+import {loadBundleFinishedStocks} from './bundle-finished-stock.js';
 import { normalizeProductAlias } from "../shared/product-alias.js";
 import {billingEvidenceIndex} from './billing-evidence-index.js';
 import {createInventoryBatchStocktake} from './inventory-batch-stocktake.js';
@@ -2966,7 +2970,7 @@ export async function orderInventoryAvailabilityMysql(query = {}, tenantId = "ad
   }
   const defaultTenantId = await resolveShopTenantIdMysql("admin");
   const requestTenantId = String(tenantId) === "admin" ? null : await resolveShopTenantIdMysql(tenantId);
-  const result = await loadOrderInventoryAvailability({ query: mysqlQuery, loadBalances: inventoryProductBalanceMysql }, query, {
+  const result = await loadOrderInventoryAvailability({ query: mysqlQuery, loadBalances: inventoryProductBalanceMysql,loadFinishedProductIds:async ids=>(await Promise.all(ids.map(async id=>loadBundleFinishedStocks(mysqlQuery,await resolveInventoryTenantScope(id))))).flatMap(rows=>rows.map(s=>Number(s.product_id))) }, query, {
     tenantId: requestTenantId, defaultTenantId
   });
   if (String(query.includeRows || '') !== '1' || !result.rows.length) return result;
@@ -4454,6 +4458,15 @@ async function purchasedInventoryInTransitMysql(tenantPk, defaultTenant) {
 }
 
 async function inventoryProductBalanceMysql(productIds, tenantPk, defaultTenant, forceRefresh = false) {
+  const scope=await resolveInventoryTenantScope(tenantPk);
+  if((await loadBundleFinishedStocks(mysqlQuery,scope)).length){
+    const coverage=await loadOrderProcurementCoverage(mysqlQuery,'',{tenantId:tenantPk,fresh:true});
+    const stocks=new Map((coverage.inventory_stocks||[]).map(s=>[Number(s.product_id),s]));
+    return new Map(productIds.map(id=>{const stock=stocks.get(Number(id))||{},physical=Number(stock.ledger||0)+Number(stock.open_deducted||0),fbp=Number(stock.fbp_reserved||0);
+      let demand=0;for(const order of coverage.values())if(order.needs_fulfillment&&order.stock_location!=='FBP')for(const item of order.items)if(Number(item.product_id)===Number(id))demand+=Number(item.quantity);
+      return[Number(id),{product_id:Number(id),ledger_qty:Number(stock.ledger||0),open_deducted_qty:Number(stock.open_deducted||0),open_order_demand_qty:demand,fbp_reserved_qty:fbp,physical_stock:physical,available_stock:Math.max(0,physical-demand-fbp),inventory_needs_review:physical<0}];
+    }));
+  }
   return loadInventoryProductBalances(mysqlQuery, withMysqlTransaction, tenantPk, defaultTenant, productIds, {
     forceRefresh,
     onRefreshed: () => invalidateMasterDataCachePrefix("stock-alerts:inventory-base:v1:")
@@ -15366,7 +15379,11 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin", opti
     const next=normalizeProductComponentItemsMysql(body.composition_items || body.components || []);
     const signature=items=>JSON.stringify(items.map(r=>[Number(r.component_product_id),Number(r.quantity),r.component_role==='gift'?'gift':'included']).sort((a,b)=>a[0]-b[0]));
     shouldSyncOutbound=signature(previous)!==signature(next);
-    if(shouldSyncOutbound)await saveProductComponentsTxMysql(connection, productId, next, tenantScoped ? String(tenantPk) : "admin");
+    if(shouldSyncOutbound){
+      const [finished]=await run(`SELECT COALESCE(SUM(im.quantity_delta),0)+COALESCE(SUM(CASE WHEN im.source_type='order_outbound' AND im.stock_location_source='bundle_finished' AND EXISTS(SELECT 1 FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.id=im.related_order_item_id AND NOT (${orderTransportEvidenceSql('o')}) AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage)) NOT REGEXP 'cancel|return|reject|delivered') THEN -im.quantity_delta ELSE 0 END),0) AS quantity FROM inventory_movements im WHERE im.product_id=? AND ${inventoryTenantSql(scope,'im')} AND im.status='posted' AND (im.source_type IN ('bundle_assembly','bundle_disassembly') OR im.stock_location_source='bundle_finished')`,[productId]);
+      if(Number(finished?.quantity)>0)throw Object.assign(new Error('此套装仍有已组装成品，请先拆包或发完后再修改组成，避免新旧成品混用'),{statusCode:409});
+      await saveProductComponentsTxMysql(connection, productId, next, tenantScoped ? String(tenantPk) : 'admin');
+    }
   }
   if (body.structured_naming || body.structuredNaming) await saveStructuredNamingMysql(productId, body, connection, String(tenantPk));
   const afterIdentity=await readProductIdentity(run,scope,productId);
@@ -18200,10 +18217,24 @@ async function postInventoryMysql(connection, body = {}) {
 
 async function postProductInventoryWithComponentsMysql(connection, body = {}, tenantId = "admin") {
   const scope = await resolveInventoryTenantScope(tenantId);
-  await assertInventoryRecord(scope, 'product', body.product_id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
   const productId = Number(body.product_id || 0);
   const quantityDelta = Number(body.quantity_delta || 0);
   if (!productId || !quantityDelta) return [];
+  if(body.related_order_item_id&&['order_outbound','order_outbound_adjustment'].includes(body.source_type)&&!['FBP','FBO','OGR'].includes(body.stock_location)&&(await loadBundleFinishedStocks((sql,args)=>mysqlConnectionQuery(connection,sql,args),scope)).length){
+    const [live]=await mysqlConnectionQuery(connection,`SELECT oi.id FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id WHERE oi.id=? AND oi.quantity>0 AND ${inventoryTenantSql(scope,'s')}
+      AND NOT (${orderTransportEvidenceSql('o')}) AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage)) NOT REGEXP 'cancel|return|reject|delivered'`,[body.related_order_item_id]);
+    if((live&&String(body.source_ref||'').includes(':removed:'))||String(body.source_ref||'').includes(':wb-cancel:')){
+      const originals=await mysqlConnectionQuery(connection,`SELECT im.product_id,SUM(im.quantity_delta) quantity,MAX(im.unit_cost) unit_cost,MAX(im.stock_location_source) stock_location_source FROM inventory_movements im WHERE im.related_order_item_id=? AND ${inventoryTenantSql(scope,'im')} AND im.status='posted' AND im.source_type IN ('order_outbound','order_outbound_adjustment') GROUP BY im.product_id`,[body.related_order_item_id]);
+      for(const row of originals)if(Number(row.quantity)<0)await postInventoryMysql(connection,{...body,product_id:row.product_id,quantity_delta:-Number(row.quantity),unit_cost:row.unit_cost,amount:-Number(row.quantity)*Number(row.unit_cost),stock_location_source:row.stock_location_source});
+      return [];
+    }
+    if(live){
+    const perform=async tx=>{await mysqlConnectionQuery(tx,`SELECT p.id FROM products p WHERE ${inventoryTenantSql(scope,'p')} ORDER BY p.id FOR UPDATE`);await reconcileBundleOrders(tx,scope);};
+    if(connection===mysqlPoolConnectionAdapter)await withMysqlTransaction(perform);else await perform(connection);
+    return [];
+    }
+  }
+  await assertInventoryRecord(scope, 'product', body.product_id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
   const components = await productComponentRowsMysql(productId, tenantId);
   if (!components.length) {
     const movementId = await postInventoryMysql(connection, body);
@@ -18677,7 +18708,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
           UPDATE inventory_movements
           SET status = 'posted',
             stock_location = ?,
-            stock_location_source = ?,
+            stock_location_source = CASE WHEN stock_location_source='bundle_finished' THEN stock_location_source ELSE ? END,
             note = 'Cancelled order outbound, restored by return movement'
           WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
             AND status = 'posted' AND quantity_delta < 0
@@ -18693,7 +18724,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
           const restoreStockLocation = normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
             ? resolvedStockLocation.stockLocation
             : normalizeStockLocationMysql(outboundMovement.stock_location);
-          const restoreStockLocationSource = normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
+          const restoreStockLocationSource = outboundMovement.stock_location_source==='bundle_finished' ? 'bundle_finished' : normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
             ? resolvedStockLocation.stockLocationSource
             : String(outboundMovement.stock_location_source || "order_outbound").slice(0, 64);
           const returnSourceRef = `cancel_${row.order_item_id}_${restoreProductId}`;
@@ -18807,6 +18838,10 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
       FROM inventory_movements
       WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
     `, [row.id]);
+    if (existingOutboundMovements.length && (await loadBundleFinishedStocks(mysqlQuery,tenantScope)).length) {
+      if(!isOrderInTransportMysql({status:row.order_status,tracking_stage:row.tracking_stage}))await upsertOrderOutboundRecordMysql(row,outboundStockLocation,'套装统一分配',tenantScope.id);
+      continue;
+    }
     if (existingOutboundMovements.length) {
       if (isOrderInTransportMysql({ status: row.order_status, tracking_stage: row.tracking_stage })) continue;
       const desiredMovements = await desiredProductInventoryMovementRowsMysql({
@@ -18906,6 +18941,10 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     `, [row.shop_id, row.posting_number, row.ozon_sku]);
     deducted += 1;
   }
+  if((await loadBundleFinishedStocks(mysqlQuery,tenantScope)).length)await withMysqlTransaction(async connection=>{
+    await mysqlConnectionQuery(connection,`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p',tenantScope)} ORDER BY p.id FOR UPDATE`);
+    await reconcileBundleOrders(connection,tenantScope);
+  });
   if (cancelledRows.length || outboundRecordsSynced || deducted || componentMigrations) invalidateOrderProcurementCoverage();
   return {
     deducted,
@@ -30693,7 +30732,7 @@ export async function backfillOutboundStockLocationsMysql(options = {}) {
         AND obr.product_id = im.product_id
         AND obr.order_ref = im.related_posting_number
       SET im.stock_location = obr.stock_location,
-        im.stock_location_source = LEFT(CONCAT('outbound_', obr.stock_location_source), 64)
+        im.stock_location_source = CASE WHEN im.stock_location_source='bundle_finished' THEN im.stock_location_source ELSE LEFT(CONCAT('outbound_', obr.stock_location_source), 64) END
       WHERE obr.id = ?
         AND im.source_type IN ('order_outbound', 'order_outbound_adjustment')
         AND (${force ? "1 = 1" : "im.stock_location IS NULL OR im.stock_location = '' OR im.stock_location = 'UNKNOWN'"})
@@ -31861,9 +31900,20 @@ function inventoryCapitalSourcesMysql(scope) {
 
 async function availableLocalInventoryCapitalMysql(scope) {
   const rows = await mysqlQuery(inventoryCapitalSourcesMysql(scope).local);
-  if (!rows.length) return [];
+  const events=await mysqlQuery("SELECT id,product_id,action,detail_json,created_at FROM inventory_flow_events WHERE tenant_id=? AND action IN ('bundle_assembly','bundle_disassembly') ORDER BY id",[scope.id]);
+  const roots=[...new Set(events.filter(e=>e.action==='bundle_assembly').map(e=>Number(e.product_id)))];
+  if (!rows.length&&!roots.length) return [];
   await ensureProcurementLedgerSchema(mysqlExecute);
-  const coverage=await loadOrderProcurementCoverage(mysqlQuery,'',{productIds:rows.map(row=>Number(row.product_id)),tenantId:scope.id,includeLegacyTenantNull:scope.isDefault});
+  const coverage=await loadOrderProcurementCoverage(mysqlQuery,'',{productIds:[...rows.map(row=>Number(row.product_id)),...roots],tenantId:scope.id,includeLegacyTenantNull:scope.isDefault});
+  if(roots.length){
+    const products=await mysqlQuery(`SELECT p.id,p.name,p.code,p.inventory_number FROM products p WHERE p.id IN (${roots.map(()=>'?').join(',')}) AND p.active=1 AND ${orderTenantPredicateMysql('p',scope)}`,roots);
+    for(const product of products){
+      const stock=coverage.inventory_stocks?.find(s=>Number(s.product_id)===Number(product.id)),physical=Number(stock?.ledger||0)+Number(stock?.open_deducted||0);
+      if(physical<=0)continue;
+      const batches=remainingAssemblyBatches(events.filter(e=>Number(e.product_id)===Number(product.id)),physical),unitCost=batches.reduce((n,b)=>n+b.remaining*Number(b.unit_cost||0),0)/physical;
+      rows.push({row_id:product.id,product_id:product.id,product_name:product.name,code:product.code,inventory_number:product.inventory_number,quantity:Number(stock?.ledger||0),unit_cost:unitCost,cost_basis:'assembly_batch',cost_missing:batches.some(b=>b.cost_known!==true)?1:0,cost_version:null,purchase_quantity:0,received_quantity:0,unclassified_movements:0,updated_at:batches.at(-1)?.created_at});
+    }
+  }
   const states = await createInventoryWorkflowService().batch(rows.map(row=>Number(row.product_id)),scope.id,
     {localOnly:true,fresh:true,cache:false,coverage});
   return availableLocalCapitalRows(rows,states,coverage);
@@ -35788,6 +35838,10 @@ async function readLedgerWithFlow(query, tenantId) {
 }
 const purchaseBundleReviewService=createPurchaseBundleReview({ledger:procurementLedgerService});
 const inventoryBundleStocktakeService=createInventoryBundleStocktake({ledger:procurementLedgerService});
+const reconcileBundleOrders=createBundleOrderReconciliation({postMovement:postInventoryMysql,rebuild:rebuildInventoryCurrentForProductMysql});
+const inventoryBundleConversionService=createInventoryBundleConversion({ledger:procurementLedgerService,postMovement:postInventoryMysql,reconcile:reconcileBundleOrders});
+export const inventoryBundleConversionContextMysql=(params,session)=>inventoryBundleConversionService.context(params,session);
+export const applyInventoryBundleConversionMysql=(body,session)=>inventoryBundleConversionService.apply(body,session);
 const inventoryBatchStocktakeService=createInventoryBatchStocktake({prepare:()=>procurementLedgerService.prepare()});
 export const inventoryBatchStocktakeContextMysql=(params,session)=>inventoryBatchStocktakeService.context(params,session);
 export const applyInventoryBatchStocktakeMysql=(body,session)=>inventoryBatchStocktakeService.apply(body,session);

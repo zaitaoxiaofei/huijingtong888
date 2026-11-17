@@ -1,3 +1,5 @@
+import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
+import {loadBundleFinishedStocks,allocateBundleFinishedDemands} from './bundle-finished-stock.js';
 import { loadInventoryComposition } from './inventory-composition.js';
 import { expandCurrentProcurementDemands, procurementDemandAncestorIds } from './procurement-demand-composition.js';
 import { procurementQueueOrderIds } from './order-procurement-queues.js';
@@ -43,9 +45,11 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const ownerScope = await resolveInventoryTenantScope(tenantId ?? 'admin', query);
   const tenantPk = ownerScope.id;
   includeLegacyTenantNull = ownerScope.isDefault;
+  const finishedStocks = await loadBundleFinishedStocks(query, ownerScope);
+  const hasFinishedHistory = finishedStocks.length > 0;
   const requestedIds = [...new Set([
-    ...(Array.isArray(productIds) ? productIds : []),
-    productId
+    ...(hasFinishedHistory ? [] : Array.isArray(productIds) ? productIds : []),
+    hasFinishedHistory ? null : productId
   ].map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
   const ownedProducts = await query(`SELECT id FROM products WHERE ${ownerScope.predicate().sql}${requestedIds.length ? ` AND id IN (${requestedIds.join(',')})` : ''}`, [tenantPk]);
   const scopedIds = ownedProducts.map(row => Number(row.id)).filter(id => Number.isSafeInteger(id) && id > 0);
@@ -122,7 +126,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         o.logistics_status AS source_order_logistics_status,
         ${localBatchScope ? 'local_facts.local_transport_at' : `COALESCE(${transportAt}, o.delivered_at, o.ordered_at)`} AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
-        cp.name AS product_name, cp.stock_unit,p.id AS root_product_id,p.name AS root_product_name,p.inventory_number AS root_inventory_number,oi.quantity AS root_quantity,
+        recipe.id AS recipe_id,cp.name AS product_name, cp.stock_unit,p.id AS root_product_id,p.name AS root_product_name,p.inventory_number AS root_inventory_number,oi.quantity AS root_quantity,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity,
         ${localBatchScope ? 'local_facts.local_needs_fulfillment' : needsFulfillmentSql} AS needs_fulfillment,
         ${localBatchScope ? 'local_facts.local_entered_transport' : enteredTransportSql} AS entered_transport,
@@ -182,7 +186,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       allocationQuery(`SELECT marks.order_item_id, marks.product_id, marks.handling_type, marks.status FROM order_item_procurement_marks marks
         JOIN order_items mi ON mi.id = marks.order_item_id AND mi.quantity > 0 JOIN orders mo ON mo.id = mi.order_id AND mo.id = marks.order_id
         JOIN shops ms ON ms.id = mo.shop_id${tenantScope('ms.tenant_id')} WHERE marks.status = 'handled'${scope('marks.product_id')}`),
-      query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit
+      query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit, MAX(im.stock_location_source) AS stock_location_source
         FROM inventory_movements im LEFT JOIN products p ON p.id = im.product_id WHERE im.status = 'posted' AND im.source_type = 'order_outbound'
           AND UPPER(COALESCE(NULLIF(im.stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')
           ${scope('im.product_id')}${tenantScope('im.tenant_id')}
@@ -192,7 +196,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         JOIN shops hshop ON hshop.id = ho.shop_id${tenantScope('hshop.tenant_id')}
         LEFT JOIN inbound_records hir ON hir.id = hs.inbound_record_id AND hir.product_id = hs.product_id${tenantScope('hir.tenant_id')}
         WHERE (hs.inbound_record_id IS NULL OR hir.id IS NOT NULL)${scope('hs.product_id')}`),
-      allocationQuery(`SELECT id, product_id, quantity_delta AS quantity, created_at AS approved_at FROM inventory_movements
+      allocationQuery(`SELECT id, product_id, quantity_delta AS quantity, amount, stock_location_source, created_at AS approved_at FROM inventory_movements
         WHERE status = 'posted' AND quantity_delta > 0
           AND source_type IN ('return_in', 'initial_stock', 'opening_stock')
           AND (source_type != 'return_in' OR source_ref IS NULL OR source_ref NOT LIKE 'cancel_%')
@@ -229,8 +233,9 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       }
     }
     for (const row of demands) if (Number(row.entered_transport)) row.needs_fulfillment = 0;
-    const currentDemands = expandCurrentProcurementDemands(demands, composition);
-    const liveItems = new Set(currentDemands.filter(d => Number(d.needs_fulfillment) && d.stock_location === 'LOCAL').map(d => Number(d.order_item_id)));
+    let currentDemands;
+    const rawLiveItems = new Set(demands.filter(d=>Number(d.needs_fulfillment)&&d.stock_location==='LOCAL').map(d=>Number(d.order_item_id)));
+    const liveItems = rawLiveItems;
     const byProduct = new Map(stocks.map(row => [Number(row.product_id), { ...row, open_deducted: 0 }]));
     for (const row of fbpReservations) {
       const id = Number(row.product_id);
@@ -242,10 +247,15 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     }
     for (const movement of deductions) {
       if (!liveItems.has(Number(movement.order_item_id))) continue;
+      if(composition.isBundle(Number(movement.product_id))&&movement.stock_location_source!=='bundle_finished')continue;
       const id = Number(movement.product_id);
       if (!byProduct.has(id)) byProduct.set(id, { product_id: id, ledger: 0, open_deducted: 0 });
       byProduct.get(id).open_deducted += Number(movement.quantity || 0);
     }
+    for(const id of composition.products.keys())if(composition.isBundle(id)){const existing=byProduct.get(id)||{product_id:id,open_deducted:0,fbp_reserved:0};byProduct.set(id,{...existing,ledger:Number(finishedStocks.find(s=>Number(s.product_id)===id)?.ledger||0)});}
+    const priorityForBundle=new Map(priorities.map(p=>[`${p.product_id}:${p.order_item_id}`,Number(p.priority)]));
+    const bundleDemands=allocateBundleFinishedDemands(demands.map(d=>({...d,allocation_priority:priorityForBundle.get(`${d.root_product_id}:${d.order_item_id}`)||0})),composition,[...byProduct.values()]);
+    currentDemands=expandCurrentProcurementDemands(bundleDemands,composition);
     const historicItems = new Map(demands.filter(d => Number(d.entered_transport) && d.stock_location === 'LOCAL').map(d => [Number(d.order_item_id), d]));
     // A recorded physical shipment pins the whole historical item, even when
     // its recorded components are outside this product-filtered view. Otherwise
@@ -270,7 +280,11 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
     const cancellationEvents = await query(`SELECT id,product_id,detail_json,created_at FROM inventory_flow_events
       WHERE tenant_id=? AND action='procurement_demand_cancellation' AND product_id IN (${scopedIdSql}) ORDER BY id`, [tenantPk]);
-    const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace, queuesOnly, cancellationEvents });
+    const assemblyEvents=hasFinishedHistory?await query("SELECT id,product_id,action,detail_json,created_at FROM inventory_flow_events WHERE tenant_id=? AND action IN ('bundle_assembly','bundle_disassembly') ORDER BY id",[tenantPk]):[];
+    const assemblySources=[];
+    for(const id of new Set(assemblyEvents.map(e=>Number(e.product_id))))for(const batch of remainingAssemblyBatches(assemblyEvents.filter(e=>Number(e.product_id)===id),Infinity))assemblySources.push({id:1000000000000+batch.id,product_id:id,quantity:batch.remaining,amount:batch.cost_known?batch.remaining*batch.unit_cost:0,approved_at:batch.created_at,source_label:'套装组装批次'});
+    const physicalSources=[...stockSources.filter(s=>!composition.isBundle(Number(s.product_id))||s.stock_location_source==='bundle_finished'),...assemblySources];
+    const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources:physicalSources, includeTrace, queuesOnly, cancellationEvents });
     if (!queuesOnly) value.inventory_stocks = [...byProduct.values()];
     if (!fresh && generation === version) cached = { value, expires: Date.now() + COVERAGE_CACHE_TTL_MS };
     return value;

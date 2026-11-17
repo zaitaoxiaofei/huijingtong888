@@ -38,7 +38,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     traces.get(detail).push({ batch_id: batch && !batch.stock_source ? Number(batch.id) : null,
       purchase_order_no: batch?.purchase_order_no || '', purchase_order_id: batch?.purchase_order_id || null,
       quantity: rounded(quantity), basis, purpose,
-      source_label: batch?.stock_source ? '期初／退回库存来源' : batch ? '采购批次' : '其他已记录来源' });
+      source_label: batch?.stock_source ? batch.source_label || '期初／退回库存来源' : batch ? '采购批次' : '其他已记录来源' });
   };
   const prioritizedProducts = new Set(demands.filter(row => row.needs_fulfillment && row.allocation_priority > 0).map(row => Number(row.product_id)));
   const stockByProduct = new Map(stocks.map(row => [Number(row.product_id), row]));
@@ -266,6 +266,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     for (const key of ['missing_amount', 'quantity_needs_review', 'inventory_needs_review']) order[key] ||= detail[key];
     order.items.push({ order_item_id: Number(detail.order_item_id), product_id: Number(detail.product_id), product_name: detail.product_name || '',
       root_product_id: Number(detail.root_product_id || detail.product_id),root_product_name: detail.root_product_name || detail.product_name || '',root_inventory_number:detail.root_inventory_number||null,root_quantity:Number(detail.root_quantity||detail.quantity),
+      finished_bundle:!!detail.finished_bundle,assembly_required:!!detail.assembly_required,
       ...(includeTrace ? { coverage_trace: traces.get(detail) || [] } : {}),
       receipt_claims: detail.receipt_claims, quantity_needs_review: detail.quantity_needs_review, unit: detail.stock_unit || '件', quantity: detail.quantity, stock_quantity: detail.stock_quantity, incoming_quantity: detail.incoming_quantity,
       product_total_incoming_quantity: pendingIncomingByProduct.get(Number(detail.product_id)) || 0,

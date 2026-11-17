@@ -155,6 +155,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/batch-stocktake": (req,url)=>services.inventoryBatchStocktakeContext(Object.fromEntries(url.searchParams),req._session),
     "POST /api/inventory/batch-stocktake": async req=>services.applyInventoryBatchStocktake(await readJson(req),req._session),
+    "GET /api/inventory/bundle-conversion": (req,url)=>services.inventoryBundleConversionContext(Object.fromEntries(url.searchParams),req._session),
+    "POST /api/inventory/bundle-conversion": async req=>services.applyInventoryBundleConversion(await readJson(req),req._session),
     "GET /api/inventory/bundle-stocktake": (req,url)=>services.inventoryBundleContext(Object.fromEntries(url.searchParams),req._session),
     "POST /api/inventory/bundle-stocktake": async req=>services.applyInventoryBundleStocktake(await readJson(req),req._session),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

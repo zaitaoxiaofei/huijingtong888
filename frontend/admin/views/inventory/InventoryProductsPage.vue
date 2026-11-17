@@ -1915,7 +1915,7 @@ onActivated(() => {
             <div class="inventory-stock-cell">
               <div class="stock-summary-list">
                 <span class="local-stock-line">
-                  <span class="stock-label">本地库存</span><strong>{{ row.physical_stock == null ? '—' : integer(row.physical_stock) }} {{ productUnit(row) }}</strong>
+                  <span class="stock-label">{{Number(row.component_count)>0?'本地折合库存':'本地库存'}}</span><strong>{{ row.physical_stock == null ? '—' : integer(row.physical_stock) }} {{ productUnit(row) }}</strong>
                   <el-popover
                     v-if="hasProductComponents(row)"
                     placement="left"
@@ -1955,6 +1955,7 @@ onActivated(() => {
                     </div>
                   </el-popover>
                 </span>
+                <small v-if="row.finished_stock!=null">成品 {{integer(row.finished_available)}} · 散件最多可组 {{integer(row.assemblable_stock)}}（共享配件）</small>
                 <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free == null ? '—' : integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div>
                 <div class="fbp-stock-line"><span>FBP 库存</span><strong>{{ row.fbp_stock_known == null ? '未完整同步' : `${integer(row.fbp_stock_known)} ${productUnit(row)}` }}</strong></div>
               </div>

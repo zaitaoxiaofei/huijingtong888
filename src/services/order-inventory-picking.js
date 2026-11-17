@@ -1,3 +1,6 @@
+import {loadOrderProcurementCoverage} from './mysql-order-procurement-coverage.js';
+import {loadBundleFinishedStocks} from './bundle-finished-stock.js';
+import {resolveInventoryTenantScope} from './inventory-tenant-scope.js';
 import { mysqlQuery } from "../mysql-pool.js";
 
 export function groupInventoryPickingRows(rows) {
@@ -32,6 +35,16 @@ export async function orderInventoryPickingMysql(orderIds, tenantId = "admin") {
   const tenantPk = Number(tenants[0]?.id || 0);
   if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
     throw Object.assign(new Error("当前企业上下文无效，无法读取订单拣货明细。"), { statusCode: 403 });
+  }
+  const inventoryScope=await resolveInventoryTenantScope(tenantPk,mysqlQuery);
+  if((await loadBundleFinishedStocks(mysqlQuery,inventoryScope)).length){
+    const coverage=await loadOrderProcurementCoverage(mysqlQuery,'',{tenantId:tenantPk,fresh:true}),result=new Map();
+    for(const orderId of orderIds){const order=coverage.get(Number(orderId));if(!order)continue;
+      result.set(Number(orderId),order.items.map(item=>({sku:'',parent_product_id:item.root_product_id,product_id:item.product_id,
+        product_name:`${item.product_name}${item.finished_bundle?'（已打包成品）':item.assembly_required?'（待组装用料）':''}`,
+        inventory_number:item.product_id===item.root_product_id?item.root_inventory_number:'',stock_unit:item.unit,per_set_quantity:item.quantity/Math.max(1,item.root_quantity),required_quantity:item.quantity,
+        finished_bundle:item.finished_bundle,assembly_required:item.assembly_required})));
+    }return result;
   }
   const legacy = tenants[0].slug === "default";
   const scope = (alias) => `(${alias}.tenant_id = ${tenantPk}${legacy ? ` OR ${alias}.tenant_id IS NULL` : ""})`;

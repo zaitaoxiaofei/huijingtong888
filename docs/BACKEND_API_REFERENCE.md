@@ -3378,6 +3378,27 @@ Fetch a remote image through the backend with response validation.
 
 ### Inventory
 
+#### `GET /api/inventory/bundle-conversion`
+
+Read owned bundle finished stock, free loose-part capacity and original assembly batches. Existing bundles start with zero finished stock; historical parent stock is excluded.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Owned bundle ID
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory/bundle-conversion`
+
+Atomically assemble or disassemble local bundles with inventory.write. Consumes free parts or parts allocated to this bundle's orders; disassembly requires an original batch and unreserved finished units. Paired movements and open-order reallocation share one transaction. Revision conflicts change nothing; same-key retries return the saved result. No automatic rollout stock conversion.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `GET /api/inventory/bundle-stocktake`
 
 Read current-enterprise bundle identities, complete nested composition, and each physical child's local stock and revision. Inactive children remain visible and block writes.

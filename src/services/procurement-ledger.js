@@ -360,6 +360,7 @@ function conversionSources(body, productId) {
 export function summarizeLedger(product, movements, purchases, orders, fbpReserved = 0) {
   const fbpOrders=orders.filter(row=>isFbpInventory(row.stock_location));
   orders=orders.filter(row=>!isFbpInventory(row.stock_location));
+  if(Number(product.component_count)>0)movements=movements.filter(row=>['bundle_assembly','bundle_disassembly'].includes(row.source_type)||row.stock_location_source==='bundle_finished');
   const local = movements.filter(row => !isFbpInventory(row.stock_location) && !['fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'].includes(row.source_type));
   const sum = (rows, fn) => rows.reduce((total, row) => total + Number(fn(row) || 0), 0);
   // Open orders may already have posted outbound movements; those goods are
@@ -400,9 +401,9 @@ export function createProcurementLedgerService(hooks) {
       CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
       FROM products WHERE id = ? AND active = 1${movementTenantSql}`, movementArgs);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
-    const movements = await run(`SELECT source_type, stock_location, SUM(quantity_delta) AS quantity_delta,
+    const movements = await run(`SELECT source_type, stock_location, stock_location_source, SUM(quantity_delta) AS quantity_delta,
       MAX(id) AS last_id, MAX(created_at) AS last_created_at, COUNT(*) AS record_count FROM inventory_movements
-      WHERE product_id = ? AND status = 'posted'${movementTenantSql} GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, movementArgs);
+      WHERE product_id = ? AND status = 'posted'${movementTenantSql} GROUP BY source_type, stock_location, stock_location_source ORDER BY source_type, stock_location`, movementArgs);
     const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at, person.name AS person_name,
       COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity,
       COALESCE(ir.unarrived_quantity,0) AS unarrived_quantity,COALESCE(ir.arrived_quantity,0) AS arrived_quantity
@@ -421,7 +422,7 @@ export function createProcurementLedgerService(hooks) {
         stock_location:order.stock_location, posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
     const outbound = await run(`SELECT related_order_item_id AS order_item_id, -SUM(quantity_delta) AS quantity
       FROM inventory_movements WHERE product_id = ? AND status = 'posted' AND source_type = 'order_outbound'
-      AND UPPER(COALESCE(stock_location, 'LOCAL')) NOT IN ('FBP','FBO','OGR')${movementTenantSql} GROUP BY related_order_item_id`, movementArgs);
+      AND UPPER(COALESCE(stock_location, 'LOCAL')) NOT IN ('FBP','FBO','OGR')${Number(products[0].component_count)>0?" AND stock_location_source='bundle_finished'":''}${movementTenantSql} GROUP BY related_order_item_id`, movementArgs);
     for (const order of orders) order.outbound_quantity = Number(outbound.find(row => Number(row.order_item_id) === order.order_item_id)?.quantity || 0);
     const fbpReserved = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.fbp_reserved || 0);
     const value = summarizeLedger(products[0], movements, purchases, orders, fbpReserved);

@@ -12,10 +12,18 @@ test('FBP approval and adjustments reserve once; shipment and receipt do not ret
   const db = new DatabaseSync(':memory:');
   db.function('GREATEST', (left, right) => Math.max(left, right));
   db.exec(`CREATE TABLE fbp_replenishment_orders (id INTEGER, shop_id INTEGER, status TEXT);
-    CREATE TABLE fbp_replenishment_order_items (id INTEGER, order_id INTEGER, shop_id INTEGER, product_id INTEGER, approved_qty INTEGER);
+    CREATE TABLE fbp_replenishment_order_items (id INTEGER, order_id INTEGER, shop_id INTEGER, product_id INTEGER, approved_qty INTEGER, ozon_sku TEXT, mapping_id INTEGER);
+    CREATE TABLE shops (id INTEGER);
+    CREATE TABLE products (id INTEGER);
+    CREATE TABLE product_components (product_id INTEGER, component_product_id INTEGER, quantity INTEGER);
+    CREATE TABLE sku_inventory_recipes (id INTEGER, shop_id INTEGER, ozon_sku TEXT, active INTEGER);
+    CREATE TABLE sku_inventory_recipe_items (recipe_id INTEGER, product_id INTEGER, quantity INTEGER);
+    CREATE TABLE sku_mappings (id INTEGER, shop_id INTEGER, product_id INTEGER);
+    INSERT INTO shops VALUES (1);
+    INSERT INTO products VALUES (10);
     CREATE TABLE fbp_replenishment_item_adjustments (item_id INTEGER, adjustment_qty INTEGER);
     INSERT INTO fbp_replenishment_orders VALUES (1, 1, 'approved');
-    INSERT INTO fbp_replenishment_order_items VALUES (1, 1, 1, 10, 100);
+    INSERT INTO fbp_replenishment_order_items VALUES (1, 1, 1, 10, 100, 'SKU', NULL);
     INSERT INTO fbp_replenishment_item_adjustments VALUES (1, -10);`);
   const query = async (sql, args) => db.prepare(sql).all(...args);
   try {
