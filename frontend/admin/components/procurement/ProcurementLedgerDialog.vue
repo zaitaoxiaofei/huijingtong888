@@ -191,7 +191,7 @@ const labels = {
   historical_source: '登记其他历史来源', substitute: '登记订单实际替代用料',
   convert: '库存商品转换', damage: '货损报废', loss: '货物丢失', stocktake: '更新本地库存', revise_purchase: '纠正采购记录'
 };
-const movementLabels = { purchase_inbound: '采购入库', purchase_inbound_correction: '采购入库纠正', order_outbound: '订单出库',
+const movementLabels = { bundle_assembly:'套装组装转换',bundle_disassembly:'套装拆包转换', purchase_inbound: '采购入库', purchase_inbound_correction: '采购入库纠正', order_outbound: '订单出库',
   historical_receipt_offset: '历史收货已计入实物（抵消重复入库）',
   return_in: '实际退回入库', fbp_transfer_out: '转 FBP', reconciliation_convert: '转换出', reconciliation_convert_in: '转换入',
   substitution_restore: '替代用料：原商品冲回', substitution_out: '替代用料：实际消耗', reconciliation_damage: '货损报废',

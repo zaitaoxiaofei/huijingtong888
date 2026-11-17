@@ -3,7 +3,7 @@
 export function expandCurrentProcurementDemands(demands, composition) {
   const rows = new Map();
   for (const row of demands) {
-    if (!Number(row.needs_fulfillment) || Number(row.entered_transport) || row.stock_location === 'FBP') {
+    if (row.finished_bundle || !Number(row.needs_fulfillment) || Number(row.entered_transport) || row.stock_location === 'FBP') {
       rows.set(`history:${rows.size}`, row);
       continue;
     }

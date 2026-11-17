@@ -39,7 +39,7 @@ const money=(v,digits=2)=>v==null?'待核实':Number(v).toLocaleString('zh-CN',{
 const units=v=>v==null?'待核实':`${v} 件`;
 const currency=(v,digits=2)=>v==null?'待核实':`¥${money(v,digits)}`;
 const time=v=>v?shanghaiDateTimeText(v,{assumeUtcWhenNaive:true}):'未记录';
-const basis=row=>row.cost_basis==='purchase_batch'?'本批次货款 + 运费':row.cost_basis==='purchase_version'?`采购含运成本 · V${row.cost_version}`:'商品档案采购成本';
+const basis=row=>row.cost_basis==='assembly_batch'?'原组装批次配件成本':row.cost_basis==='purchase_batch'?'本批次货款 + 运费':row.cost_basis==='purchase_version'?`采购含运成本 · V${row.cost_version}`:'商品档案采购成本';
 async function load(fresh=false){
  selected.value=[];
  const token=++generation,scope=currentApiCacheScope();controller?.abort();controller=new AbortController();

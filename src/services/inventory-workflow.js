@@ -126,14 +126,17 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   }
   async function localQuantities(ids,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
-    const parts=await query(`SELECT c.product_id,c.component_product_id,c.quantity FROM product_components c WHERE c.product_id IN (${marks}) AND ${inventoryTenantSql(scope,'c')}`,ids);
-    const all=[...new Set([...ids,...parts.map(row=>Number(row.component_product_id))])];
+    const graph=await loadInventoryComposition(query,scope);
+    const parts=new Map(ids.map(id=>[id,graph.components(id)]));
+    const all=[...new Set([...ids,...[...parts.values()].flat().map(row=>Number(row.id))])];
     const values=await batch(all,scope.id,{localOnly:true}),byId=new Map(values.map(row=>[row.product_id,row]));
     const official=await loadProductsFbpStockTotals(query,ids,scope);
     return ids.map(id=>{
-      const children=parts.filter(row=>Number(row.product_id)===id),value=byId.get(id);
-      const count=key=>{if(!children.length)return value?.[key]??null;const quantities=children.map(row=>{const v=byId.get(Number(row.component_product_id))?.[key],units=Number(row.quantity);return v!=null&&units>0?Math.floor(v/units):null;});return quantities.every(v=>v!==null)?Math.min(...quantities):null;};
-      return {product_id:id,workflow_free:count('free'),physical_stock:count('physical'),fbp_stock_known:official.get(id)?.present??null};
+      const value=byId.get(id),isBundle=graph.isBundle(id),children=parts.get(id);
+      const count=key=>{if(!isBundle)return value?.[key]??null;const quantities=children.map(row=>{const v=byId.get(Number(row.id))?.[key];return v!=null?Math.floor(Math.max(0,v)/row.per_set_quantity):null;});return quantities.every(v=>v!==null)?Math.min(...quantities):null;};
+      const assembled=isBundle?Math.max(0,value?.physical||0):0,finishedFree=isBundle?Math.max(0,value?.free||0):0,loose=count('free'),physical=count('physical');
+      return {product_id:id,workflow_free:loose==null?null:loose+finishedFree,physical_stock:physical==null?null:physical+assembled,fbp_stock_known:official.get(id)?.present??null,
+        ...(isBundle?{finished_stock:assembled,finished_available:finishedFree,assemblable_stock:loose,maximum_available:loose==null?null:loose+finishedFree}: {})};
     });
   }
   async function workspaceProducts(params,tenantId){

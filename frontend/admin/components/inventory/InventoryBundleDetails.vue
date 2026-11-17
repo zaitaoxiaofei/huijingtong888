@@ -3,6 +3,7 @@ import {computed,onBeforeUnmount,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {inventoryAdjustmentReasons,validateInventoryAdjustment} from '../../../../src/inventory-adjustment-reasons.js';
+import InventoryBundleConversion from './InventoryBundleConversion.vue';
 import ProductImagePreview from '../ProductImagePreview.vue';
 const props=defineProps({productId:Number,editable:Boolean,embedded:Boolean,externalActions:Boolean}),emit=defineEmits(['saved','cancel','busy','state']);
 const data=ref(null),loading=ref(false),busy=ref(false),error=ref(''),items=ref([]),reason=ref(''),note=ref(''),submission=ref(null);
@@ -37,15 +38,16 @@ window.addEventListener('erp:auth-scope-changed',clear);onBeforeUnmount(()=>{dis
  <section class="bundle-details" v-loading="loading" aria-label="套装子库存明细">
   <el-alert v-if="error" :title="error" type="warning" :closable="false"/><el-button v-if="error&&!data" @click="load()">重新读取套装</el-button>
   <template v-if="data">
+   <InventoryBundleConversion :product-id="productId" @saved="load();emit('saved',$event)" @busy="busy=$event"/>
    <header v-if="!embedded" class="bundle-product"><ProductImagePreview :src="data.product.image_url" :preview-list="[`/api/products/${data.product.id}/image`]" size="portrait"/><div><strong>{{data.product.name}}</strong><p>套装库存 ID：{{data.product.inventory_number||data.product.id}}</p><small>按当前实物可组成 {{physicalSets==null?'待核实':physicalSets}} 套</small></div></header>
    <el-alert v-if="data.incomplete" title="存在已停用子库存，请先核对套装组成；当前不能更新库存。" type="warning" :closable="false"/>
-   <p v-if="editable" class="bundle-shared-note">逐项填写每个子产品在本地仓库的实际总库存，无货填 0。子产品可能被多个套装共用，更新会同时影响相关套装；父套装不单独记库存。</p>
+   <p v-if="editable" class="bundle-shared-note">逐项填写每个子产品在本地仓库的实际散件库存（不含已装入成品的配件），无货填 0。子产品可能被多个套装共用，更新会同时影响相关套装；成品通过组装入库和拆包单独记账。</p>
    <details v-if="data.structure?.some(row=>row.is_bundle)" open><summary>全部层级及子库存 ID</summary><p v-for="(row,index) in data.structure" :key="index">{{row.name}} · 库存 ID {{row.inventory_number||row.id}} · 每个上级用 {{row.quantity}} {{row.stock_unit}}<span v-if="row.is_bundle">（子套装，已继续展开）</span></p></details>
    <h4>实际子库存 · {{items.length}} 项</h4>
    <article v-for="row in items" :key="row.product_id" class="bundle-child">
     <ProductImagePreview :src="row.image_url" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait"/>
     <div class="bundle-child-copy"><strong>{{row.name}}</strong><b>库存 ID：{{row.inventory_number||row.product_id}}</b><small>每套使用 {{row.per_set_quantity}} {{row.stock_unit}}<span v-if="!row.active"> · 已停用</span></small><small>本地实物 {{row.physical_stock??'待核实'}} {{row.stock_unit}} · 待发需求 {{row.open_order_demand??'待核实'}} · FBP 锁定 {{row.fbp_reserved??'待核实'}}</small>
-     <template v-if="editable"><label>实际总库存<el-input-number v-model="row.counted_quantity" :min="0" :precision="0" controls-position="right" :aria-label="`子库存 ${row.inventory_number||row.product_id} 实际总库存`" :disabled="busy||!!submission||!row.active"/></label><small v-if="row.counted_quantity!=null">本地实物 {{row.physical_stock??'待核实'}} → {{row.counted_quantity}} {{row.stock_unit}}</small></template>
+     <template v-if="editable"><label>实际散件库存<el-input-number v-model="row.counted_quantity" :min="0" :precision="0" controls-position="right" :aria-label="`子库存 ${row.inventory_number||row.product_id} 实际总库存`" :disabled="busy||!!submission||!row.active"/></label><small v-if="row.counted_quantity!=null">本地实物 {{row.physical_stock??'待核实'}} → {{row.counted_quantity}} {{row.stock_unit}}</small></template>
     </div>
    </article>
    <template v-if="editable"><label>统一调整原因<select v-model="reason" aria-label="套装调整原因" :disabled="busy||!!submission"><option value="">请选择</option><option v-for="item in inventoryAdjustmentReasons" :key="item.code" :value="item.code">{{item.label}}</option></select></label><label>补充说明<textarea v-model="note" aria-label="套装调整说明" maxlength="500" :disabled="busy||!!submission"/></label><p v-if="submission&&!busy">上次提交结果尚未确认，请使用同一记录重试，避免重复更新。</p><div v-if="!externalActions" class="bundle-actions"><el-button :disabled="busy" @click="emit('cancel')">取消</el-button><el-button type="primary" :loading="busy" :disabled="!submission&&!canSave" @click="save">{{submission?'重试确认':'一次确认更新所有子库存'}}</el-button></div></template>

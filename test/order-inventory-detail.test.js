@@ -63,22 +63,22 @@ test('order inventory dialog mounts on demand and history actions are order-spec
   assert.match(dialog, /本单需求分配/);
   assert.doesNotMatch(dialog, /<InventoryIdentity|本单采购结论/);
   assert.match(dialog, /<template #header="\{ titleId, titleClass \}">[\s\S]*?class="ledger-top-actions"[\s\S]*?更新本地库存[\s\S]*?库存转换[\s\S]*?更多操作[\s\S]*?刷新对账/);
-  assert.match(dialog, /<div v-if="!orderOverview" class="ledger-product">/);
-  assert.match(dialog, /<InventoryFlowDiagram :ledger="data"/);
+  assert.match(dialog, /<div v-if="!orderOverview\|\|!showOrderBreakdown" class="ledger-product">/);
+  assert.match(dialog, /<InventoryFlowDiagram\b[^>]*:ledger="data"/);
   const flow = readFileSync(new URL('../frontend/admin/components/procurement/InventoryFlowDiagram.vue', import.meta.url), 'utf8');
-  assert.match(flow, /FBP 官方库存/);
-  assert.match(flow, /label: '本地实物'/);
+  assert.match(flow, /FBP可用库存/);
+  assert.match(flow, /label:\s*'本地实物'/);
   assert.match(dialog, /已分配现货/);
 
-  assert.match(flow, /扣除占用与保障后/);
+  assert.match(flow, /扣除本地订单、保障及FBP锁定/);
 });
 
-test('order inventory management keeps detail with binding, creation, and inventory edit actions on the order row', () => {
+test('order inventory management keeps scoped detail, stocktake and unbound SKU actions on the order row', () => {
   const table = readFileSync(new URL('../frontend/orders/components/OrdersTable.vue', import.meta.url), 'utf8');
   const start = table.indexOf('<div class="orders-inventory-quick-actions">');
   const actions = table.slice(start, table.indexOf('\n            </div>', start));
   assert.ok(start >= 0);
-  assert.match(actions, />库存明细[\s\S]*?>\s*修改绑定\s*<\/el-button>[\s\S]*?>\s*修改库存\s*<\/el-button>[\s\S]*?>\s*绑定库存\s*<\/el-button>[\s\S]*?>\s*创建库存\s*<\/el-button>/);
+  assert.match(actions, />库存明细[\s\S]*?canUpdateInventory[\s\S]*?openInventoryLedger\(row, 'stocktake'[\s\S]*?>更新本地库存[\s\S]*?>\s*绑定库存\s*<\/el-button>[\s\S]*?>\s*创建库存\s*<\/el-button>/);
   assert.doesNotMatch(table, /<h3>商品总库存与库存管理<\/h3>[\s\S]*?>\s*(?:修改绑定|绑定库存|创建库存|修改库存)\s*<\/el-button>/);
 });
 

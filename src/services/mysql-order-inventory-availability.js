@@ -10,7 +10,7 @@ export function orderInventoryAvailabilityIds(query = {}) {
 
 // Only product facts are projected here. Order allocation and purchase coverage
 // remain owned by the full procurement reconciliation path.
-export async function loadOrderInventoryAvailability({ query, loadBalances }, request = {}, { tenantId = null, defaultTenantId } = {}) {
+export async function loadOrderInventoryAvailability({ query, loadBalances, loadFinishedProductIds=async()=>[] }, request = {}, { tenantId = null, defaultTenantId } = {}) {
   const orderIds = orderInventoryAvailabilityIds(request);
   const changedProductId = request.productId == null ? null : Number(request.productId);
   if (changedProductId !== null && (!Number.isSafeInteger(changedProductId) || changedProductId <= 0)) {
@@ -65,6 +65,8 @@ export async function loadOrderInventoryAvailability({ query, loadBalances }, re
       WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
       AND child.active = 1 AND ${owned("child")}
     WHERE oi.quantity > 0 AND oi.order_id IN (${placeholders})${scope}`, args);
+  const finishedIds=new Set(await loadFinishedProductIds([...new Set(tenantByOrder.values())]));
+  for(const row of [...products])if(finishedIds.has(Number(row.root_product_id))&&Number(row.product_id)!==Number(row.root_product_id))products.push({...row,product_id:Number(row.root_product_id)});
   const productsByOrder = new Map(orderIds.map((id) => [id, new Set()]));
   const affected = changedProductId === null ? new Set(orderIds) : new Set(products
     .filter(row => Number(row.product_id) === changedProductId || Number(row.root_product_id) === changedProductId)

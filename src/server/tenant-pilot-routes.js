@@ -56,6 +56,7 @@ const routes = new Set([
   'GET inventory', 'GET inventory/availability', 'GET stock-alerts', 'GET inventory/ledger',
   'POST inventory/ledger/preview', 'POST inventory/ledger', 'GET inventory/stock-debts', 'POST inventory/stock-debts/adjust',
   'GET inventory/batch-stocktake', 'POST inventory/batch-stocktake',
+  'GET inventory/bundle-conversion', 'POST inventory/bundle-conversion',
   'GET inventory/bundle-stocktake', 'POST inventory/bundle-stocktake',
   'POST inventory/products/lead-times', 'GET inventory-product-requests',
   'GET inventory-product-naming/options', 'POST inventory-product-naming/options',
