@@ -32,6 +32,18 @@ test('shop identity must uniquely match within the authorized enterprise', async
   await assert.rejects(fixture([], []).read({ ozon_company_id: '77', months: '2025-01' }, session), /未绑定/);
   await assert.rejects(fixture([], [{ id: 4 }, { id: 5 }]).read({ ozon_company_id: '77', months: '2025-01' }, session), /多个店铺/);
 });
+test('equivalent legacy assignments merge only within one company and must cover the month without gaps', async () => {
+  const input = { ozon_company_id: '77', months: '2025-01' };
+  const duplicate = fixture([assignment({ effective_from: '1999-12-31' }), assignment({ effective_from: '2000-01-01' })]);
+  assert.equal((await duplicate.read(input, session)).bindings[0].company.id, 10);
+  assert.match(duplicate.calls[1].sql, /DATE_FORMAT\(a\.effective_from/);
+  const adjacent = fixture([assignment({ effective_to: '2025-01-15' }), assignment({ effective_from: '2025-01-16' })]);
+  assert.equal((await adjacent.read(input, session)).bindings[0].company.id, 10);
+  const gap = fixture([assignment({ effective_to: '2025-01-14' }), assignment({ effective_from: '2025-01-16' })]);
+  assert.match((await gap.read(input, session)).bindings[0].error, /不覆盖整月/);
+  const conflict = fixture([assignment(), assignment({ company_id: 20 })]);
+  assert.match((await conflict.read(input, session)).bindings[0].error, /跨主体重叠/);
+});
 test('membership and financial permission are checked again before reading metadata', async () => {
   const db = fixture([]);
   await assert.rejects(db.read({ ozon_company_id: '77', months: '2025-01' }, { roles: ['operator'], tenant: { id: 7, slug: 'tenant-seven', role: 'member' } }), /无权/);
