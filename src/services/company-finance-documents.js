@@ -1,5 +1,6 @@
 import { paidPayrollAccruals } from "./finance-payroll-accruals.js";
 import crypto from 'node:crypto';
+import { validateArchiveSource } from './finance-archive-source.js';
 import { createFinanceReconciliation } from './finance-reconciliation.js';
 import { deduplicateFinanceCash } from './finance-cash-dedup.js';
 import { parseOrderSalesJson } from './finance-order-sales.js';
@@ -74,7 +75,7 @@ export function reconcileImportedCash(documents,{from,to}){
   return {currency,complete:!conflict&&entries.length>0&&withdrawals.length>0&&!unknownFees,entries:conflict||!entries.length?null:rounded(entries.reduce((s,r)=>s+r.amount,0)),withdrawals:conflict||!withdrawals.length?null:rounded(withdrawals.reduce((s,r)=>s+r.amount,0)),fees:conflict||unknownFees||!withdrawals.length?null:rounded(withdrawals.reduce((s,r)=>s+(r.fee||0),0))};
  }),rows,bank_status:'missing',note:'收款与提现分别列示，不用差额认定损失；尚需平台转出匹配、期初期末余额及银行回单。'};
 }
-export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExecute,files=tenantPrivateFiles,authorize=authorizeBusinessTaskSession,parse=parseFinanceDocument,transaction=mysqlTransaction,readMonthlyRealization=async(shop,options)=>(await import('../ozonClient.js')).fetchOzonMonthlyRealization(shop,options)}={}){
+export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExecute,files=tenantPrivateFiles,authorize=authorizeBusinessTaskSession,parse=parseFinanceDocument,transaction=mysqlTransaction,validateSource=validateArchiveSource,readMonthlyRealization=async(shop,options)=>(await import('../ozonClient.js')).fetchOzonMonthlyRealization(shop,options)}={}){
  let schema;
  async function ready(){if(!schema)schema=execute(FINANCE_DOCUMENT_SCHEMA).catch(e=>{schema=null;throw e;});await schema;}
  async function actor(session){const s=await authorize(session);assertBusinessTaskPermission(s,'finance');return s;}
@@ -103,6 +104,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    await db.execute("INSERT IGNORE INTO finance_periods(tenant_id,company_id,month_key,status) VALUES(?,?,?,'preparing')",[ctx.s.tenant.slug==='default'?null:ctx.tenantId,ctx.companyId,month]);
    const [period]=await db.query('SELECT status FROM finance_periods WHERE company_id=? AND month_key=? FOR UPDATE',[ctx.companyId,month]);
    if(period?.status==='closed')fail(`公司${month}已关账，请先由会计按既有流程处理关账状态`,409);
+   if(ctx.archiveInput)await validateSource(ctx.archiveInput,ctx,ctx.archiveHash);
    return worker(db);
   });
  }
@@ -128,12 +130,21 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
   async reconcile(input,session){return reconciler.report(input,await company(input,session));},
   async calibrationPreview(input,session){return reconciler.preview(input,await company(input,session));},
   async calibrationConfirm(input,session){return reconciler.confirm(input,await company(input,session));},
+  async lookup(input,session){
+   const ctx=await company(input,session);validateMonth(input.month);
+   if(!input.archive_source)fail('请从插件检查月份后同步原件');
+   await validateSource(input,ctx);await ready();
+   const rows=await query('SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND shop_key=? AND sha256=?',[ctx.tenantId,ctx.companyId,Number(input.shop_id),input.archive_source.sha256]);
+   const doc=rows[0];return {document:doc?{id:doc.id,month_key:doc.month_key,parse_status:doc.parse_status,attachment_url:doc.attachment_url,payload_json:payload(doc)}:null,duplicate:Boolean(doc)};
+  },
   async preview(input,session){
    const ctx=await company(input,session),month=validateMonth(input.month),shop=Number(input.shop_id||0);
    if(!Number.isSafeInteger(shop)||shop<0)fail('店铺shop_id无效，请重新选择店铺或公司共用');
    const shops=await shopsFor(ctx,{from:month,to:month});if(shop&&!shops.some(s=>Number(s.id)===shop))fail('所选店铺在该月不属于当前公司，请先检查公司与店铺归属',403);
    await locked(ctx,month);await ready();
    await files.owned(input.attachment_url,ctx.s,'finance');const file=await files.read(input.attachment_url,ctx.s);
+   const source=await validateSource(input,ctx,crypto.createHash('sha256').update(file.buffer).digest('hex'));
+   if(source){ctx.archiveInput=input;ctx.archiveHash=source.sha256;}
    const uploadType=String(input.upload_type||'auto'),type=UPLOAD_TYPES.find(t=>t.value===uploadType);
    if(!type)fail('请选择有效上传类型（upload_type），再选择对应原件');
    if(type.shop&&!shop)fail('此类平台文件必须选择实际店铺（shop_id），不能归公司共用');
@@ -168,6 +179,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     if((p.facts.length||p.kind==='order-sales')&&!shop&&uploadType!=='manual-expense')fail('平台销售与费用需要明确店铺（shop_id），请选择实际店铺后重试');
     if(p.buyer_tax_number&&ctx.c.tax_number&&p.buyer_tax_number!==ctx.c.tax_number)fail('文件购买方税号与所选公司不符，请核对公司主体');
    }catch(e){status='error';p={facts:[],cash:[],controls:[],warnings:[e.message],kind:'unparsed',month};}
+   if(source)p.archive_source=source;
    p.upload_type=uploadType;p.display_name=displayName;p.related_document_id=linked?.id||null;
    const hash=crypto.createHash('sha256').update(file.buffer).digest('hex');
    const existing=await query(`SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND shop_key=? AND (sha256=? OR (business_key IS NOT NULL AND business_key=?))`,[ctx.tenantId,ctx.companyId,shop,hash,p.business_key||null]);
@@ -201,6 +213,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     if(existing[0].sha256!==hash&&!(p.kind==='order-sales'&&previous.kind==='order-sales'&&p.order_fingerprint===previous.order_fingerprint))fail('同编号业务已有不同内容原件，请人工核对并保留更正依据，不能重复累计',409);
     if(existing[0].parse_status==='error'&&status==='preview'){
      const old=existing[0],previous=payload(old),revision=Number(old.revision||0);
+     if(!p.archive_source&&previous.archive_source)p.archive_source=previous.archive_source;
      p.previous_errors=[...(previous.previous_errors||[]),...(previous.warnings||[])];p.review_history=[...(previous.review_history||[])];
      if(old.review_status!=='pending')p.review_history.push({person_id:ctx.s.personId,status:'pending',note:'原件重新解析，须重新审核',at:new Date().toISOString()});
      const saved=await writePeriod(ctx,month,db=>db.execute("UPDATE finance_import_documents SET month_key=?,business_key=?,parse_status='preview',payload_json=?,review_status='pending',review_note=NULL,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='error' AND revision=?",[month,p.business_key||null,JSON.stringify(p),old.id,ctx.tenantId,ctx.companyId,revision]));
@@ -297,7 +310,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     const shop=report.shops.find(s=>Number(s.id)===Number(doc.shop_key));
     const category=payload(doc).kind==='manual-expense'?({'AI使用费':'12_AI与软件','软件订阅费':'12_AI与软件','场地租金':'13_场地费用','水电物业费':'13_场地费用','商品采购支出':'10_采购与库存','设备采购支出':'14_资产及预付款','押金及预付款':'14_资产及预付款'})[payload(doc).facts?.[0]?.metric]||'11_公司或店铺费用':({'sales':'01_销售与退货','order-sales':'01_销售与退货','star-service':'04_广告与推广','foreign-invoice':'04_广告与推广','platform-invoice':'90_多项费用综合凭证','platform-adjustment':'08_赔偿与售后扣款','recharged-service':'90_多项费用综合凭证','compensation':'08_赔偿','balance':'09_结算与回款','currency-settlement':'09_结算与回款','platform-payments':'09_结算与回款','collection-cash':'09_结算与回款'})[payload(doc).kind]||'99_业务配套';
     const filePath=`${base}/${part}/${payload(doc).kind==='collection-cash'?'公司共用跨月':doc.month_key}/${doc.shop_key?safeName(shop?.name||`店铺_${doc.shop_key}`):'公司共用'}/${category}/${doc.id}_${safeName(doc.original_name)}`;
-    zip.file(filePath,file.buffer);manifest.push({id:doc.id,original_name:doc.original_name,display_name:payload(doc).display_name||'',categories:doc.categories||[],related_document_id:payload(doc).related_document_id||null,path:filePath,sha256:doc.sha256,status:doc.parse_status,review:doc.review_status});
+    zip.file(filePath,file.buffer);manifest.push({id:doc.id,original_name:doc.original_name,display_name:payload(doc).display_name||'',categories:doc.categories||[],related_document_id:payload(doc).related_document_id||null,path:filePath,sha256:doc.sha256,archive_source:payload(doc).archive_source||null,status:doc.parse_status,review:doc.review_status});
    }
    zip.file(`${base}/来源索引.json`,JSON.stringify(manifest,null,2));
    zip.file(`${base}/先读说明.txt`,'公司会计交接包（草稿）\n只包含已上传资料，其他店铺及公司共用费用未齐。原始文件按索引保存一次。\n平台销售退回冲减收入；服务书、发票、结算不得重复记费。\n会计认可不是税务审批。现有ERP采购成本未自动结转到本导入账簿，避免混用历史或当前成本。\n'+report.gaps.join('\n'));

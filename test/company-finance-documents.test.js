@@ -12,7 +12,7 @@ import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc';
 
 const session=(tenant=1)=>({personId:10,role:'admin',roles:['admin'],tenant:{id:tenant,slug:`tenant-${tenant}`,role:'owner',plan_code:'pro',subscription_status:'active'}});
 async function workbook(rows){const b=new ExcelJS.Workbook(),s=b.addWorksheet('Report');rows.forEach((r,i)=>{if(r)s.getRow(i).values=r;});return Buffer.from(await b.xlsx.writeBuffer());}
-function database(){
+function database(options={}){
  const docs=[],files=new Map(),closed=new Set();let next=1;
  const query=async(sql,p=[])=>{
   if(sql.includes('FROM finance_submission_items'))return [];
@@ -38,7 +38,7 @@ function database(){
   throw new Error('Unexpected execute '+sql);
  };
  const privateFiles={owned:async(url,s)=>{if(files.get(url)?.tenant!==s.tenant.id)throw Object.assign(new Error('foreign attachment'),{statusCode:404});},read:async(url,s)=>{await privateFiles.owned(url,s);return files.get(url);}};
- const service=createCompanyFinanceDocuments({query,execute,files:privateFiles,authorize:async s=>s,transaction:async worker=>worker({query,execute})});return {service,docs,files,closed};
+ const service=createCompanyFinanceDocuments({query,execute,files:privateFiles,authorize:async s=>s,transaction:async worker=>worker({query,execute}),...options});return {service,docs,files,closed};
 }
 async function starFile(){const rows=[];rows[2]=[null,'Statement of services provided No. ЗВ - 123 dated 10/15/2026'];rows[3]=[null,'for the period from 10/1/2026 to 10/15/2026'];rows[13]=[null,'Star Products'];rows[15]=[null,'No.',null,null,null,'Amount including VAT (CNY)'];rows[17]=[null,'Total:',null,null,null,249.02];return workbook(rows);}
 
@@ -162,4 +162,35 @@ test('editing a reviewed manual draft invalidates approval and retains its revie
 test('a whole-year payment original archived in October remains available for August cash reconciliation',async()=>{
  const db=database();db.docs.push({id:1,tenant_id:1,company_id:1,shop_key:10,month_key:'2026-10',original_name:'year-payment.xlsx',parse_status:'confirmed',payload_json:JSON.stringify({kind:'platform-payments',facts:[],cash:[{type:'platform-payment',date:'2026-08-24',amount:100,currency:'CNY'}]})});
  const report=await db.service.report({company_id:1,month:'2026-08'},session());assert.equal(report.documents.length,1);assert.equal(report.documents[0].month_key,'2026-10');assert.equal(report.cash_reconciliation.matches.length,1);assert.equal(report.cash_reconciliation.matches[0].payment.amount,100);assert.deepEqual(report.metrics,{});
+});
+
+
+test('plugin source upload stays pending, repeated sync finds the existing document, and confirmation keeps one amount',async()=>{
+ const {createArchiveSourceValidator}=await import('../src/services/finance-archive-source.js');
+ const context={tenant_id:1,shop:{id:10,ozon_company_id:'77'},bindings:[{month:'2026-10',company:{id:1}}],binding_token:'verified'};
+ const validateSource=createArchiveSourceValidator({readContext:async()=>context});
+ const db=database({validateSource}),buffer=await starFile();
+ const hash=(await import('node:crypto')).createHash('sha256').update(buffer).digest('hex');
+ db.files.set('/uploads/team-attachments/sync.xlsx',{tenant:1,buffer,row:{original_name:'sync.xlsx'}});
+ const input={company_id:1,shop_id:10,month:'2026-10',attachment_url:'/uploads/team-attachments/sync.xlsx',archive_source:{sha256:hash,folder_id:'updWithAdditionalServices',language:'en',document_id:'123',ozon_company_id:'77',months:'2026-10',binding_token:'verified'}};
+ assert.equal((await db.service.lookup(input,session())).document,null);
+ const result=await db.service.preview(input,session());
+ assert.equal(result.document.parse_status,'preview');assert.equal(result.document.payload_json.archive_source.document_id,'123');
+ assert.deepEqual((await db.service.report({company_id:1,month:'2026-10'},session())).metrics,{});
+ assert.equal((await db.service.lookup(input,session())).document.id,result.document.id);
+ assert.equal((await db.service.preview(input,session())).duplicate,true);assert.equal(db.docs.length,1);
+ await db.service.confirm({company_id:1,document_id:result.document.id},session());
+ const report=await db.service.report({company_id:1,month:'2026-10'},session());
+ assert.equal(report.metrics['星级商品推广费'],249.02);assert.equal(report.lines[0].document_id,result.document.id);
+ context.binding_token='changed';await assert.rejects(db.service.lookup(input,session()),/归属已变化/);
+});
+test('plugin binding is rechecked after parsing and before a draft write',async()=>{
+ const {createArchiveSourceValidator}=await import('../src/services/finance-archive-source.js');
+ let token='verified';
+ const validateSource=createArchiveSourceValidator({readContext:async()=>({tenant_id:1,shop:{id:10,ozon_company_id:'77'},bindings:[{month:'2026-10',company:{id:1}}],binding_token:token})});
+ const buffer=await starFile(),hash=(await import('node:crypto')).createHash('sha256').update(buffer).digest('hex');
+ const db=database({validateSource,parse:async(...args)=>{const p=await parseFinanceDocument(...args);token='changed';return p;}});
+ db.files.set('/uploads/team-attachments/sync.xlsx',{tenant:1,buffer,row:{original_name:'sync.xlsx'}});
+ await assert.rejects(db.service.preview({company_id:1,shop_id:10,month:'2026-10',attachment_url:'/uploads/team-attachments/sync.xlsx',archive_source:{sha256:hash,folder_id:'realizationReports',language:'en',document_id:'123',ozon_company_id:'77',months:'2026-10',binding_token:'verified'}},session()),/归属已变化/);
+ assert.equal(db.docs.length,0);
 });
