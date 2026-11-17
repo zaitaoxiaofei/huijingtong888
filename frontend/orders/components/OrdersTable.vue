@@ -9,6 +9,8 @@ import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
 import InventoryIdentity from './InventoryIdentity.vue';
+import OrderProductAliases from './OrderProductAliases.vue';
+import { orderAliasProducts } from '../utils/order-product-aliases.js';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
 const WbHandoverDialog = defineAsyncComponent(() => import("./WbHandoverDialog.vue"));
@@ -526,6 +528,8 @@ function canEditCollaborationNote(row) {
           </el-popover>
         </template>
         <template #default="{ row }">
+          <el-popover trigger="hover" placement="right" :width="380" :show-after="250" :disabled="!orderAliasProducts(inventoryViews.get(row.id), { includeParents: true }).length" popper-class="order-inventory-alias-popover">
+            <template #reference>
           <div class="inventory-compact">
             <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
               <template #actions="{ parent }">
@@ -599,6 +603,9 @@ function canEditCollaborationNote(row) {
               <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
           </div>
+            </template>
+            <OrderProductAliases :overview="inventoryViews.get(row.id)" include-parents show-identity />
+          </el-popover>
         </template>
       </el-table-column>
 
@@ -731,6 +738,7 @@ function canEditCollaborationNote(row) {
       <el-table-column label="采购信息" min-width="240">
         <template #default="{ row }">
           <div class="orders-procurement-cell">
+          <OrderProductAliases :overview="inventoryViews.get(row.id)" />
           <div class="orders-procurement-heading">
           <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">采购覆盖待核对</small>
           <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
