@@ -47,3 +47,16 @@ test('shop preference defaults to the main shop and drops shops outside current 
  assert.deepEqual(preferredMonitorShops([],['7']),[]);
  assert.notEqual(monitorPreferenceKey(1),monitorPreferenceKey(2));
 });
+
+test('single-day collection closes the cached coverage drawer and keeps return filters',async()=>{
+ const fs=await import('node:fs'),vm=await import('node:vm');
+ const source=fs.readFileSync('frontend/admin/views/analytics/SkuTrafficMonitorView.vue','utf8');
+ const fn=source.match(/function goCollect\([^\n]+/)[0],calls=[];
+ const saved={shops:'4',query:'3144521577',view:'bound',group_by:'inventory',tags:'["重点关注"]',page:2,click_trend:'pdp_cart_rate'};
+ const context=vm.createContext({state:{date:'2026-11-14'},syncDrawer:{value:true},saveMonitor:()=>saved,router:{push:route=>calls.push(route)},dailyCollectionRoute});
+ vm.runInContext(fn+';this.go=goCollect;',context);context.go({id:4});
+ assert.equal(context.syncDrawer.value,false);assert.equal(calls.length,1);
+ assert.equal(calls[0].query.shop_id,'4');assert.equal(calls[0].query.date,'2026-11-14');
+ assert.deepEqual(monitorReturnQuery(calls[0].query),Object.fromEntries(Object.entries(saved).map(([key,value])=>[key,String(value)])));
+ context.go(null);assert.equal(context.syncDrawer.value,true);assert.equal(calls.length,1);
+});
