@@ -64,30 +64,56 @@
     }
     return [...rows.values()];
   }
-  async function scan(loadMore) {
+  let scanStopped = false;
+  async function scan(options) {
+    scanStopped = false;
     const error = blocker();
     if (error) throw new Error(error);
-    const all = new Map();
-    const originalY = window.scrollY;
-    let unchanged = 0;
-    const passes = loadMore ? 18 : 1;
-    try {
-      for (let i = 0; i < passes; i++) {
-        const before = all.size;
-        for (const row of extractOrders()) all.set(row.id, row);
-        const rendered = await rpc({type: "PDD_INVOICE_RENDERED_ROWS"});
-        if (!rendered?.ok) throw new Error(rendered?.error || "读取页面订单失败");
-        for (const row of rendered.value) all.set(row.id, row);
-        if (!loadMore) break;
-        unchanged = all.size === before ? unchanged + 1 : 0;
-        if (unchanged >= 3 || blocker()) break;
-        window.scrollTo(0, document.documentElement.scrollHeight);
-        await sleep(700);
+    if (options.history) {
+      if (!/commercial_pre_orders/.test(location.pathname)) throw new Error("请打开官方发票助手再同步采购订单");
+      const pending = uniqueTarget(["待申请"]);
+      if (pending) { pending.click(); await sleep(500); }
+      let contact;
+      for (let i = 0; i < 24; i++) {
+        contact = uniqueTarget(["选择订单并联系商家"]);
+        if (contact || document.querySelector('.common-pop-panel')) break;
+        if (scanStopped || blocker()) break;
+        await sleep(400);
       }
-      if (blocker()) throw new Error(blocker());
-    } finally { window.scrollTo(0, originalY); }
-    if (!all.size) throw new Error("当前页面没有可识别的订单链接。请打开「我的订单」并加载订单；也可进入单笔订单详情后读取。若仍无法读取，请保留该页用于适配");
-    return {rows: [...all.values()], note: loadMore ? "已滚动读取本次加载的订单；历史订单是否完整以拼多多页面为准" : "已读取当前页面已加载的订单"};
+      if (contact) { contact.click(); await sleep(700); }
+    }
+    const all = new Map();
+    let idle = 0, complete = false, reason = "", passes = 0;
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (!scanStopped && Date.now() < deadline) {
+      if (blocker()) { reason = blocker(); break; }
+      const before = all.size;
+      const rendered = await rpc({type: "PDD_INVOICE_RENDERED_ROWS"});
+      if (!rendered?.ok) throw new Error(rendered?.error || "读取页面订单失败");
+      for (const row of [...extractOrders(), ...rendered.value]) {
+        if (options.history && !row.applicationUrl) continue;
+        all.set(row.id, row);
+      }
+      passes++;
+      idle = all.size === before ? idle + 1 : 0;
+      const candidates = [...document.querySelectorAll('*')].filter(e => visible(e) && e.scrollHeight > e.clientHeight + 30 && /auto|scroll/.test(getComputedStyle(e).overflowY));
+      const scroller = candidates.find(e => e.classList.contains('common-pop-panel')) || candidates.at(-1) || document.scrollingElement;
+      const atEnd = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 5;
+      const terminal = /没有更多|暂无更多|已经到底|已显示全部|没有相关订单|暂无订单/.test(clean(scroller.innerText));
+      const limited = /已显示近.{0,8}个月.{0,8}订单/.test(clean(scroller.innerText));
+      if (atEnd && limited && idle >= 2) reason = "官方发票列表仅显示近 6 个月；更早记录请从采购订单核对，本次不标记全部历史已读完";
+      if (atEnd && terminal && idle >= 2) { complete = true; reason = "平台已显示列表末尾"; }
+      // Lack of new rows alone never proves that all history was read.
+      if (!complete && idle >= 12) reason = "连续等待未加载新订单；尚不能确认全部读完，可继续读取";
+      const rows = [...all.values()].filter(row => !options.from && !options.to || !row.date || (!options.from || row.date >= options.from) && (!options.to || row.date <= options.to));
+      await rpc({type: "PDD_INVOICE_SCAN_PROGRESS", rows, progress: {count: rows.length, loaded: all.size, complete, note: reason || `正在读取历史订单，已加载 ${all.size} 笔`, oldest: [...all.values()].map(r => r.date).filter(Boolean).sort()[0] || ""}});
+      if (complete || reason || !options.loadMore) break;
+      scroller.scrollTo(0, scroller.scrollHeight);
+      await sleep(900);
+    }
+    if (scanStopped) reason = "已停止，已读取记录已保存；可继续读取";
+    if (!reason) reason = "读取达到本轮时间上限，已保存结果；请继续读取";
+    return {rows: [], count: all.size, note: reason, complete};
   }
   function nextLink(id, kind) {
     const links = [...document.querySelectorAll("a[href]")].map(el => ({el, url: C.pddUrl(el.href)}))
@@ -230,6 +256,8 @@
     for (let i = 0; i < 30; i++) {
       await sleep(350);
       if (blocker()) return {status: "review", note: blocker(), block: true};
+      const observed = await rpc({type: "PDD_INVOICE_PAGE_STATE"});
+      if (observed?.ok && observed.value?.ready && observed.value.orderId === message.orderId && observed.value.hasApplied) return inspectOrder(message.orderId);
       if (!confirmed && /确认.{0,5}发票信息无误后再提交/.test(text())) {
         if (company?.value !== title.company || tax?.value.toUpperCase() !== title.taxId) return {status: "review", note: "确认时抬头不匹配，未提交", block: true};
         const confirm = uniqueTarget(["确认", "提交", "确定"]);
@@ -238,15 +266,16 @@
         if (!permission?.ok || !permission.value?.authorized) return {status: "review", note: permission?.error || "确认前任务已暂停", block: true};
         confirmed = true; confirm.click();
       }
-      if (/开票申请已提交|开票申请提交成功|申请已提交|提交成功|申请成功|等待商家开票/.test(text())) return {status: "submitted", note: "已在拼多多页面确认申请提交成功；若需 PDF 原件，请在发票详情领取", facts: {appliedAt: C.localTime(), platformCheckedAt: Date.now()}};
+      if (/开票申请已提交|开票申请提交成功|申请已提交|申请已发送|已向商家发送申请|提交成功|申请成功|等待商家开票/.test(text())) return {status: "submitted", note: "已在拼多多页面确认申请提交成功；若需 PDF 原件，请在发票详情领取", facts: {appliedAt: C.localTime(), platformCheckedAt: Date.now()}};
     }
     return {status: "review", note: "已点击提交，但页面未返回明确成功状态，请核对后再处理，不会自动重复申请", block: true};
   }
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
+    if (sender.id === chrome.runtime.id && message?.type === "PDD_INVOICE_SCAN_STOP") { scanStopped = true; reply({ok: true}); return; }
     if (sender.id !== chrome.runtime.id || !["PDD_INVOICE_SCAN", "PDD_INVOICE_PROCESS", "PDD_INVOICE_INSPECT"].includes(message?.type)) return;
     if (executing) { reply({ok: false, error: "当前页面正在处理另一项任务，请稍后重试"}); return; }
     executing = true;
-    const task = message.type === "PDD_INVOICE_SCAN" ? scan(message.loadMore) : message.type === "PDD_INVOICE_INSPECT" ? inspectOrder(message.orderId) : processOrder(message);
+    const task = message.type === "PDD_INVOICE_SCAN" ? scan(message) : message.type === "PDD_INVOICE_INSPECT" ? inspectOrder(message.orderId) : processOrder(message);
     task.then(value => reply({ok: true, ...value}), error => reply({ok: false, error: error.message})).finally(() => { executing = false; });
     return true;
   });
