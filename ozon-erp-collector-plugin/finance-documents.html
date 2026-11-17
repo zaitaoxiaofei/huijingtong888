@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><title>Ozon 财务原件下载</title>
+  <link rel="stylesheet" href="finance-documents.css">
+</head>
+<body>
+  <main>
+    <h1>Ozon 财务原件下载</h1>
+    <p>选择已登录的店铺、月份和原始目录，将文件保存到电脑。月份按 Ozon 文件列表日期筛选。</p>
+    <section class="controls">
+      <label>Ozon 后台页面 <select id="seller-tab"></select></label>
+      <button id="refresh" type="button">刷新页面列表</button>
+      <button id="open-seller" type="button">打开 Ozon 财务文件</button>
+      <label>文件月份 <input id="month" type="month" required></label>
+      <label>原件语言 <select id="language"><option value="ru">俄语</option><option value="en">英语</option></select></label>
+      <button id="scan" type="button">识别店铺并读取目录</button>
+    </section>
+    <p id="identity" role="status">请先打开并登录 seller.ozon.ru。</p>
+    <div class="actions">
+      <button id="choose-folder" type="button">选择电脑保存文件夹</button>
+      <span id="destination">尚未选择，默认保存到浏览器下载目录</span>
+      <button id="download" type="button" disabled>下载勾选目录</button>
+      <button id="stop" type="button" disabled>停止</button>
+      <button id="export" type="button" disabled>导出采集清单</button>
+    </div>
+    <p id="status" role="status" aria-live="polite">等待读取目录。</p>
+    <table><thead><tr><th>选择</th><th>Ozon 原始目录 / 子目录</th><th>本月文件</th><th>采集状态</th></tr></thead><tbody id="folders"></tbody></table>
+    <details><summary>文件清单及下载结果</summary><pre id="results"></pre></details>
+    <p class="note">文件按“店铺 ID / 月份 / Ozon 原目录 / 子目录”保存，保留原始文件名及校验信息。空目录、读取失败、未适配文件分别列示。对账单保留开具日期，可能对应更早的业务期间。</p>
+  </main>
+  <script src="finance-documents-core.js"></script>
+  <script src="finance-documents-transport.js"></script>
+  <script src="finance-documents.js"></script>
+</body>
+</html>

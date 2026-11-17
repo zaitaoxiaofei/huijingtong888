@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>公司与店铺财务原件归档</title><link rel="stylesheet" href="finance-documents.css"></head>
+<body><main>
+  <h1>公司与店铺财务原件归档</h1>
+  <p>从 ERP 读取所选月份的营业执照主体与店铺归属，按官方目录保存到电脑。月份按 Ozon 文件列表日期筛选。</p>
+  <section class="controls">
+    <label>已登录的 ERP 页面<select id="erp-tab"></select></label>
+    <label>Ozon 财务文件页面<select id="seller-tab"></select></label>
+    <button id="refresh" type="button">刷新页面列表</button>
+    <label>年份<input id="year" type="number" min="2000" max="2099"></label>
+    <label>原件语言<select id="language"><option value="ru">俄语</option><option value="en">英语</option></select></label>
+  </section>
+  <div id="month-picker" class="actions" aria-label="选择归档月份"></div>
+  <div class="actions"><button id="select-all" type="button">选择全年</button><button id="select-ten" type="button">选择1—10月</button>
+    <button id="choose-folder" type="button">选择电脑归档文件夹</button><span id="destination">请先选择统一保存目录，以检查已有文件。</span>
+    <button id="check" type="button">读取主体归属并检查已有月份</button></div>
+  <p id="identity" role="status">先登录 ERP 和 Ozon 店铺后台，再选择月份及保存目录。</p>
+  <table><thead><tr><th>下载</th><th>月份</th><th>营业执照主体 / 店铺</th><th>本地归档情况</th></tr></thead><tbody id="months"></tbody></table>
+  <section class="actions" aria-label="下载方式">
+    <label><input id="only-missing" type="radio" name="download-mode" checked>只补缺失或未完成月份（已有文件会校验复用）</label>
+    <label><input id="overwrite" type="radio" name="download-mode">全部重新下载并覆盖所选月份的同名原件</label>
+  </section>
+  <details open><summary>选择 Ozon 官方目录</summary><div id="folders" class="actions"></div></details>
+  <div class="actions"><button id="download" type="button" disabled>开始归档</button><button id="stop" type="button" disabled>停止</button></div>
+  <p id="status" role="status" aria-live="polite">等待读取。</p>
+  <details><summary>下载记录</summary><pre id="results"></pre></details>
+  <p class="note">保存结构：公司主体名称与ID / 店铺名称与ID / 月份 / Ozon官方目录 / 子目录 / 原件。总索引与每月清单保留文件来源及SHA256，供后续按销售、佣金、运费等项目关联证据。已有只代表本地快照，不代表平台最终齐套；补开文件可选择重新下载检查。</p>
+  <p><a href="finance-documents.html">单月下载入口（不读取 ERP 归属）</a></p>
+</main>
+<script src="finance-documents-core.js"></script><script src="finance-documents-transport.js"></script>
+<script src="finance-documents-archive.js"></script><script src="finance-archive.js"></script>
+</body></html>
