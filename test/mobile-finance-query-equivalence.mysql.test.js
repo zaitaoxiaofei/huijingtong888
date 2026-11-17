@@ -1,5 +1,5 @@
 import {BILLING_COST_SCHEMA} from '../src/services/finance-billing-cost-schema.js';
-import {billingProfitTotals,fixedAiExpenseTotal} from '../src/shared/billing-profit.js';
+import {billingProfitTotals,fixedAiExpenseTotal,billingMonthStatus} from '../src/shared/billing-profit.js';
 import {scopedBillingWithdrawal} from '../src/shared/billing-withdrawal.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -109,7 +109,7 @@ test('mobile finance materialized outcomes preserve the complete 45b report and 
     const appendixCalls={procurement:0,ai:0};
     // This harness compares CTE versus the reviewed original predicates. Official
     // reconciliation has its own real-DB regressions in tenant-monthly-billing.
-    const overrides={extraMethods:methods,withMysqlReadSnapshot:async operation=>operation(q),billingProfitTotals,fixedAiExpenseTotal,financeAiCostPolicy:{readForScope:async()=>null},allocateBillingAiCost:()=>({}),scopedBillingWithdrawal,paidPayrollAccruals:async()=>[],monthlyBillingProjectionMysql:async()=>[],billingWithdrawalAssignmentsMysql:async()=>[],applyBillingProjectionMysql:rows=>rows,buildOrderOutcomeSql,orderReportOutcomeCtesSql,todayDateKeyMysql:()=> '2026-11-06',ensureFinanceCenterSchema:async()=>{},
+    const overrides={extraMethods:methods,billingMonthStatus,billingOverviewCache:{read:async(_key,loader)=>loader()},withMysqlReadSnapshot:async operation=>operation(q),billingProfitTotals,fixedAiExpenseTotal,financeAiCostPolicy:{readForScope:async()=>null},allocateBillingAiCost:()=>({}),scopedBillingWithdrawal,paidPayrollAccruals:async()=>[],monthlyBillingProjectionMysql:async()=>[],billingWithdrawalAssignmentsMysql:async()=>[],applyBillingProjectionMysql:rows=>rows,buildOrderOutcomeSql,orderReportOutcomeCtesSql,todayDateKeyMysql:()=> '2026-11-06',ensureFinanceCenterSchema:async()=>{},
       shopsMysql:async tenant=>(await q(`SELECT id,name FROM shops WHERE ${tenant==='admin'?'tenant_id IS NULL OR tenant_id=1':'tenant_id=?'} ORDER BY id`,tenant==='admin'?[]:[Number(tenant)])),
       monthlyProcurementInventorySummaryMysql:async(from,to,scope)=>{appendixCalls.procurement++;return {period_basis:'purchased_at',snapshot_basis:'current',purchase_total_amount:scope.id,inventory_total_value:scope.id*3};},
       billingAiUsageMysql:async()=>{appendixCalls.ai++;return {request_count:0,cost:0};},monthlyBillingOrderRowsMysql:async()=>[]};

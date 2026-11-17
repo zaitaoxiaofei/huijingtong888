@@ -55,6 +55,8 @@ const withdrawalOpen=ref(false);
 const expenseCategoryFilter = ref("");
 const expensePage=ref(1),expensePageSize=ref(20);
 const capitalDrawer = ref(false);
+const appendixLoading=ref(false),appendixError=ref('');
+let appendixController,appendixKey='',appendixPendingKey='';
 const shopsOpen = ref(false), aiOpen = ref(false), settlementOpen = ref(false), payrollOpen = ref(false);
 const payrollRows = ref([]), payrollLoading = ref(false), payrollError = ref(''), payrollMonth = ref('period');
 const payrollMonths = computed(()=>[...new Set(payrollRows.value.map(row=>row.month))].sort().reverse());
@@ -340,8 +342,21 @@ async function removeExpense(row) {
   }
 }
 
+async function loadAppendices() {
+  const key=JSON.stringify([currentApiCacheScope(),state.dateRange,state.companyId,state.shopId]);
+  if(appendixKey===key||appendixPendingKey===key)return;
+  appendixPendingKey=key;
+  appendixController?.abort();const controller=new AbortController();appendixController=controller;
+  appendixLoading.value=true;appendixError.value='';
+  try{const data=await apiClient.get('/api/monthly-billing-details?'+new URLSearchParams({from:state.dateRange[0],to:state.dateRange[1],companyId:state.companyId,shopId:state.shopId,appendicesOnly:'1'}),{signal:controller.signal,noCache:true});
+    if(!controller.signal.aborted&&key===JSON.stringify([currentApiCacheScope(),state.dateRange,state.companyId,state.shopId])){state.month.procurement_inventory=data.procurement_inventory;state.month.ai_usage=data.ai_usage;appendixKey=key;}
+  }catch(error){if(!controller.signal.aborted)appendixError.value=error.message||'明细暂未加载，请重试';}
+  finally{if(appendixController===controller){appendixLoading.value=false;appendixController=null;appendixPendingKey='';}}
+}
+watch([capitalDrawer,aiOpen],([capital,ai])=>{if(capital||ai)loadAppendices();});
 async function loadData() {
   recordCache.clear();
+  appendixController?.abort();appendixKey='';appendixPendingKey='';appendixError.value='';
   abortController?.abort();
   abortController = new AbortController();
   const { signal } = abortController;
@@ -352,7 +367,8 @@ async function loadData() {
       from: state.dateRange[0],
       to: state.dateRange[1],
       shopId: String(state.shopId || "all"),
-      companyId: state.companyId
+      companyId: state.companyId,
+      includeAppendices: "0"
     });
     const [payload, financeMeta] = await Promise.all([
       apiClient.get(`/api/monthly-billing-details?${params.toString()}`, { signal }),
@@ -363,6 +379,7 @@ async function loadData() {
     state.month = payload?.selected || payload?.months?.[0] || { summary: {}, shops: [], expenses: [] };
     state.companies = Array.isArray(financeMeta?.companies) ? financeMeta.companies : [];
     state.assignments = Array.isArray(financeMeta?.assignments) ? financeMeta.assignments : [];
+    if(capitalDrawer.value||aiOpen.value)loadAppendices();
   } catch (error) {
     if (error?.name === "AbortError") return;
     ElMessage.error(error.message || "月度账单加载失败");
@@ -400,7 +417,7 @@ watch(
 watch(sourceFilters, () => { if (orderRecordDrawer.value) { orderRecords.page = 1; loadOrderRecords(); } });
 watch(()=>currentApiCacheScope(),()=>{recordCache.clear();evidenceController?.abort();evidenceRows.value=[];evidenceOpen.value=false;recordController?.abort();abortController?.abort();Object.assign(orderRecords,{rows:[],summary:{},total:0,productId:"",sku:"",skuShopId:""});payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';state.shopId='all';loadData();});
 window.addEventListener("erp:finance-changed",loadData);
-onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData);evidenceController?.abort(); abortController?.abort(); recordController?.abort(); recordCache.clear(); });
+onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData);evidenceController?.abort(); abortController?.abort(); appendixController?.abort(); recordController?.abort(); recordCache.clear(); });
 </script>
 
 <template>
@@ -481,6 +498,9 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
     </el-dialog>
 
     <el-drawer v-model="capitalDrawer" title="采购支出与库存资金" size="min(100%, 1050px)" destroy-on-close>
+      <el-alert v-if="appendixError" :title="appendixError" type="error" :closable="false"/><el-button v-if="appendixError" @click="loadAppendices">重新加载</el-button>
+      <el-skeleton v-if="appendixLoading" :rows="4" animated/>
+      <div v-else-if="!appendixError">
     <section v-loading="state.loading" class="capital-section">
       <div class="section-head">
         <div>
@@ -521,6 +541,7 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
       </el-alert>
     </section>
 
+      </div>
     </el-drawer>
 
     <el-dialog v-model="shopsOpen" title="店铺账单" width="min(96vw, 1500px)" destroy-on-close>
@@ -571,7 +592,8 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
 
     </el-dialog>
     <el-dialog v-model="aiOpen" title="AI 用量" width="min(96vw, 1120px)" destroy-on-close>
-    <section v-if="aiOpen" v-loading="state.loading" class="ai-usage-section"><p v-if="selectedSummary.ai_cost_company_id">图片费用归属：{{state.companies.find(c=>Number(c.id)===Number(selectedSummary.ai_cost_company_id))?.name||'已配置公司'}}；本账单按量成本 {{selectedSummary.ai_usage_cost==null?'待核定':formatMoney(selectedSummary.ai_usage_cost)}} 元，固定AI费用 {{formatMoney(selectedSummary.ai_fixed_cost)}} 元。</p><p v-if="selectedSummary.ai_cost_fallback_months?.length">无调用记录月份按已确认估算：{{selectedSummary.ai_cost_fallback_months.join('、')}}。</p>
+    <el-alert v-if="appendixError" :title="appendixError" type="error" :closable="false"/><el-button v-if="appendixError" @click="loadAppendices">重新加载</el-button>
+    <section v-if="aiOpen" v-loading="appendixLoading" class="ai-usage-section"><p v-if="selectedSummary.ai_cost_company_id">图片费用归属：{{state.companies.find(c=>Number(c.id)===Number(selectedSummary.ai_cost_company_id))?.name||'已配置公司'}}；本账单按量成本 {{selectedSummary.ai_usage_cost==null?'待核定':formatMoney(selectedSummary.ai_usage_cost)}} 元，固定AI费用 {{formatMoney(selectedSummary.ai_fixed_cost)}} 元。</p><p v-if="selectedSummary.ai_cost_fallback_months?.length">无调用记录月份按已确认估算：{{selectedSummary.ai_cost_fallback_months.join('、')}}。</p>
       <div class="section-head">
         <div>
           <strong>{{ selectedPeriodTitle }}</strong>

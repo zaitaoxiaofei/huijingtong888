@@ -1,3 +1,4 @@
+import {billingEvidenceIndex} from './billing-evidence-index.js';
 import {createInventoryBatchStocktake} from './inventory-batch-stocktake.js';
 import {billingOverviewCache} from './billing-overview-cache.js';
 import {financeAiCostPolicy,allocateBillingAiCost} from './finance-ai-cost-policy.js';
@@ -28375,21 +28376,28 @@ async function monthlyBillingProjectionMysql(from,to,shopId,scope,companyId,incl
   const terminalOrders=[...new Map(itemRows.filter(r=>['rejected_unclaimed','after_delivery_return','cancelled_pre_fulfillment','cargo_lost'].includes(r.outcome_type)||(r.profit_status==='accrued'&&Number(r.saved_aftersale_fee)!==0)).map(r=>[r.order_id,r])).values()];
   const financeRows=[],siblings=[];
   const parents=[...new Map(terminalOrders.map(o=>[o.shop_id+':'+(o.order_number||String(o.posting_number).replace(/-[^-]+$/,'')),{shop_id:o.shop_id,parent:o.order_number||String(o.posting_number).replace(/-[^-]+$/,'')}])).values()];
-  for(let index=0;index<terminalOrders.length;index+=400){const selected=terminalOrders.slice(index,index+400);
-   financeRows.push(...await read(`SELECT f.id,f.shop_id,f.operation_id,f.posting_number,f.order_number,f.operation_type,f.operation_type_name,DATE_FORMAT(f.operation_date,'%Y-%m-%d %H:%i:%s') operation_date,f.service_type,f.service_name,f.amount,f.accruals_for_sale,f.sale_commission,f.delivery_charge,f.return_delivery_charge,f.currency_code,f.raw_json,f.amount_cny,f.accruals_for_sale_cny,f.sale_commission_cny,f.delivery_charge_cny,f.return_delivery_charge_cny,f.exchange_rate FROM ozon_finance_items f WHERE ${selected.map(()=>'(f.shop_id=? AND f.posting_number IN (?,?))').join(' OR ')} ORDER BY f.operation_date,f.id`,selected.flatMap(o=>[o.shop_id,o.posting_number,o.order_number||String(o.posting_number).replace(/-[^-]+$/,'')])));
+  const requestedFinance=new Map(),evidenceBatch=new Map();
+  terminalOrders.forEach((order,index)=>{const numbers=requestedFinance.get(order.shop_id)||new Set();
+   for(const number of [order.posting_number,order.order_number||String(order.posting_number).replace(/-[^-]+$/,'')]){numbers.add(number);const key=JSON.stringify([Number(order.shop_id),number]);if(!evidenceBatch.has(key))evidenceBatch.set(key,Math.floor(index/400));}
+   requestedFinance.set(order.shop_id,numbers);
+  });
+  for(const [shop,numbers] of requestedFinance)for(let index=0,all=[...numbers];index<all.length;index+=400){const selected=all.slice(index,index+400);
+   financeRows.push(...await read(`SELECT f.id,f.shop_id,f.operation_id,f.posting_number,f.order_number,f.operation_type,f.operation_type_name,DATE_FORMAT(f.operation_date,'%Y-%m-%d %H:%i:%s') operation_date,f.service_type,f.service_name,f.amount,f.accruals_for_sale,f.sale_commission,f.delivery_charge,f.return_delivery_charge,f.currency_code,f.raw_json,f.amount_cny,f.accruals_for_sale_cny,f.sale_commission_cny,f.delivery_charge_cny,f.return_delivery_charge_cny,f.exchange_rate FROM ozon_finance_items f WHERE f.shop_id=? AND f.posting_number IN (${selected.map(()=>'?').join(',')}) ORDER BY f.operation_date,f.id`,[shop,...selected]));
   }
   const siblingIds=new Set();
   for(let index=0;index<parents.length;index+=100){const selected=parents.slice(index,index+100);
    const ids=await read(selected.flatMap(()=>["SELECT id FROM orders WHERE shop_id=? AND order_number=?","SELECT id FROM orders WHERE shop_id=? AND posting_number LIKE ? ESCAPE '='"]).join(' UNION ALL '),selected.flatMap(o=>[o.shop_id,o.parent,o.shop_id,o.parent.replace(/[=%_]/g,c=>'='+c)+'-%']));for(const row of ids)siblingIds.add(Number(row.id));
   }
   const allSiblingIds=[...siblingIds];for(let index=0;index<allSiblingIds.length;index+=1000){const selected=allSiblingIds.slice(index,index+1000);siblings.push(...await read(`SELECT o.id order_id,o.shop_id,o.posting_number,o.order_number,oi.id order_item_id,oi.ozon_sku,oi.quantity,oi.sale_price,st.formula_version,fx.prices_json frozen_prices,order_quote.rate frozen_order_rate FROM orders o JOIN shops s ON s.id=o.shop_id JOIN order_items oi ON oi.order_id=o.id LEFT JOIN order_profit_calc_state st ON st.order_item_id=oi.id AND st.tenant_key=(CASE WHEN s.tenant_id>0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci LEFT JOIN order_profit_fx_state fx ON fx.order_id=o.id AND fx.tenant_key=st.tenant_key LEFT JOIN order_profit_daily_fx_rates order_quote ON order_quote.id=fx.order_fx_id WHERE ${orderTenantPredicateMysql('s',scope)} AND o.id IN (${selected.map(()=>'?').join(',')}) ORDER BY o.id,oi.id`,selected));}
+  financeRows.sort((a,b)=>evidenceBatch.get(JSON.stringify([Number(a.shop_id),a.posting_number]))-evidenceBatch.get(JSON.stringify([Number(b.shop_id),b.posting_number]))||String(a.operation_date).localeCompare(String(b.operation_date))||Number(a.id)-Number(b.id));
   const uniqueFinance=[...new Map(financeRows.map(r=>[r.id,r])).values()],uniqueSiblings=[...new Map(siblings.map(r=>[r.order_item_id,{...r,sale_price:billingAllocationSale(r)}])).values()];
   const fxIds=[...new Set(uniqueFinance.map(r=>{try{return (typeof r.raw_json==='string'?JSON.parse(r.raw_json):r.raw_json)?._erp_fx_archive?.id;}catch{return null;}}).filter(Boolean))],archives=[];
   for(let index=0;index<fxIds.length;index+=500){const selected=fxIds.slice(index,index+500);archives.push(...await read(`SELECT id,DATE_FORMAT(business_date,'%Y-%m-%d') business_date,DATE_FORMAT(source_date,'%Y-%m-%d') source_date,currency_from,currency_to,source,rate FROM order_profit_daily_fx_rates WHERE id IN (${selected.map(()=>'?').join(',')})`,selected));}
+  const evidenceIndex=billingEvidenceIndex({financeRows:uniqueFinance,siblings:uniqueSiblings,archives});
   const evidenceRead=async(sql,args=[])=>{
-   if(sql.includes('FROM ozon_finance_items'))return uniqueFinance.filter(r=>Number(r.shop_id)===Number(args[0])&&args.slice(1).includes(r.posting_number));
-   if(sql.includes('FROM orders o JOIN shops owned_shop'))return uniqueSiblings.filter(r=>Number(r.shop_id)===Number(args[0])&&(r.order_number===args[1]||r.posting_number.startsWith(args[1]+'-')));
-   if(sql.includes('FROM order_profit_daily_fx_rates'))return archives.filter(r=>args.map(String).includes(String(r.id)));
+   if(sql.includes('FROM ozon_finance_items'))return evidenceIndex.finance(args[0],args.slice(1));
+   if(sql.includes('FROM orders o JOIN shops owned_shop'))return evidenceIndex.siblings(args[0],args[1]);
+   if(sql.includes('FROM order_profit_daily_fx_rates'))return evidenceIndex.archives(args);
    return read(sql,args);
   };
   const projection=await readBillingProjection({query:evidenceRead,itemRows,classifyCategory:ozonFinanceCategoryMysql});
@@ -28779,6 +28787,14 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   const includeAppendices = query.includeAppendices !== "0";
   const aiCostPolicy=await financeAiCostPolicy.readForScope(tenantScope);
   const explicitRange = billingDateRangeMysql(query);
+  if(query.appendicesOnly==='1') {
+    if(!explicitRange)throw Object.assign(new Error('请提供采购与AI明细的开始和结束日期'),{statusCode:400});
+    const [procurement_inventory,ai_usage]=await Promise.all([
+      monthlyProcurementInventorySummaryMysql(explicitRange.from,explicitRange.to,tenantScope),
+      billingAiUsageMysql(explicitRange.from,explicitRange.to,tenantScope,{groupByMonth:Boolean(aiCostPolicy)})
+    ]);
+    return {from:explicitRange.from,to:explicitRange.to,procurement_inventory,ai_usage};
+  }
   if (explicitRange) {
     const [ranking, pendingByShop, expenses, procurementInventory, aiUsage,projection,withdrawalAssignments] = await Promise.all([
       profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId,groupByMonth:true }),
