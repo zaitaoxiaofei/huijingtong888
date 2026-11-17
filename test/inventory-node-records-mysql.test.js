@@ -116,6 +116,8 @@ test('node records, approval purchase, receipt markers and order notes preserve 
   });
   await t.test('FBP receipt review is read-only, stock-change evidence needs manual per-SKU confirmation and cannot cross enterprises',async()=>{
    await q("INSERT INTO ozon_stock_snapshots(shop_id,product_id,ozon_sku,warehouse_id,warehouse_name,stock_type,present,available,reserved,synced_at) VALUES(20,200,'20001','FBP','FBP','fbp_real',32,32,0,'2026-10-01 00:00:00')");
+   // This receipt fixture must fund the physical dispatch while retaining the live FBS unit.
+   await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,status,stock_location) VALUES(2,200,'opening_stock',31,'posted','LOCAL')");
    const sent=await api.createFbpTransferRecordMysql({product_id:200,mapping_id:200,shop_id:20,ozon_sku:'20001',quantity:30,status:'sent',shipped_at:'2026-10-01 01:00:00',expected_arrival_at:'2026-10-06 01:00:00'},2,2);
    const id=Number(sent.id);
    assert.ok(id);

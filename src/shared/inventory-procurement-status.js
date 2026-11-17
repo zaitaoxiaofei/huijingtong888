@@ -6,7 +6,7 @@ export function inventoryProcurementStatus(workflow={},key){
  if(key==='orders')return p.required_fbs===0&&p.cancelled_fbs>0?'warning':status(p.required_fbs,true);
  if(key==='safety')return status(p.optional_local??(workflow.safety_target===0?0:null),false);
  if(key==='fbp'){
-  if(p.submitted_fbp_quantity===0&&!(p.unbacked_fbp_locks>0))return'info';
+  if((p.formal_fbp_quantity??((p.submitted_fbp_quantity??0)+(p.locked_quantity??0)))===0)return'info';
   return status(p.required_fbp,true);
  }
  if(key==='forecast'){

@@ -4,8 +4,8 @@ import { fbpSupplyState, fbpLocalSupplyNeed } from './fbp-supply-state.js';
 // One physical-unit policy for the diagram, order badges and purchasing queue.
 export const INVENTORY_DEMAND_TYPES = [
   { key: 'real_order', label: 'FBS真实订单需求', priority: 1 },
-  { key: 'local_safety', label: '本地安全保障需求', priority: 2 },
-  { key: 'fbp_stock', label: 'FBP正式备货申请', priority: 3 },
+  { key: 'local_safety', label: '本地安全保障需求', priority: 3 },
+  { key: 'fbp_stock', label: 'FBP正式备货申请', priority: 2 },
   { key: 'fbp_forecast', label: 'FBP预测预警建议', priority: 4 }
 ];
 const known = value => value != null && value !== '' && Number.isFinite(Number(value));
@@ -22,14 +22,14 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   const complete = !flow.unavailable && [ledger.physical_estimate, ledger.open_order_demand, ledger.fbp_reserved, flow.safety].every(known) && Number(ledger.physical_estimate) >= 0;
   const physical = qty(ledger.physical_estimate), orders = qty(ledger.open_order_demand), locked = qty(ledger.fbp_reserved), safety = qty(flow.safety);
   const incoming = qty(ledger.incoming_quantity), assigned = qty(ledger.current_incoming);
-  const orderGap = Math.max(0, orders - Math.max(0, physical - locked));
+  const orderGap = Math.max(0, orders - physical);
   const orderBuy = known(ledger.current_shortage) ? qty(ledger.current_shortage) : Math.max(0, orderGap - assigned);
   const safetyGap = Math.max(0, safety - Math.max(0, physical - locked - orders));
   const unassigned = Math.max(0, incoming - assigned);
   const safetyBuy = Math.max(0, safetyGap - unassigned);
   const free = Math.max(0, physical - orders - locked - safety);
   // Drafts and predictions do not reserve supply or create a purchase obligation.
-  // Warehouse approval closes the quantity decision; approved stock is already in locked.
+  // Approved, unshipped FBP remains second-priority demand; it cannot preempt FBS.
   const submitted = (applications || []).filter(row => row.status === 'pending_review');
   const requested = submitted.reduce((sum, row) => sum + qty(row.requested_quantity), 0);
   const fbp = fbpSupplyState(forecast, ledger.fbp_inventory);
@@ -51,6 +51,7 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
     for(let i=0;i<demands.length;i++){
       demands[i].required_purchase_quantity=required[i];demands[i].optional_purchase_quantity=optional[i];
       demands[i].purchase_quantity=required[i]+optional[i];
+      if(i===0)demands[i].physical_gap=supply_plan.fbs_physical_gap;
       if(i===1)demands[i].physical_gap=supply_plan.local_physical_gap;
       if(i===2)demands[i].physical_gap=supply_plan.required_fbp_physical_gap;
       if(i===3)demands[i].physical_gap=supply_plan.forecast_fbp_physical_gap;
@@ -69,12 +70,13 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   demands[3].status=!fbp.known?'unknown':supply_plan.optional_fbp!=null?supply_plan.optional_fbp>0?'warning':'success':fbp.replenish_quantity>0?'warning':'success';
   if(!fbp.known)demands[3].purchase_quantity=null;
   demands[3].fbp_stock_status=fbp.status;
-  demands[2].replenishment_quantity = requested;
+  demands[2].replenishment_quantity = supply_plan.formal_fbp_quantity;
   demands[2].fbp_stock_status = fbp.status;
 
   // Supply colour describes quantities; application progress is a separate signal.
   for(const demand of demands)if(demand.submitted_quantity>0)demand.process_status='request_submitted';
-  if(submitted.length)demands[2].process_status='pending_review';
+  if(locked>0)demands[2].process_status='approved_waiting_dispatch';
+  else if(submitted.length)demands[2].process_status='pending_review';
   else if((applications||[]).some(r=>r.status==='draft'))demands[2].process_status='draft';
   const statusDemands=fbp.known?demands:demands.slice(0,3);
   const stock_status=['danger','warning','unknown','success'].find(status=>statusDemands.some(d=>d.status===status));

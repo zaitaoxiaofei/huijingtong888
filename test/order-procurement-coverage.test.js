@@ -288,3 +288,9 @@ test('order procurement endpoints reject FBP before changing purchase records', 
     await assert.rejects(fn(1), /官方仓库存直接履约/);
   }
 });
+
+test('FBS allocation precedes approved unshipped FBP reservations without changing historical consumption',()=>{
+ const result=calculate([item(1),item(2),item(3),item(4),item(5,{needs_fulfillment:0,entered_transport:1,quantity:3})],{stocks:[{product_id:10,ledger:13,open_deducted:4,fbp_reserved:15}]});
+ for(const id of [1,2,3,4]){assert.equal(result.get(id).stock_quantity,1);assert.equal(result.get(id).shortage_quantity,0);}
+ assert.equal(result.get(5).needs_fulfillment,false);assert.equal(result.product_availability.get(10).physical_stock,17);assert.equal(result.product_availability.get(10).fbp_reserved_qty,15);
+});

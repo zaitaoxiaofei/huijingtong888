@@ -19,3 +19,8 @@ test('batch reconstruction honors explicit disassembly and FIFO shipped consumpt
  assert.deepEqual(remainingAssemblyBatches(events,35).map(b=>[b.id,b.remaining]),[[1,20],[2,15]]);
  assert.equal(remainingAssemblyBatches(events,0).length,0);
 });
+
+test('approved FBP reservations do not displace FBS finished kits',()=>{
+ const rows=allocateBundleFinishedDemands([order(1,4)],graph,[{product_id:100,ledger:5,fbp_reserved:5}]);
+ assert.equal(rows.length,1);assert.equal(rows[0].finished_bundle,true);assert.equal(rows[0].quantity,4);
+});

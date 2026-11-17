@@ -1,3 +1,4 @@
+import {loadFbpTransit} from './fbp-warehouse.js';
 import { receiptEvidence, assertEvidenceOwnership } from './procurement-evidence.js';
 import {newArrivalReceiptRequest,readNewArrivalReceipt} from './procurement-receipt-idempotency.js';
 import { loadInventoryComposition } from './inventory-composition.js';
@@ -36,7 +37,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const missing=ids.filter(id=>fresh||!(workflowCache.get(`${prefix}${scope.id}:${id}`)?.expires>Date.now()));
     if(missing.length){
       const placeholders=missing.map(()=>'?').join(',');
-      const [coverage,settingsRows,incoming,sourceRows,stocktakes,composition,cancellationEvents]=await Promise.all([
+      const [coverage,settingsRows,incoming,sourceRows,stocktakes,composition,cancellationEvents,transitRows]=await Promise.all([
         providedCoverage||loadOrderProcurementCoverage(query,'',{productIds:missing,tenantId:scope.id,includeLegacyTenantNull:scope.isDefault,localStateOnly:localOnly}),
         query(`SELECT product_id,settings_json FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN (0,${placeholders})`,[scope.id,...missing]),
         localOnly?Promise.resolve([]):query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
@@ -48,7 +49,8 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
           WHERE a.action_type='stocktake' AND a.product_id IN (${placeholders})
           AND NOT EXISTS(SELECT 1 FROM procurement_ledger_actions newer WHERE newer.product_id=a.product_id AND newer.action_type='stocktake' AND newer.id>a.id)`,missing),
         localOnly?Promise.resolve(null):loadInventoryComposition(query,scope),
-        localOnly?Promise.resolve([]):readDemandCancellationEvents(query,scope.id,missing)
+        localOnly?Promise.resolve([]):readDemandCancellationEvents(query,scope.id,missing),
+        localOnly?Promise.resolve([]):loadFbpTransit(query,missing,scope)
       ]);
       const cancellations=activeDemandCancellations(cancellationEvents);
       const {requests,applications:applicationRows}=sourceRows;
@@ -59,6 +61,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const stocks=new Map((coverage.inventory_stocks||[]).map(row=>[Number(row.product_id),row]));
       const settingsByProduct=new Map(settingsRows.map(row=>[Number(row.product_id),row]));
       const incomingByProduct=new Map(incoming.map(row=>[Number(row.product_id),row]));
+      const transitByProduct=new Map(transitRows.map(row=>[Number(row.product_id),Number(row.quantity)]));
       const requestsByProduct=group(requests),applicationsByProduct=group(applicationRows),ordersByProduct=new Map();
       const fbpForecasts=localOnly?new Map():await loadFbpSafetyProjections(query,missing.map(id=>byProduct.get(id)),scope,id=>({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]}));
       // Index once: global warning pages must not scan the entire order history for every product.
@@ -71,7 +74,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const product=byProduct.get(id),stock=stocks.get(id);
         const orders=ordersByProduct.get(id)||[];
         const open=orders.filter(o=>o.needs_fulfillment),sum=key=>open.reduce((s,o)=>s+Number(o[key]||0),0);
-        const local={product,stocktake_evidence:stocktakes.find(row=>Number(row.product_id)===id),local_stock:Number(stock?.ledger||0),open_order_deducted:Number(stock?.open_deducted||0),physical_estimate:Number(stock?.ledger||0)+Number(stock?.open_deducted||0),open_order_demand:sum('quantity'),fbp_reserved:Number(stock?.fbp_reserved||0),current_shortage:sum('shortage_quantity'),current_incoming:sum('incoming_quantity'),incoming_quantity:Number(incomingByProduct.get(id)?.quantity||0),orders};
+        const local={product,fbp_in_transit:localOnly?null:transitByProduct.get(id)||0,stocktake_evidence:stocktakes.find(row=>Number(row.product_id)===id),local_stock:Number(stock?.ledger||0),open_order_deducted:Number(stock?.open_deducted||0),physical_estimate:Number(stock?.ledger||0)+Number(stock?.open_deducted||0),open_order_demand:sum('quantity'),fbp_reserved:Number(stock?.fbp_reserved||0),current_shortage:sum('shortage_quantity'),current_incoming:sum('incoming_quantity'),incoming_quantity:Number(incomingByProduct.get(id)?.quantity||0),orders};
         const settings=validateFlowSettings({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]});
         const applications=applicationsByProduct.get(id)||[];
         local.flow_summary=buildInventoryFlowSummary(local,calculateLocalInventorySafety(local,settings),orders,applications);
@@ -100,6 +103,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
           CASE WHEN ${bindingValid} THEN 'current' ELSE 'changed_or_missing' END AS binding_status,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=applicant.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN applicant.name ELSE NULL END AS applicant_name,
           wi.requested_qty AS sku_requested_quantity,MAX(wi.approved_qty) AS sku_approved_quantity,
+          GREATEST(0,MAX(wi.approved_qty)+COALESCE((SELECT SUM(adjustment_qty) FROM fbp_replenishment_item_adjustments adj WHERE adj.item_id=wi.id),0)) AS sku_final_quantity,
           CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS units_per_sku,
           wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
           FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
@@ -309,7 +313,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       let prediction,forecastError='';
       try{prediction=await forecast(id,scope.id,{official:fbp.fbp_inventory,balance:{physical_stock:local.physical_estimate,open_order_demand_qty:local.open_order_demand,fbp_reserved_qty:local.fbp_reserved}});}
       catch(e){if([403,404].includes(e.statusCode))throw e;forecastError='FBP备货预测暂不可用，可查看现有申请或手动选择SKU备货';}
-      const projected={...local,fbp_inventory:fbp.fbp_inventory,flow_summary:{...local.flow_summary,applications:fbp.applications,applications_pending:false}};
+      const projected={...local,fbp_in_transit:(fbp.transfers||[]).reduce((sum,t)=>sum+Number(t.remaining_quantity||0),0),fbp_inventory:fbp.fbp_inventory,flow_summary:{...local.flow_summary,applications:fbp.applications,applications_pending:false}};
       const result=applyDemandCancellations(inventoryWorkflow(projected,{applications:fbp.applications,forecast:prediction,requests}),local.orders||[],id,activeDemandCancellations(cancellationEvents));
       return {...result,product_id:id,forecast_error:forecastError,settings:prediction?.settings,
         fbp_forecast_suggestions:fbpForecastSuggestions(fbp.applications,result.fbp),

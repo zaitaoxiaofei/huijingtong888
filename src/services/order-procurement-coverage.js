@@ -42,7 +42,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   };
   const prioritizedProducts = new Set(demands.filter(row => row.needs_fulfillment && row.allocation_priority > 0).map(row => Number(row.product_id)));
   const stockByProduct = new Map(stocks.map(row => [Number(row.product_id), row]));
-  const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0) - positive(row.fbp_reserved))]));
+  const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0))]));
   const requestById = new Map(requests.map(row => [Number(row.id), row]));
   const batches = [...inbounds, ...stockSources.map(row => ({ ...row, id: -Number(row.id), status: 'approved', stock_source: true }))].filter(row => ['pending_arrival', 'approved'].includes(row.status)).map(row => ({ ...row, remaining: positive(row.quantity) }));
   batches.sort((a, b) => receivedAt(a) - receivedAt(b) || Number(a.id) - Number(b.id));

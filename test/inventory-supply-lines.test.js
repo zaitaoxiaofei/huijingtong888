@@ -45,12 +45,12 @@ test('official physical counts all warehouses and recipe units independently of 
 });
 
 const factsFor=(state,key)=>Object.fromEntries(inventorySupplyLineFacts(inventorySupplyLines(state).find(line=>line.key===key)).map(fact=>[fact.label,fact.value]));
-test('the reported 17 physical / 15 locked case shows 4 FBS demand and 2 purchase, without changing quantities',()=>{
- const state=inventoryWorkflow({...ledger,physical_estimate:17,open_order_demand:4,fbp_reserved:15,incoming_quantity:0,current_shortage:2,current_incoming:0,flow_summary:{safety:9}},{applications:[{status:'approved',requested_quantity:15}],forecast:{skus:[]}});
+test('17 physical / 15 approved FBP preserves FBS first and attributes the two-unit gap to FBP',()=>{
+ const state=inventoryWorkflow({...ledger,physical_estimate:17,open_order_demand:4,fbp_reserved:15,incoming_quantity:0,current_shortage:0,current_incoming:0,flow_summary:{safety:9}},{applications:[{status:'approved',requested_quantity:15}],forecast:{skus:[]}});
  const before=structuredClone(state.supply_plan);
- assert.deepEqual(factsFor(state,'orders'),{'订单需求':4,'现货覆盖':2,'在途覆盖':0,'仍需采购':2});
+ assert.deepEqual(factsFor(state,'orders'),{'订单需求':4,'现货覆盖':4,'在途覆盖':0,'仍需采购':0});
  assert.deepEqual(factsFor(state,'safety'),{'保障目标':9,'现货覆盖':0,'在途覆盖':0,'可选补货':9});
- const fbp=factsFor(state,'fbp');assert.equal(fbp['待审申请'],0);assert.equal(fbp['已锁定发仓'],15);assert.equal(fbp['仍需采购'],0);
+ const fbp=factsFor(state,'fbp');assert.equal(fbp['申请数量'],15);assert.equal(fbp['已审批待发'],15);assert.equal(fbp['现货覆盖'],13);assert.equal(fbp['仍需采购'],2);
  assert.equal(state.supply_plan.required_purchase,2);assert.equal(state.supply_plan.optional_purchase,9);assert.deepEqual(state.supply_plan,before);
 });
 test('covered orders retain total demand and partial inbound coverage remains separate',()=>{

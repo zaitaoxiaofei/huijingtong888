@@ -58,9 +58,9 @@ const nodes = computed(() => [
  {key:'orders',label:'① FBS订单保障',value:props.ledger.open_order_demand,hint:`本地仓履约${gapText('real_order')}`,icon:Document,lane:'local',tab:'current'},
  {key:'safety',label:'② 本地安全保障',value:facts.value.safety,hint:`保障 ${facts.value.local_days??'待核'} 天${gapText('local_safety')}`,icon:CircleCheck,lane:'local'},
  {key:'free',label:'本地可用库存',value:facts.value.free,hint:'扣除本地订单、保障及FBP锁定',icon:Goods,lane:'local',primary:true},
- {key:'application',label:'FBP备货申请',value:workflowState.value.requested,hint:'提交申请，还未锁定本地货',icon:Tickets,lane:'fbp'},
- {key:'locked',label:'仓库确认与锁定',value:props.ledger.fbp_reserved,hint:'审核通过后锁定 · 发出才扣实物',icon:Lock,lane:'fbp',primary:true},
- {key:'dispatch',label:'发往FBP · 在途',value:workflowState.value.fbp?.in_transit,hint:'本地仓发出，不是FBP销售发货',icon:Van,lane:'fbp',moving:workflowState.value.fbp?.in_transit>0},
+ {key:'application',label:'FBP备货申请',value:workflowState.value.supply_plan?.formal_fbp_quantity,hint:'待审核和已审批待发的正式需求',icon:Tickets,lane:'fbp'},
+ {key:'locked',label:'已审批待发',value:props.ledger.fbp_reserved,hint:'审核预留不等于出库 · FBS优先',icon:Lock,lane:'fbp',primary:true},
+ {key:'dispatch',label:'发往FBP · 在途',value:workflowState.value.supply_plan?.fbp_in_transit_quantity??workflowState.value.fbp?.in_transit,hint:'本地仓发出，不是FBP销售发货',icon:Van,lane:'fbp',moving:(workflowState.value.supply_plan?.fbp_in_transit_quantity??workflowState.value.fbp?.in_transit)>0},
  {key:'receipt',label:'到仓签收／入库',display:receiptRows.value.length?`${receiptRows.value.length} 批记录`:'查看入仓记录',hint:'签收后仍以平台可用状态为准',icon:CircleCheck,lane:'fbp'},
  {key:'fbp-physical',label:'FBP可用库存',display:props.fbpLoading?'正在核对':props.fbpError?'同步未完成':official.value?.incomplete?'部分未同步':'',value:official.value?.incomplete?null:official.value?.available,hint:'官方可售数量 · 独立于本地仓',icon:House,lane:'fbp',primary:true},
  {key:'fbp-orders',label:'FBP订单占用',value:fbpReserved.value,hint:'从FBP可用库存出单',icon:Document,lane:'fbp'},
@@ -69,7 +69,7 @@ const nodes = computed(() => [
 ]);
 const lanes = [
  {key:'purchase',title:'采购与到货',hint:'采购到货验收后，才进入本地实物'},
- {key:'local',title:'本地仓 · FBS',hint:'本地订单优先，其次安全保障，剩余可用于调拨FBP'},
+ {key:'local',title:'本地仓 · FBS',hint:'FBS订单优先，其次正式FBP申请，再补本地保障和预测'},
  {key:'fbp',title:'FBP补货与销售',hint:'本地调拨 → 平台签收入库 → 官方可用 → FBP订单履约'}
 ];
 const laneNodes = key => nodes.value.filter(node => node.lane === key);
