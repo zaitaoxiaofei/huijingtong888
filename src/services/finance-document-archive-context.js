@@ -9,6 +9,16 @@ export function archiveMonths(value) {
   return months;
 }
 const day = value => value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
+function coversMonth(rows, from, to) {
+  let cursor = from;
+  for (const row of [...rows].sort((a, b) => day(a.effective_from).localeCompare(day(b.effective_from)))) {
+    if (day(row.effective_from) > cursor) return false;
+    const end = row.effective_to ? day(row.effective_to) : to;
+    if (end >= to) return true;
+    if (end >= cursor) { const next = new Date(end + 'T00:00:00Z'); next.setUTCDate(next.getUTCDate() + 1); cursor = next.toISOString().slice(0, 10); }
+  }
+  return false;
+}
 export function createFinanceDocumentArchiveContext({ query = queryMysql, authorize = authorizeBusinessTaskSession } = {}) {
   return async function read(input, session) {
     const actor = await authorize(session);
@@ -22,7 +32,8 @@ export function createFinanceDocumentArchiveContext({ query = queryMysql, author
       AND (tenant_id=? OR (?=1 AND tenant_id IS NULL))`, [seller, tenantId, legacy]);
     if (shops.length !== 1) fail(shops.length ? '当前企业多个店铺使用同一Ozon ID，请在店铺管理核对Client-Id后重试' : '当前Ozon店铺未绑定到当前企业，请在店铺管理核对Client-Id（ozon_client_id）', 409);
     const shop = shops[0];
-    const rows = await query(`SELECT a.company_id,a.effective_from,a.effective_to,c.name AS company_name,c.tax_number
+    const rows = await query(`SELECT a.company_id,DATE_FORMAT(a.effective_from,'%Y-%m-%d') AS effective_from,
+      DATE_FORMAT(a.effective_to,'%Y-%m-%d') AS effective_to,c.name AS company_name,c.tax_number
       FROM finance_shop_company_assignments a JOIN finance_companies c ON c.id=a.company_id AND c.status!='deleted'
       WHERE a.shop_id=? AND (a.tenant_id=? OR (?=1 AND a.tenant_id IS NULL))
       AND (c.tenant_id=? OR (?=1 AND c.tenant_id IS NULL))
@@ -31,8 +42,8 @@ export function createFinanceDocumentArchiveContext({ query = queryMysql, author
     const bindings = months.map(month => {
       const from = month + '-01', [y, m] = month.split('-').map(Number), to = month + '-' + new Date(Date.UTC(y, m, 0)).getUTCDate();
       const candidates = rows.filter(r => day(r.effective_from) <= to && (!r.effective_to || day(r.effective_to) >= from));
-      if (candidates.length !== 1 || day(candidates[0].effective_from) > from || (candidates[0].effective_to && day(candidates[0].effective_to) < to)) {
-        return { month, error: `${month}的公司主体绑定缺失、不覆盖整月或存在重叠，请在财务设置→公司与店铺归属中核对生效日期（effective_from/effective_to）` };
+      if (new Set(candidates.map(r => Number(r.company_id))).size !== 1 || !coversMonth(candidates, from, to)) {
+        return { month, error: `${month}的公司主体绑定缺失、不覆盖整月或存在跨主体重叠，请在财务设置→公司与店铺归属中核对生效日期（effective_from/effective_to）` };
       }
       const row = candidates[0];
       return { month, company: { id: Number(row.company_id), name: row.company_name, tax_number: row.tax_number || '' } };
