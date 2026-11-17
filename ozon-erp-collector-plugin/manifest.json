@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "爆单ERP 统一采集插件",
   "description": "商品信息采集、前台数据展示与店铺分析同步，只需填写企业密钥",
-  "version": "1.5.9",
+  "version": "1.5.10",
   "permissions": ["activeTab", "alarms", "cookies", "downloads", "scripting", "storage", "tabs", "webRequest"],
   "host_permissions": [
     "http://localhost/*",
@@ -123,6 +123,11 @@
     {
       "matches": ["http://localhost/*", "http://127.0.0.1/*", "https://erp.hjt888.xyz/*"],
       "js": ["erp-bridge-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://seller.ozon.ru/*"],
+      "js": ["finance-entry-content.js"],
       "run_at": "document_idle"
     }
   ]

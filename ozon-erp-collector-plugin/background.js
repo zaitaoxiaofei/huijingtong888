@@ -1,6 +1,6 @@
 if (typeof importScripts === 'function') {
   try {
-    importScripts('erp-config.js', 'unified-config.js', 'unified-runtime.js', 'seller-cookie-context.js', 'collector-browser-worker.js');
+    importScripts('erp-config.js', 'unified-config.js', 'unified-runtime.js', 'seller-cookie-context.js', 'collector-browser-worker.js', 'finance-documents-transport.js', 'finance-erp-context.js', 'finance-entry-background.js');
   } catch (error) {}
 }
 

@@ -1,52 +1,35 @@
 'use strict';
 const core = globalThis.OzonFinanceDocuments, archive = globalThis.OzonFinanceArchive;
 const el = id => document.getElementById(id);
-let directory, plan, busy = false, stopped = false;
+let directory, plan, busy = false, stopped = false, identifying = false, identityRevision = 0, tabsReady = false;
+const sourceTab = Number(new URLSearchParams(location.search).get('sellerTab'));
+const sourceErp = Number(new URLSearchParams(location.search).get('erpTab'));
+el('language').value = 'en';
 const picked = new Set(), folderChecks = [], monthChecks = [];
 el('year').value = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(0, 4);
-function invalidate() { plan = null; el('months').replaceChildren(); el('download').disabled = true; el('status').textContent = '设置已改变，请重新读取主体归属并检查已有月份。'; }
+function invalidate() { plan = null; el('months').replaceChildren(); el('download').disabled = true; el('status').textContent = ''; el('month-results').hidden = true; }
 function setBusy(value) {
   busy = value;
-  for (const id of ['check', 'refresh', 'erp-tab', 'seller-tab', 'year', 'language', 'choose-folder', 'select-all', 'select-ten', 'only-missing', 'overwrite']) el(id).disabled = value;
+  for (const id of ['check', 'refresh', 'erp-tab', 'seller-tab', 'year', 'language', 'choose-folder', 'select-all', 'select-ten', 'select-none', 'identify', 'only-missing', 'overwrite']) el(id).disabled = value;
   for (const input of [...monthChecks, ...folderChecks]) input.disabled = value;
-  el('stop').disabled = !value; el('download').disabled = value || !plan; render();
+  el('stop').disabled = !value; el('stop').hidden = !value; el('download').disabled = value || !plan; render();
 }
+function updateSelectionCount() { el('selection-count').textContent = `已选 ${picked.size} 个月`; }
 function selectMonths(count) {
-  picked.clear(); monthChecks.forEach((input, i) => { input.checked = i < count; if (input.checked) picked.add(i + 1); }); invalidate();
+  picked.clear(); monthChecks.forEach((input, i) => { input.checked = i < count; if (input.checked) picked.add(i + 1); }); updateSelectionCount(); invalidate(); if (tabsReady) { identityRevision++; identify(); }
 }
 for (let m = 1; m <= 12; m++) {
   const label = document.createElement('label'), input = document.createElement('input'); input.type = 'checkbox';
-  input.onchange = () => { if (input.checked) picked.add(m); else picked.delete(m); invalidate(); };
+  input.onchange = () => { if (input.checked) picked.add(m); else picked.delete(m); updateSelectionCount(); identityRevision++; invalidate(); identify(); };
   label.append(input, `${m}月`); monthChecks.push(input); el('month-picker').append(label);
 }
 for (const folder of core.folders) {
   const label = document.createElement('label'), input = document.createElement('input'); input.type = 'checkbox'; input.checked = true;
-  input.onchange = () => { el('status').textContent = '已修改官方目录选择；只选部分目录的月份将保留为未完成。'; };
+  input.onchange = () => { const count = folderChecks.filter(c => c.checked).length; el('folder-summary').textContent = `官方目录 · ${count === core.folders.length ? '全部 ' : '已选 '}${count} 类`;  };
   input.folderId = folder.id; folderChecks.push(input); label.append(input, folder.name); el('folders').append(label);
 }
 selectMonths(10);
 
-// Read the already authenticated ERP tab; neither the token nor Seller cookies leave their origin.
-async function erpContextRequest(input) {
-  try {
-    const allowed = location.origin === 'https://erp.hjt888.xyz' || ['http://localhost:8788', 'http://127.0.0.1:8788'].includes(location.origin);
-    if (!allowed) throw new Error('所选ERP页面来源不受支持，请重新选择已登录页面');
-    const token = localStorage.getItem('authToken');
-    if (!token) throw new Error('ERP登录已失效，请先重新登录');
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
-    try {
-      const response = await fetch('/api/finance-center/document-archive-context?' + new URLSearchParams(input), {
-        credentials: 'include', headers: { Authorization: 'Bearer ' + token }, signal: controller.signal });
-      if (response.status === 404) throw new Error('ERP后台尚未安装主体归档接口，请先发布配套后台更新；也可使用下方单月下载入口');
-      if (!(response.headers.get('content-type') || '').includes('application/json')) throw new Error('ERP尚未提供归档归属接口，请先发布后台更新并确认登录');
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || '无法读取ERP主体归属（HTTP ' + response.status + '），请检查财务权限或后台版本');
-      if (localStorage.getItem('authToken') !== token) throw new Error('ERP登录或企业已切换，请重新检查归属');
-      if (!data.binding_token || !Array.isArray(data.bindings)) throw new Error('ERP归属接口格式不匹配，请更新后台后重试');
-      return { ok: true, data };
-    } finally { clearTimeout(timer); }
-  } catch (error) { return { ok: false, error: error.message }; }
-}
 async function execute(tabId, func, input) {
   if (stopped) throw new Error('已停止');
   const [response] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func, args: [input] });
@@ -62,20 +45,70 @@ async function verifyBinding() {
   if (value.data.binding_token !== plan.context.binding_token) throw new Error('ERP企业、店铺或月份主体绑定已变化，已停止归档，请重新检查');
 }
 async function refreshTabs() {
-  invalidate();
+  identityRevision++; invalidate(); showIdentity('核对中…');
   for (const [id, urls] of [['seller-tab', ['https://seller.ozon.ru/*']], ['erp-tab', ['https://erp.hjt888.xyz/*', 'http://localhost:8788/*', 'http://127.0.0.1:8788/*']]]) {
+    const previous = Number(el(id).value);
     const tabs = await chrome.tabs.query({ url: urls }); el(id).replaceChildren();
-    for (const tab of tabs) { const option = document.createElement('option'); option.value = tab.id; option.textContent = `${tab.title || '页面'}（${tab.id}）`; el(id).append(option); }
+    for (const tab of tabs) { const option = document.createElement('option'); option.value = tab.id; option.textContent = `${tab.title || '页面'}（${tab.id}）`; option.dataset.title = option.textContent; el(id).append(option); }
+    const preferred = previous || (id === 'seller-tab' ? sourceTab : sourceErp);
+    if (tabs.some(tab => tab.id === preferred)) el(id).value = String(preferred);
+    else if (preferred) { const option = document.createElement('option'); option.value = ''; option.textContent = '原页面已关闭，请重新选择'; el(id).append(option); el(id).value = ''; }
   }
+  tabsReady = true;
+  await identify();
+  if (!plan) el('status').textContent = '';
+}
+function showIdentity(text, state = 'pending') {
+  el('identity').textContent = text; el('identity').dataset.state = state;
+}
+function selectedMonths() {
+  const year = el('year').value;
+  if (!/^20\d{2}$/.test(year)) throw new Error('请选择有效年份');
+  return [...picked].sort((a, b) => a - b).map(m => `${year}-${String(m).padStart(2, '0')}`);
+}
+async function readIdentity() {
+  const erpTab = Number(el('erp-tab').value), sellerTab = Number(el('seller-tab').value);
+  if (!sellerTab) throw new Error('未找到 Ozon 后台，请打开财务 → 文件页面后刷新页面列表');
+  const identity = await execute(sellerTab, globalThis.OzonFinanceSellerRequest, {});
+  if (!erpTab) throw new Error(`已识别 Ozon ID：${identity.company}；请先打开并登录 ERP，再刷新页面列表以匹配店铺名称`);
+  const months = selectedMonths();
+  if (!months.length) throw new Error(`已识别 Ozon ID：${identity.company}；请选择至少一个月份以核对店铺归属`);
+  const query = { ozon_company_id: identity.company, months: months.join(',') };
+  const context = (await execute(erpTab, erpContextRequest, query)).data;
+  if (String(context.shop?.ozon_company_id) !== identity.company || context.bindings.length !== months.length) throw new Error('Ozon 当前店铺 ID 与 ERP 返回的店铺不一致，已停止，请核对店铺绑定');
+  await execute(sellerTab, globalThis.OzonFinanceSellerRequest, { company: identity.company });
+  return { identity, context, query, erpTab, sellerTab };
+}
+function displayMatch(value) {
+  const { context, identity } = value;
+  const errors = context.bindings.filter(binding => binding.error);
+  showIdentity(errors.length ? '店铺已核对 · 部分月份主体待核对' : '已核对', errors.length ? 'pending' : 'matched');
+  el('seller-tab').selectedOptions[0].textContent = `${context.shop.name} · Ozon ID：${identity.company}`;
+}
+async function identify() {
+  if (busy || identifying) return;
+  stopped = false; identifying = true; const revision = ++identityRevision;
+  const option = el('seller-tab').selectedOptions[0];
+  if (option?.dataset.title) option.textContent = option.dataset.title;
+  showIdentity('核对中…');
+  try {
+    const value = await readIdentity();
+    if (revision !== identityRevision) return;
+    if (plan && (plan.context.binding_token !== value.context.binding_token || plan.seller_tab !== value.sellerTab || plan.erp_tab !== value.erpTab)) invalidate();
+    displayMatch(value);
+  } catch (error) {
+    if (revision !== identityRevision) return;
+    invalidate(); showIdentity('尚未匹配：' + error.message, 'error');
+  } finally { identifying = false; if (revision !== identityRevision) identify(); }
 }
 function render() {
-  el('months').replaceChildren();
-  const labels = { complete: '已有：清单及原件校验通过', partial: '未完成或文件有缺失', missing: '本地未归档', blocked: '主体归属待核对' };
+  el('months').replaceChildren(); el('month-results').hidden = !plan?.rows.length;
+  const labels = { complete: '已归档 · 校验通过', partial: '有缺失', missing: '未归档', blocked: '主体归属待核对' };
   for (const row of plan?.rows || []) {
     const tr = document.createElement('tr'), td = document.createElement('td'), input = document.createElement('input');
     input.type = 'checkbox'; input.checked = row.selected; input.disabled = busy || Boolean(row.error); input.onchange = () => { row.selected = input.checked; };
     td.append(input); tr.append(td);
-    for (const text of [row.binding.month, `${row.binding.company?.name || '待绑定'} / ${plan.context.shop.name}`,
+    for (const text of [row.binding.month, row.binding.company?.name || '待绑定',
       row.error || `${labels[row.local.status]}${row.local.error ? ' · ' + row.local.error : ''}${row.local.needs_relocate ? '，可复用并归入主体目录' : ''}${row.result ? ' · ' + row.result : ''}`]) {
       const cell = document.createElement('td'); cell.textContent = text; tr.append(cell);
     }
@@ -84,19 +117,13 @@ function render() {
 }
 async function check() {
   if (busy) return;
-  invalidate(); stopped = false; setBusy(true);
+  identityRevision++; invalidate(); stopped = false; setBusy(true);
   try {
     if (!directory) throw new Error('请先选择电脑归档文件夹，插件需要读取清单和实际原件才能判断已有月份');
-    const year = el('year').value;
-    if (!/^20\d{2}$/.test(year) || !picked.size) throw new Error('请选择年份及至少一个月份');
-    const months = [...picked].sort((a, b) => a - b).map(m => `${year}-${String(m).padStart(2, '0')}`);
-    const erpTab = Number(el('erp-tab').value), sellerTab = Number(el('seller-tab').value);
-    if (!erpTab || !sellerTab) throw new Error('请先打开并登录ERP和Ozon财务文件页面，再刷新页面列表');
-    const identity = await execute(sellerTab, globalThis.OzonFinanceSellerRequest, {});
+    const matched = await readIdentity();
+    const { identity, context, query, erpTab, sellerTab } = matched;
     if (identity.directoryNames.length !== core.folders.length) throw new Error('Ozon官方目录数量发生变化，需要更新适配后才能保证完整');
-    const query = { ozon_company_id: identity.company, months: months.join(',') };
-    const context = (await execute(erpTab, erpContextRequest, query)).data;
-    if (String(context.shop?.ozon_company_id) !== identity.company || context.bindings.length !== months.length) throw new Error('ERP返回的店铺或月份与选择不一致，请核对绑定');
+    displayMatch(matched);
     plan = { context, query, erp_tab: erpTab, seller_tab: sellerTab, language: el('language').value, source_directories: identity.directoryNames, rows: [] };
     for (const binding of context.bindings) {
       if (stopped) break;
@@ -109,10 +136,9 @@ async function check() {
       }
       plan.rows.push(row); render();
     }
-    el('identity').textContent = `店铺：${context.shop.name} · Ozon ID：${identity.company} · 企业ID：${context.tenant_id}`;
     const existing = plan.rows.filter(r => r.local.status === 'complete').map(r => r.binding.month);
-    el('status').textContent = `${stopped ? '检查已停止' : '检查完成'}。${existing.length ? '已有：' + existing.join('、') + '；默认选择缺失、未完成及需要复用归类的旧版月份。' : '尚无校验完整的月份，已选择可归档月份。'}`;
-  } catch (error) { el('status').textContent = error.message; }
+    el('status').textContent = `${stopped ? '检查已停止' : '检查完成'}：已有 ${existing.length} 个月，已勾选 ${plan.rows.filter(r => r.selected).length} 个月待下载。`;
+  } catch (error) { el('status').textContent = error.message; if (directory && !plan) showIdentity('尚未匹配：' + error.message, 'error'); }
   finally { setBusy(false); }
 }
 async function runDownload() {
@@ -178,15 +204,19 @@ async function download() {
     if (globalThis.navigator?.locks) await navigator.locks.request('ozon-finance-local-archive', { ifAvailable: true }, async lock => {
       if (!lock) throw new Error('另一归档页面正在写入，请等待该任务完成'); await runDownload();
     }); else await runDownload();
-  } catch (error) { el('status').textContent = error.message; }
+  } catch (error) { invalidate(); showIdentity('归档已停止，请重新识别店铺并检查月份：' + error.message, 'error'); el('status').textContent = error.message; }
   finally { setBusy(false); }
 }
 el('choose-folder').onclick = async () => {
   try { const selected = await showDirectoryPicker({ mode: 'readwrite' }); directory = selected; el('destination').textContent = selected.name; invalidate(); }
   catch (error) { if (error.name !== 'AbortError') el('status').textContent = '不能读取本地文件夹，请使用支持文件夹选择的Chrome或亿狗浏览器：' + error.message; }
 };
-for (const id of ['erp-tab', 'seller-tab', 'year', 'language']) el(id).onchange = invalidate;
+for (const id of ['erp-tab', 'seller-tab', 'year', 'language']) el(id).onchange = () => { identityRevision++; invalidate(); showIdentity('核对中…'); identify(); };
+el('identify').onclick = identify;
+window.addEventListener('focus', identify);
+setInterval(() => { if (!document.hidden) identify(); }, 20000);
 el('refresh').onclick = () => refreshTabs().catch(e => { el('status').textContent = e.message; });
+el('select-none').onclick = () => selectMonths(0);
 el('select-all').onclick = () => selectMonths(12); el('select-ten').onclick = () => selectMonths(10);
 for (const id of ['only-missing', 'overwrite']) el(id).onchange = () => {
   for (const row of plan?.rows || []) row.selected = !row.error && (el('overwrite').checked || row.local.status !== 'complete' || row.local.needs_relocate); render();

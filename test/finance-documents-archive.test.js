@@ -78,7 +78,7 @@ test('overwrite requires the explicit mode; unrelated files and other months sta
   await assert.rejects(a.readFile(store.root, '../elsewhere'), /非法路径/);
 });
 
-const erpSource = sources[2].slice(sources[2].indexOf('async function erpContextRequest('), sources[2].indexOf('\nasync function execute('));
+const erpSource = await load('finance-erp-context.js');
 test('ERP authentication stays inside the ERP origin and session changes interrupt metadata reads', async () => {
   let token = 'private-session-token', headers;
   const ctx = vm.createContext({ location: { origin: 'https://erp.hjt888.xyz' }, localStorage: { getItem: () => token }, URLSearchParams,
@@ -106,9 +106,10 @@ test('selecting twelve months with January–October already archived downloads 
   const elements = new Map();
   function element() { return { value: '', textContent: '', checked: false, children: [],
     append(...children) { this.children.push(...children); for (const child of children) if (!this.value && child?.value) this.value = child.value; },
-    replaceChildren() { this.children = []; this.value = ''; } }; }
+    get selectedOptions() { return this.children.filter(c => c.value == this.value); }, dataset: {}, replaceChildren() { this.children = []; this.value = ''; } }; }
   const document = { getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }, createElement: element };
-  const store = disk(), ctx = runtime({ document, atob, showDirectoryPicker: async () => store.root });
+  const store = disk(), ctx = runtime({ document, atob, location: { search: '' }, window: { addEventListener() {} }, setInterval() {}, showDirectoryPicker: async () => store.root });
+  vm.runInContext(erpSource, ctx);
   for (let m = 1; m <= 10; m++) await populate(ctx, store, '2025-' + String(m).padStart(2, '0'));
   const downloads = []; let changedBinding = false, changeAfterDownload = false, cancelAfterDownload = false;
   ctx.OzonFinanceSellerRequest = function sellerRequest() {};
