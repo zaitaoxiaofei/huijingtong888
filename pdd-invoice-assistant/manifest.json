@@ -2,17 +2,45 @@
   "manifest_version": 3,
   "name": "采购开票助手 · 拼多多",
   "description": "管理三个采购账号的订单，批量申请发票、跟踪结果和下载票据。数据保存在本机。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "unlimitedStorage", "tabs", "cookies", "downloads", "alarms", "scripting"],
-  "host_permissions": ["https://mobile.pinduoduo.com/*"],
-  "background": {"service_worker": "background.js", "type": "module"},
-  "action": {"default_title": "打开采购开票助手"},
-  "content_scripts": [{
-    "matches": ["https://mobile.pinduoduo.com/*"],
-    "js": ["core.js", "content.js"],
-    "run_at": "document_idle"
-  }],
-  "icons": {"16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png"},
-  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'"}
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "cookies",
+    "downloads",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://mobile.pinduoduo.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开采购开票助手"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://mobile.pinduoduo.com/*"
+      ],
+      "js": [
+        "core.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
 }

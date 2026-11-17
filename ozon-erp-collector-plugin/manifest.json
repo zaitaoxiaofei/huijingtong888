@@ -1,9 +1,19 @@
 {
   "manifest_version": 3,
   "name": "爆单ERP 统一采集插件",
-  "description": "商品信息采集、前台数据展示与店铺分析同步，只需填写企业密钥",
-  "version": "1.5.10",
-  "permissions": ["activeTab", "alarms", "cookies", "downloads", "scripting", "storage", "tabs", "webRequest"],
+  "description": "商品采集、店铺分析、财务原件归档与拼多多采购开票，统一插件管理",
+  "version": "1.5.11",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "cookies",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest",
+    "unlimitedStorage"
+  ],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
@@ -20,7 +30,8 @@
     "https://m.ozon.by/*",
     "https://*.ozon.ru/*",
     "https://*.ozon.kz/*",
-    "https://*.ozon.by/*"
+    "https://*.ozon.by/*",
+    "https://mobile.pinduoduo.com/*"
   ],
   "optional_host_permissions": [
     "https://ozon.ru/*",
@@ -59,7 +70,11 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["assets/logo-16.png", "assets/logo-32.png", "assets/logo-48.png"],
+      "resources": [
+        "assets/logo-16.png",
+        "assets/logo-32.png",
+        "assets/logo-48.png"
+      ],
       "matches": [
         "https://ozon.ru/*",
         "https://www.ozon.ru/*",
@@ -78,21 +93,36 @@
   ],
   "content_scripts": [
     {
-      "matches": ["https://seller.ozon.ru/*"],
-      "js": ["analytics/content/erp-relay-page.js", "analytics/content/ozon.js"],
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "analytics/content/erp-relay-page.js",
+        "analytics/content/ozon.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["https://seller.ozon.ru/*"],
-      "js": ["analytics/content/erp-relay-bridge.js"],
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "analytics/content/erp-relay-bridge.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     },
     {
-      "matches": ["http://localhost/*", "http://127.0.0.1/*", "https://erp.hjt888.xyz/*"],
-      "js": ["analytics/content/erp-instance.js"],
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "https://erp.hjt888.xyz/*"
+      ],
+      "js": [
+        "analytics/content/erp-instance.js"
+      ],
       "run_at": "document_start"
     },
     {
@@ -110,25 +140,61 @@
         "https://*.ozon.kz/*",
         "https://*.ozon.by/*"
       ],
-      "exclude_matches": ["https://seller.ozon.ru/*"],
-      "js": ["erp-config.js", "collector.js", "content-core.js", "field-registry.js", "data-aggregator.js", "content.js"],
-      "css": ["content.css"],
+      "exclude_matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "erp-config.js",
+        "collector.js",
+        "content-core.js",
+        "field-registry.js",
+        "data-aggregator.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://seller.ozon.ru/*"],
-      "js": ["seller-bridge-content.js"],
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "seller-bridge-content.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["http://localhost/*", "http://127.0.0.1/*", "https://erp.hjt888.xyz/*"],
-      "js": ["erp-bridge-content.js"],
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "https://erp.hjt888.xyz/*"
+      ],
+      "js": [
+        "erp-bridge-content.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://seller.ozon.ru/*"],
-      "js": ["finance-entry-content.js"],
+      "matches": [
+        "https://seller.ozon.ru/*"
+      ],
+      "js": [
+        "finance-entry-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://mobile.pinduoduo.com/*"
+      ],
+      "js": [
+        "pdd-invoice/core.js",
+        "pdd-invoice/content.js"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "minimum_chrome_version": "120"
 }

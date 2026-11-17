@@ -14,7 +14,7 @@ const boot = (async () => {
   C.recoverQueue(store.queue);
   if (store.queue) syncQueueRows();
   await save();
-  if (!await chrome.alarms.get(ALARM)) await chrome.alarms.create(ALARM, {periodInMinutes: 0.5});
+  if (!await chrome.alarms.get?.(ALARM)) await chrome.alarms.create(ALARM, {periodInMinutes: 0.5});
 })();
 
 function save() {
@@ -353,6 +353,7 @@ async function handle(message, sender) {
   }
 }
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (message?.module !== "PDD_INVOICE") return false;
   handle(message, sender).then(value => reply({ok: true, value}), error => reply({ok: false, error: error.message}));
   return true;
 });
@@ -376,7 +377,7 @@ chrome.cookies.onChanged.addListener(async change => {
     await save();
   }
 });
-chrome.downloads.onChanged.addListener(async delta => {
+chrome.downloads?.onChanged?.addListener(async delta => {
   if (!delta.state) return;
   await boot;
   const q = store.queue;

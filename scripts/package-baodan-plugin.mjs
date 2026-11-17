@@ -9,6 +9,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const pluginDir = path.join(rootDir, "ozon-erp-collector-plugin");
 const outputDir = path.resolve(process.env.COLLECTOR_PLUGIN_OUTPUT_DIR || path.join(rootDir, ".."));
 await execFileAsync(process.execPath, [path.join(rootDir, "scripts", "sync-unified-analytics.mjs")], { cwd: rootDir });
+await execFileAsync(process.execPath, [path.join(rootDir, "scripts", "sync-unified-pdd-invoice.mjs")], { cwd: rootDir });
 const manifest = JSON.parse(await fs.readFile(path.join(pluginDir, "manifest.json"), "utf8"));
 const version = String(manifest.version || "").trim();
 

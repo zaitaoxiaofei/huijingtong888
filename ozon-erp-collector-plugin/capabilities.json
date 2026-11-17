@@ -1,4 +1,5 @@
 {
   "collector": true,
-  "sellerAnalytics": true
+  "sellerAnalytics": true,
+  "pddInvoice": true
 }

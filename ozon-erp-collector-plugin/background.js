@@ -2703,3 +2703,4 @@ chrome.storage.onChanged?.addListener((changes, areaName) => {
     .some((key) => Object.hasOwn(changes, key))) wakeCollectorBrowserPool();
 });
 if (typeof importScripts === 'function') importScripts('analytics/background.js');
+if (typeof importScripts === 'function') importScripts('pdd-invoice/core.js', 'pdd-invoice/background.js');

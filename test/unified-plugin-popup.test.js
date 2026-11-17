@@ -29,6 +29,7 @@ function harness({ deferInitialStorage = false } = {}) {
   let timerId = 0, storageError = '', incoming, reads = 0, releaseStorage;
   const chrome = {
     runtime: {
+      getURL: path => `chrome-extension://unified-instance/${path}`,
       getManifest: () => ({ version: '1.4.40' }), lastError: null,
       sendMessage(message, callback) {
         if (callback) pending.push({ message, callback, timerId });
@@ -100,6 +101,12 @@ test('unified popup has one editable connection key and preserves collector sett
   h.click('collector-tab');
   assert.equal(h.elements['collector-panel'].hidden, false);
   assert.equal(h.elements['analytics-panel'].hidden, true);
+});
+
+test('the ERP popup opens the bundled procurement invoice workspace', () => {
+  const h = harness();
+  h.click('pdd-invoice-open');
+  assert.equal(h.opened.at(-1).url, 'chrome-extension://unified-instance/pdd-invoice/dashboard.html');
 });
 
 test('the online version comes from the live check and optional updates show a usable download', async () => {
