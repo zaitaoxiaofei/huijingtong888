@@ -140,6 +140,8 @@ export function authorizeApiRequest(req, parts = []) {
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");
   if (resource === "inventory-workflow") {
+    if (path === 'inventory-workflow/product-aliases' && read) return require('inventory.read', 'procurement', 'packing');
+    if (path === 'inventory-workflow/product-aliases' && method === 'POST') return require('inventory.write', 'procurement', 'packing');
     if(read&&['inventory-workflow/demand-details','inventory-workflow/purchase-arrivals'].includes(path))return require('inventory.read');
     if(method==='POST'&&path==='inventory-workflow/local-safety')return require('inventory.write','procurement');
     if(method==='POST'&&path==='inventory-workflow/purchase-arrivals')return require('procurement','packing');

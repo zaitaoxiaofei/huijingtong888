@@ -1,4 +1,5 @@
 <script setup>
+import ProductAlias from "../../components/inventory/ProductAlias.vue";
 import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useAuthStore } from "../../stores/auth.js";
@@ -628,7 +629,7 @@ onMounted(async () => {
             <template #default="{ row }">
               <div class="purchase-inline-editor">
                 <div class="purchase-inline-editor__header">
-                  <strong>{{ row.product_name || row.product_code || "-" }}</strong>
+                  <strong>{{ row.product_name || row.product_code || "-" }}</strong><ProductAlias :product-id="Number(row.product_id)"/>
                   <span class="muted-text">直接修改明细后点“保存”，保存后会同步重算关联订单利润。</span>
                 </div>
                 <el-table :data="row.requests || []" stripe border class="erp-data-table purchase-inline-table">
@@ -825,7 +826,7 @@ onMounted(async () => {
           <el-form-item label="差异说明"><el-input v-model="receiptForm.difference_note" type="textarea" placeholder="请填写差异说明" /></el-form-item>
         </template>
       </el-form>
-      <el-table :data="receiptRows" border max-height="280"><el-table-column prop="product_name" label="库存名称" min-width="300" /><el-table-column label="采购数" width="160"><template #default="{row}"><el-input-number v-model="row.purchase_quantity" :min="1" :precision="0" /></template></el-table-column><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :precision="0" /></template></el-table-column></el-table>
+      <el-table :data="receiptRows" border max-height="280"><el-table-column label="库存名称" min-width="300"><template #default="{row}">{{row.product_name}}<ProductAlias :product-id="Number(row.product_id)"/></template></el-table-column><el-table-column label="采购数" width="160"><template #default="{row}"><el-input-number v-model="row.purchase_quantity" :min="1" :precision="0" /></template></el-table-column><el-table-column label="实收数" width="160"><template #default="{row}"><el-input-number v-model="row.receive_quantity" :min="0" :precision="0" /></template></el-table-column></el-table>
       <template #footer><el-button @click="receiptVisible=false">取消</el-button><el-button type="primary" :loading="receiptSubmitting" @click="confirmReceipt">确认收货并入库</el-button></template>
     </el-dialog>
 

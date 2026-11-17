@@ -1,4 +1,5 @@
 ﻿<script setup>
+import ProductAlias from "../inventory/ProductAlias.vue";
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import {PROCUREMENT_PRICE_REASONS,procurementPriceReason} from '../../../../src/shared/procurement-price-reason.js';
 import { ElMessage } from "element-plus";
@@ -269,7 +270,7 @@ watch(currentUserPersonId, () => {
             <div class="selected-product-main">
               <ProductImagePreview :src="productImage(selectedProduct)" size="square" />
               <div class="selected-product-meta">
-                <strong>{{ selectedProduct.name }}</strong>
+                <strong>{{ selectedProduct.name }}</strong><ProductAlias :product-id="Number(selectedProduct.id)"/>
                 <span>库存编码：{{ productCode(selectedProduct) }}</span>
                 <span>负责人：{{ selectedProduct.owner_name || "-" }}</span>
                 <span>供应商：{{ supplierName(selectedProduct.supplier_id) || "-" }}</span>

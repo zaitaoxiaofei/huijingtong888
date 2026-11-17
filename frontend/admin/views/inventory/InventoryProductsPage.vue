@@ -1,4 +1,5 @@
 <script setup>
+import ProductAlias from "../../components/inventory/ProductAlias.vue";
 import ProductProfitRecalculationDialog from "../../components/inventory/ProductProfitRecalculationDialog.vue";
 import { inventoryNumberTitle } from '../../utils/inventory-number.js';
 import {useInventoryRequestSummary} from '../../composables/useInventoryRequestSummary.js';
@@ -1908,6 +1909,7 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="商品别名" min-width="200"><template #default="{ row }"><ProductAlias :product-id="Number(row.id)" column /></template></el-table-column>
         <el-table-column label="库存" prop="stock" width="180" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="inventory-stock-cell">

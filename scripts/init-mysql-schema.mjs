@@ -484,6 +484,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS products (
+  product_alias VARCHAR(500) NOT NULL DEFAULT '',
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   logistics_rule_id BIGINT UNSIGNED NULL,
   tenant_id BIGINT UNSIGNED NULL,
@@ -1772,6 +1773,7 @@ try {
   for (const sql of FINANCE_SUBMISSIONS_SCHEMA) await connection.query(sql);
   for (const sql of WB_SCHEMA) await connection.query(sql);
   const alterStatements = [
+    "ALTER TABLE products ADD COLUMN product_alias VARCHAR(500) NOT NULL DEFAULT ''",
     "ALTER TABLE shops ADD COLUMN platform VARCHAR(32) NOT NULL DEFAULT 'ozon'",
     "ALTER TABLE shops ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE shops ADD COLUMN watermark_path TEXT NULL",

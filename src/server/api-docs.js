@@ -1706,6 +1706,14 @@ const endpoints = [
     })
   ]),
   section("Catalog", [
+    endpoint("GET", "/api/inventory-workflow/product-aliases", "Read current product aliases for 1–200 product_ids in the fresh current enterprise. Requires inventory.read, procurement or packing. Returns only product_id and product_alias; foreign products are omitted.", {
+      auth: "authenticated", query: [param("product_ids", scalar("string", "Comma-separated product IDs"), true)],
+      responses: [response(200, "application/json", scalar("object", "rows: [{product_id, product_alias}]"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/product-aliases", "Edit or clear one owned inventory product alias. Fresh inventory.write, procurement or packing permission required. Locks product and compares expected_alias; stale edits return 409. Only product_alias changes; quantity and purchase fields remain untouched.", {
+      auth: "authenticated", requestBody: body(scalar("object", "product_id, product_alias (string, max 500 characters; empty clears), expected_alias (required previous value)")),
+      responses: [response(200, "application/json", scalar("object", "product_id, product_alias")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("GET", "/api/products", "Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.", {
       auth: "authenticated",query:[...inventorySearchParams,param("view",scalar("string","inventory for lean inventory list; omitted preserves other product consumers"),false),param("includeStock",scalar("string","0 returns list metadata immediately; quantities are nullable and loaded separately by view=local"),false)],
       responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Product rows; paged=1 returns rows/total/page/pageSize."))]

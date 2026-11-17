@@ -1,4 +1,5 @@
 <script setup>
+import ProductAlias from "./ProductAlias.vue";
 import { assertInventoryPackage, defaultInventoryPackagingFee } from "../../../../src/shared/inventory-package-defaults.js";
 import ProductProfitRecalculationDialog from './ProductProfitRecalculationDialog.vue';
 import { productProfitParameterChanges } from '../../../../src/shared/product-profit-parameters.js';
@@ -192,6 +193,7 @@ function createDefaultForm() {
     code: "",
     updated_at: "",
     name: "",
+    product_alias: "",
     image_url: "",
     purchase_url: "",
     source_platform: "1688",
@@ -1706,6 +1708,10 @@ function submitAndCreateDraft() {
                 <span v-if="!mobile" class="form-section-subtitle">按产品身份、规格属性和库存计量填写，系统自动生成统一库存名称。</span>
               </div>
             </div>
+            <el-form-item v-show="showMobileSection('identity')" label="商品别名">
+              <ProductAlias v-if="isEditMode && !inventoryRequest" :product-id="Number(editProductId || value?.id)" column />
+              <el-input v-else v-model="form.product_alias" maxlength="500" show-word-limit placeholder="无（选填，可填写国内型号或识别说明）" clearable />
+            </el-form-item>
             <div v-if="canMaintainNamingOptions" v-show="showMobileSection('identity')" class="core-name-review-panel" v-loading="pendingCoreNamesLoading">
               <button v-if="mobile" type="button" class="mobile-core-name-toggle" :aria-expanded="mobileCoreNamesExpanded" :disabled="submitting" @click="mobileCoreNamesExpanded = !mobileCoreNamesExpanded">名称审批管理 · {{ pendingCoreNames.length }} 项 <span>{{ mobileCoreNamesExpanded ? '收起' : '展开' }}</span></button>
               <div v-show="!mobile || mobileCoreNamesExpanded">

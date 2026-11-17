@@ -1,4 +1,5 @@
 <script setup>
+import ProductAlias from "../inventory/ProductAlias.vue";
 import {computed,defineAsyncComponent,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {ElMessage,ElMessageBox} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
@@ -38,7 +39,7 @@ watch(()=>[props.productId,props.initialStatus],()=>{filters.status=props.initia
   <el-alert v-if="productId" type="info" :closable="false" title="当前展示选中库存的采购记录，可返回库存需求总览切换商品。"/>
   <el-alert v-if="error" :title="error" type="error" :closable="false"/>
   <el-table v-loading="loading" :data="rows" row-key="id" border :empty-text="error?'采购记录加载失败，请刷新重试':'当前筛选没有采购记录'">
-   <el-table-column label="库存商品" min-width="270"><template #default="{row}"><div class="arrival-product"><ProductImagePreview :src="`/api/products/${row.product_id}/image?thumb=1`" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait"/><div><b>{{row.product_name}}</b><small>库存 ID：{{row.inventory_number||row.product_id}}</small></div></div></template></el-table-column>
+   <el-table-column label="库存商品" min-width="270"><template #default="{row}"><div class="arrival-product"><ProductImagePreview :src="`/api/products/${row.product_id}/image?thumb=1`" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait"/><div><b>{{row.product_name}}</b><ProductAlias :product-id="Number(row.product_id)"/><small>库存 ID：{{row.inventory_number||row.product_id}}</small></div></div></template></el-table-column>
    <el-table-column label="采购记录" min-width="200"><template #default="{row}"><b>{{row.order_no||`采购批次 #${row.id}`}}</b><p>批次 #{{row.id}} · {{row.buyer_name||'采购人待核'}}</p><small>采购 {{time(row.purchased_at)}}</small></template></el-table-column>
    <el-table-column label="数量与状态" min-width="170"><template #default="{row}"><strong>{{row.quantity}} 件</strong><p><el-tag :type="row.arrival_state==='open'?'warning':'success'">{{labels[row.arrival_state]}}</el-tag></p></template></el-table-column>
    <el-table-column label="物流与时间" min-width="220"><template #default="{row}"><span>{{row.courier_company||'快递未登记'}} {{row.tracking_number||''}}</span><p v-if="row.received_at">到货 {{time(row.received_at)}}</p><p v-if="row.approved_at">入库 {{time(row.approved_at)}}</p></template></el-table-column>

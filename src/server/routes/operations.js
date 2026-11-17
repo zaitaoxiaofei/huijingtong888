@@ -1,3 +1,4 @@
+import { productAliasService } from '../../services/product-alias.js';
 import {createHash} from 'node:crypto';
 import {procurementDemandDetails} from '../../services/procurement-demand-details.js';
 import {procurementDemandCancellation} from '../../services/procurement-demand-cancellation.js';
@@ -71,6 +72,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/procurement/summary": (req) => services.procurementSummary({}, tenantIdFromRequest(req)),
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/inventory-workflow/product-aliases": (req, url) => productAliasService.read(Object.fromEntries(url.searchParams), req._session),
+    "POST /api/inventory-workflow/product-aliases": async req => productAliasService.save(await readJson(req), req._session),
     "GET /api/inventory-workflow/demand-details":(req,url)=>procurementDemandDetails.details(url.searchParams.get('product_id'),req._session),
     "POST /api/inventory-workflow/local-safety":async req=>procurementDemandDetails.safety(await readJson(req),req._session),
     "GET /api/inventory-workflow/purchase-arrivals":(req,url)=>procurementArrivals.list(Object.fromEntries(url.searchParams),req._session),
