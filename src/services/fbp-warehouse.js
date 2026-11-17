@@ -97,3 +97,18 @@ export async function loadFbpReservations(query, productIds = [], scope = null) 
       AND (i.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=i.mapping_id AND m.shop_id=i.shop_id AND m.product_id=i.product_id${owned('m')}))
     GROUP BY p.id`,ids);
 }
+
+// Dispatch facts are independent of official FBP stock synchronization. These
+// units have already left LOCAL and must not be added to outstanding demand.
+export async function loadFbpTransit(query, productIds, scope){
+ if(!productIds.length)return [];
+ return query(`SELECT p.id AS product_id,SUM(GREATEST(f.quantity-COALESCE(f.listed_quantity,0),0)*
+   CASE WHEN r.id IS NOT NULL THEN ri.quantity ELSE COALESCE(c.quantity,1) END) AS quantity
+  FROM fbp_transfer_records f JOIN shops s ON s.id=f.shop_id AND ${inventoryTenantSql(scope,'s')}
+  JOIN products root ON root.id=f.product_id AND ${inventoryTenantSql(scope,'root')}
+  LEFT JOIN sku_inventory_recipes r ON r.shop_id=f.shop_id AND r.ozon_sku=f.ozon_sku AND r.active=1
+  LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id=r.id
+  LEFT JOIN product_components c ON c.product_id=f.product_id AND r.id IS NULL AND ${inventoryTenantSql(scope,'c')}
+  JOIN products p ON p.id=CASE WHEN r.id IS NOT NULL THEN ri.product_id ELSE COALESCE(c.component_product_id,f.product_id) END AND ${inventoryTenantSql(scope,'p')}
+  WHERE p.id IN (${productIds.map(()=>'?').join(',')}) AND f.status IN ('sent','in_transit','received') AND f.shipped_at IS NOT NULL GROUP BY p.id`,productIds);
+}

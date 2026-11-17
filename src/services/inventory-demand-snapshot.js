@@ -1,6 +1,6 @@
 import {readScopedJson,writeScopedJson} from './scoped-json-object.js';
 // A read model only: never used to reserve stock, post receipts or write costs.
-export const INVENTORY_DEMAND_SNAPSHOT_VERSION = 'demand-v9-manual-order-handling';
+export const INVENTORY_DEMAND_SNAPSHOT_VERSION = 'demand-v10-fbs-first';
 export const INVENTORY_DEMAND_SNAPSHOT_SCHEMA = `CREATE TABLE IF NOT EXISTS inventory_demand_snapshots (
   tenant_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
   version VARCHAR(32) NOT NULL,

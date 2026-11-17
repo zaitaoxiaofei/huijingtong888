@@ -2,7 +2,7 @@ const parse=value=>typeof value==='string'?JSON.parse(value):value;
 // Reconstruct each non-recipe root once, then allocate its physical finished
 // units in FIFO order. Shared loose parts stay in the ordinary coverage pool.
 export function allocateBundleFinishedDemands(demands, composition, stocks) {
- const pool=new Map(stocks.map(s=>[Number(s.product_id),Math.max(0,Number(s.ledger||0)+Number(s.open_deducted||0)-Number(s.fbp_reserved||0))]));
+ const pool=new Map(stocks.map(s=>[Number(s.product_id),Math.max(0,Number(s.ledger||0)+Number(s.open_deducted||0))]));
  const groups=new Map(),output=[];
  for(const row of demands){
   const root=Number(row.root_product_id);

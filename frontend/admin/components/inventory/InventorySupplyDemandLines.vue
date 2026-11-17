@@ -21,7 +21,7 @@ function targetText(line){
      <p v-for="fact in line.facts" :key="fact.label">{{fact.label}}：{{quantity(fact.value)}}</p>
      <p v-if="line.key==='orders'">订单需求是实际库存件数，不是订单笔数；现货和在途已分配后，剩余部分才需要采购。</p>
      <p v-if="line.key==='safety'">保障目标是按消耗和备货周期计算的安全库存，不是新增订单，补货可选。</p>
-     <p v-if="line.key==='fbp'">已批准的申请进入发仓锁定；没有待审申请不代表没有锁定。锁定已在可用现货中扣除，不再重复加到采购量。</p>
+     <p v-if="line.key==='fbp'">申请数量包含待审核和已审批待发的实物需求。FBS先分配现货，再分配FBP正式申请；审核预留不等于已发运，确认发货后才实际出库。</p>
      <p v-if="line.partial">当前仅确认订单采购缺口；现货分配仍待核实，账面差异不重复增加采购量。</p>
      <p v-if="line.key==='forecast'&&!workflow?.fbp?.known">{{workflow?.fbp?.unknown_reason||'官方库存尚未完整同步'}}</p>
      <p>点击需求名称查看订单、规则或申请明细。</p>

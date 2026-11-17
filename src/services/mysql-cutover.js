@@ -1,3 +1,4 @@
+import { postFbpPhysicalShipment } from "./fbp-physical-shipment.js";
 import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
 import {createInventoryBundleConversion} from './inventory-bundle-conversion.js';
 import {createBundleOrderReconciliation} from './bundle-order-reconciliation.js';
@@ -6798,6 +6799,13 @@ async function postFbpTransferInventoryMovementMysql(connection, record = {}, qu
     if (Number(mapping.product_id) !== productId || Number(mapping.shop_id) !== Number(record.shop_id)) throw new Error("发仓记录绑定与当前企业商品、店铺不一致");
   }
   if (qty < 0 && stockLocation === 'LOCAL') await captureFbpReceiptBaseline(run, scope, transferId);
+  if(qty<0&&stockLocation==='LOCAL')return postFbpPhysicalShipment(run,scope,record,-qty,async(part,delta,sourceRef)=>{
+    const product=await mysqlConnectionQueryOne(connection,'SELECT purchase_cost FROM products WHERE id=?',[part.product_id]);
+    return postInventoryMysql(connection,{product_id:part.product_id,shop_id:nullableInteger(record.shop_id),
+      sku_mapping_id:part.product_id===productId?nullableInteger(record.mapping_id):null,owner_person_id:nullableInteger(record.person_id),
+      source_type:'fbp_transfer_outbound',source_ref:sourceRef,quantity_delta:delta,stock_location:'LOCAL',stock_location_source:part.finished?'bundle_finished':'fbp_transfer',
+      movement_type:'ORDER_SHIPPED',unit_cost:Number(product?.purchase_cost||0),amount:Math.abs(delta)*Number(product?.purchase_cost||0),note});
+  });
   const product = await mysqlConnectionQueryOne(connection, "SELECT purchase_cost FROM products WHERE id = ?", [productId]);
   const unitCost = Number(product?.purchase_cost || 0);
   return await postInventoryMysql(connection, {
@@ -6999,6 +7007,7 @@ async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId,
       ]);
       transfer = {
         id: Number(insertResult.insertId),
+        ozon_sku: item.ozon_sku,
         product_id: Number(item.product_id),
         mapping_id: nullableInteger(item.mapping_id),
         shop_id: Number(item.shop_id || 0) || null,
@@ -7091,7 +7100,7 @@ export async function createFbpTransferRecordMysql(body = {}, userId = null, ten
       body.expected_arrival_at || body.expectedArrivalAt || null
     ]);
     const transferId = Number(result.insertId);
-    const record = { id: transferId, product_id: productId, mapping_id: mappingId, shop_id: shopId, person_id: personId };
+    const record = { id: transferId, product_id: productId, mapping_id: mappingId, shop_id: shopId, ozon_sku: ozonSku, person_id: personId };
     if (!["draft", "cancelled"].includes(status)) {
       await postFbpTransferInventoryMovementMysql(connection, record, -quantity, "LOCAL", `FBP发仓出库 ${quantity} 件`, scope);
       if (listedQuantity > 0) {

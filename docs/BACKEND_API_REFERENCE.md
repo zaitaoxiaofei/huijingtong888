@@ -3446,7 +3446,7 @@ Read current enterprise inventory detail, optionally with the shared read-only f
 
 #### `POST /api/fbp-replenishment-orders/status`
 
-Run the existing enterprise FBP status writer. A new transition into pending_review resolves physical SKU components and writes supply-gap notifications in the same transaction; repeated pending status does not notify again. Existing review, reserve, shipment and receipt accounting remain in the canonical writer.
+Run the existing enterprise FBP status writer. A new transition into pending_review resolves physical SKU components and writes supply-gap notifications in the same transaction; repeated pending status does not notify again. Approval remains outstanding second-priority FBP demand. Confirmed LOCAL dispatch locks current physical leaves, preserves FBS demand first and returns 409 if insufficient; virtual bundles post child quantities atomically. Existing dispatched history is not replayed.
 
 - Auth: `authenticated`
 - Request body: required
@@ -3782,7 +3782,7 @@ Return procurement request rows.
 
 #### `GET /api/inventory-workflow`
 
-Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.
+Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Priority is FBS, pending plus approved/unshipped FBP applications, optional local safety, then optional forecasts. supply_plan.formal_fbp_quantity is pending plus approved physical demand; submitted_fbp_quantity retains pending-review semantics. fbp_in_transit_quantity is actual dispatch outstanding receipt, independent of official stock sync. Local/core details and official FBP sync remain separate.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3866,7 +3866,7 @@ Fresh inventory.write/procurement membership can override only a specific produc
 
 #### `POST /api/procurement/purchases`
 
-Canonical actual purchase registration. Optional workspace_batch=true enables a 1..100 distinct-product shortage-purchase table: positive integer quantities and actual goods amounts, nonnegative shipping; fresh procurement duty and tenant ownership for all references. Reuses open requests for selected products and creates requests only for products without one. All products, costs and inbound batches commit atomically. A UUID request_key is mandatory for workspace batches; serialized retry identity and audited payload hash return the original purchase order on identical retries, changed payload returns409. Does not post local stock. Existing non-batch purchase modes retain their existing behavior.
+Canonical actual purchase registration. Optional workspace_batch=true enables a 1..100 distinct-product shortage-purchase table: positive integer quantities and actual goods amounts, nonnegative shipping; fresh procurement duty and tenant ownership for all references. Reuses open requests for selected products and creates requests only for products without one. All products, costs and inbound batches commit atomically. A UUID request_key is mandatory for workspace batches; serialized retry identity and audited payload hash return the original purchase order on identical retries, changed payload returns 409. Does not post local stock. Existing non-batch purchase modes retain their existing behavior.
 
 - Auth: `authenticated`
 - Request body: required

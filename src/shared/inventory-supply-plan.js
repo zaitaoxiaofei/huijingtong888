@@ -2,15 +2,15 @@ import {fbpSupplyState,fbpLocalSupplyNeed} from './fbp-supply-state.js';
 const known=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
 const qty=v=>Math.max(0,Math.ceil(Number(v)||0));
 
-// One physical-unit pool. Existing warehouse locks remain protected; submitted
-// FBP applications precede optional safety targets. Inbound is spent only once.
+// One physical-unit pool: FBS first, approved/pending FBP second, local safety
+// third, forecasts last. Approval is a demand reservation, not physical dispatch.
 export function inventorySupplyPlan(ledger={},applications,forecast){
  const orderReview=(ledger.orders||[]).some(row=>row.needs_fulfillment&&row.quantity_needs_review);
  const flow=ledger.flow_summary||{},ready=!orderReview&&!flow.unavailable&&[ledger.physical_estimate,ledger.open_order_demand,ledger.fbp_reserved,flow.safety].every(known)&&Number(ledger.physical_estimate)>=0;
  const applicationsKnown=Array.isArray(applications)&&flow.applications_pending!==true;
  const fbp=fbpSupplyState(forecast,ledger.fbp_inventory);
  const requested=applicationsKnown?applications.filter(a=>a.status==='pending_review').reduce((sum,a)=>sum+qty(a.requested_quantity),0):null;
- const evidence={order_quantity:known(ledger.open_order_demand)?qty(ledger.open_order_demand):null,locked_quantity:known(ledger.fbp_reserved)?qty(ledger.fbp_reserved):null,submitted_fbp_quantity:requested};
+ const evidence={fbp_in_transit_quantity:known(ledger.fbp_in_transit)?qty(ledger.fbp_in_transit):null,order_quantity:known(ledger.open_order_demand)?qty(ledger.open_order_demand):null,locked_quantity:known(ledger.fbp_reserved)?qty(ledger.fbp_reserved):null,submitted_fbp_quantity:requested,approved_fbp_quantity:known(ledger.fbp_reserved)?qty(ledger.fbp_reserved):null,formal_fbp_quantity:requested!=null&&known(ledger.fbp_reserved)?requested+qty(ledger.fbp_reserved):null};
  // The order coverage reader has already allocated stock and inbound once.
  // Historical negative ledger balances must not add debt to this real-order gap
  // or prevent a buyer recording an actual purchase for an uncovered order.
@@ -24,13 +24,13 @@ export function inventorySupplyPlan(ledger={},applications,forecast){
   fbs_waiting_incoming:known(ledger.current_incoming)?qty(ledger.current_incoming):null};
  if(!ready)return empty;
  const physical=qty(ledger.physical_estimate),orders=qty(ledger.open_order_demand),locked=qty(ledger.fbp_reserved),incoming=qty(ledger.incoming_quantity);
- const orderGap=Math.max(0,orders-Math.max(0,physical-locked));
+ const orderGap=Math.max(0,orders-physical);
  const orderIncoming=Math.min(incoming,orderGap,qty(ledger.current_incoming));
  const requiredFbs=known(ledger.current_shortage)?qty(ledger.current_shortage):Math.max(0,orderGap-orderIncoming);
  if(!applicationsKnown)return{...empty,fbs_known:true,required_fbs:requiredFbs,required_purchase:requiredFbs>0?requiredFbs:null};
- let physicalLeft=Math.max(0,physical-locked-orders),incomingLeft=Math.max(0,incoming-orderIncoming);
+ let physicalLeft=Math.max(0,physical-orders),incomingLeft=Math.max(0,incoming-orderIncoming);
  const cover=need=>{const stock=Math.min(physicalLeft,need);physicalLeft-=stock;const transit=Math.min(incomingLeft,need-stock);incomingLeft-=transit;return{purchase:Math.max(0,need-stock-transit),physical_gap:Math.max(0,need-stock),stock,incoming:transit};};
- const requiredFbp=cover(requested+Math.max(0,locked-physical));
+ const requiredFbp=cover(requested+locked);
  const local=cover(qty(flow.safety));
  const optionalFbp=predicted===null?null:cover(predicted);
  return{...evidence,known:true,fbs_known:true,required_purchase:requiredFbs+requiredFbp.purchase,optional_purchase:local.purchase+(optionalFbp?.purchase||0),required_fbs:requiredFbs,required_fbp:requiredFbp.purchase,
@@ -39,7 +39,7 @@ export function inventorySupplyPlan(ledger={},applications,forecast){
   fbs_physical_gap:orderGap,local_ready_stock:local.stock,local_waiting_incoming:local.incoming,
   forecast_ready_stock:optionalFbp?.stock??null,forecast_waiting_incoming:optionalFbp?.incoming??null,
   local_physical_gap:local.physical_gap,fbp_physical_gap:requiredFbp.physical_gap+(optionalFbp?.physical_gap||0),
-  submitted_fbp_quantity:requested,unbacked_fbp_locks:Math.max(0,locked-physical)};
+  submitted_fbp_quantity:requested,unbacked_fbp_locks:Math.max(0,locked-Math.max(0,physical-orders))};
 }
 
 export function inventoryPurchaseQuantity(plan={}){
