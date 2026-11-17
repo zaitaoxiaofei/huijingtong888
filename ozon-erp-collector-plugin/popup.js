@@ -1,5 +1,7 @@
-document.getElementById('finance-documents-open')?.addEventListener('click', () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL('finance-archive.html') });
+document.getElementById('finance-documents-open')?.addEventListener('click', async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const source = /^https:\/\/seller\.ozon\.ru\//.test(tab?.url || '') ? '?sellerTab=' + tab.id : '';
+  chrome.tabs.create({ url: chrome.runtime.getURL('finance-archive.html') + source });
 });
 
 const fields = {
