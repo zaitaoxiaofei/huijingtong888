@@ -13,7 +13,10 @@ let pageSize = 50;
 function active() { return model.accounts.find(a => a.id === model.active); }
 function notice(text, error = false) { $("notice").textContent = text; $("notice").classList.toggle("error", error); }
 async function request(type, payload = {}) {
-  const result = await chrome.runtime.sendMessage({module: "PDD_INVOICE", type, ...payload});
+  let timer;
+  const pending=chrome.runtime.sendMessage({module: "PDD_INVOICE", type, ...payload});
+  const longTask=["SCAN_HISTORY","SCAN","IMPORT_INVOICES","ERP_SYNC","ERP_RESTORE"].includes(type);
+  const result=longTask ? await pending : await Promise.race([pending,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error("助手后台12秒未响应，请查看拼多多处理窗口；页面会继续刷新状态，请勿重复申请")),12000);})]).finally(()=>clearTimeout(timer));
   if (!result?.ok) throw new Error(result?.error || "助手后台暂时无响应，请重新打开插件");
   return result.value;
 }
@@ -57,9 +60,17 @@ function openAccount(id = "") {
 }
 function render() {
   const a = active();
+  const companyPicker=$("erpCompany"), companyValue=String(a?.titleCompanyId||"");
+  companyPicker.replaceChildren();const placeholder=node("option","","请选择 ERP 开票公司");placeholder.value="";companyPicker.append(placeholder);
+  for(const c of model.erp?.companies||[]){const o=node("option","",`${c.name} · ${c.tax_number||"税号未设置"}`);o.value=c.id;companyPicker.append(o);}companyPicker.value=companyValue;
+  $("cloudStatus").textContent=a?.erpError || model.erpError || (a?.erpSyncedAt ? `账号备注与台账已同步：${C.beijing(a.erpSyncedAt)}${a.erpUploading?" · 正在更新系统记录":""}` : "使用统一插件已绑定的企业密钥读取公司。选择抬头后自动同步台账，也可点击顶部同步系统。");
+  $("cloudSync").disabled=!a || locked || a.erpUploading;
+  companyPicker.disabled=!a || model.queue?.state === "running";
   const scan = model.scanProgress;
   $("scanStop").hidden = !scan?.running;
-  if (scan?.running) notice(`${scan.note}；已保留 ${scan.count || 0} 笔${scan.oldest ? `，最早日期 ${scan.oldest}` : "，平台暂未提供下单日期"}`);
+  $("scanOpen").hidden = !scan?.tabId;
+  if(a?.erpSyncProgress?.running){const p=a.erpSyncProgress;notice(`正在同步系统台账 ${p.saved} / ${p.total} 笔 · 最近响应 ${Math.max(0,Math.floor((Date.now()-p.updatedAt)/1000))} 秒前`);}
+  if (scan?.running) notice(`${scan.note}${scan.updatedAt ? `（最近响应 ${Math.max(0,Math.floor((Date.now()-scan.updatedAt)/1000))} 秒前）` : ""}；已保留 ${scan.count || 0} 笔${scan.oldest ? `，最早日期 ${scan.oldest}` : "，平台暂未提供下单日期"}`);
   const q = model.queue;
   const running = q?.state === "running";
   $("accounts").replaceChildren();
@@ -102,7 +113,7 @@ function render() {
     $("queueProgress").max = q.items.length || 1;
     $("queueProgress").value = done;
     $("queueCounts").textContent = `${done} / ${q.items.length} 单`;
-    $("queueNote").textContent = q.note || "";
+    $("queueNote").textContent = `${q.note || ""}${q.heartbeatAt ? ` · 最近响应 ${Math.max(0,Math.floor((Date.now()-q.heartbeatAt)/1000))} 秒前` : ""}`;
     $("pause").disabled = !running;
     $("resume").disabled = q.state !== "paused";
     $("stop").disabled = running || ["done", "stopped"].includes(q.state);
@@ -130,6 +141,7 @@ function renderRows() {
   $("selectAll").disabled = allAccounts;
   $("apply").disabled = !ids.length || !a?.connected || model.queue?.state === "running" || allAccounts;
   $("download").disabled = $("apply").disabled;
+  $("archiveSystem").disabled = $("download").disabled || !a?.erpTenant;
   $("refreshStatus").disabled = $("apply").disabled;
   $("export").disabled = !list.length;
   $("exportSummary").disabled = !list.length;
@@ -172,6 +184,7 @@ function renderRows() {
     const amount = node("td"); amount.append(node("span", "", row.amount ? `¥ ${row.amount}` : "金额未读取"), node("span", "order-id", row.date || "日期未读取"));
     const status = node("td"); status.append(node("span", `status ${row.status}`, C.labels[row.status] || row.status));
     status.append(node("span", "invoice-amount", Number.isSafeInteger(row.invoiceAmountCents) ? `¥ ${C.money(row.invoiceAmountCents)}` : row.status === "issued" ? "票面金额待补充" : Number.isSafeInteger(row.applicationAmountCents) ? `申请 ¥ ${C.money(row.applicationAmountCents)}` : "申请金额待核对"));
+    if(row.invoiceCompany?.name)status.append(node("span","order-id",`抬头：${row.invoiceCompany.name}`));
     if (row.taskStatus) status.append(node("span", "order-id", `助手：${C.labels[row.taskStatus] || row.taskStatus}`));
     const dates = node("td", "invoice-dates"); dates.append(node("div", "", `申请 ${row.appliedAt || "平台未提供"}`), node("div", "", `开票 ${row.issuedAt || "平台未提供"}`));
     const note = node("td", "row-note", row.note || "尚未处理");
@@ -188,7 +201,9 @@ function renderRows() {
     }
     const resolve = button("编辑台账 / 历史", async () => openLedger(row));
     resolve.disabled = model.queue?.state === "running";
-    actionBox.append(resolve); actions.append(actionBox);
+    actionBox.append(resolve);
+    for(const file of row.cloudFiles||[])actionBox.append(button(`系统附件 · ${file.ext.toUpperCase()}`,async()=>request("ERP_FILE",{accountId:row.accountId,fileId:file.id}),"",true));
+    actions.append(actionBox);
     tr.append(checkCell, product, shop, amount, status, dates, note, actions);
     $("rows").append(tr);
   }
@@ -229,27 +244,35 @@ async function refreshTabs() {
   for (const tab of tabs) { const option = node("option", "", tab.title); option.value = tab.id; $("sourceTab").append(option); }
   if (tabs.some(t => String(t.id) === previous)) $("sourceTab").value = previous;
 }
-async function confirmBatch(kind) {
+async function confirmBatch(kind, destination = "local") {
   if ($("scope").value === "all") throw new Error("请先选择当前采购账号，再开始批量处理");
   if (titleDirty && kind === "apply") throw new Error("请先保存发票抬头，再开始申请");
   const a = active();
-  const ids = selectedIds();
-  if (!ids.length) throw new Error("请先勾选订单");
+  const chosen=selectedIds();
+  const ids=kind === "apply" ? rows().filter(r=>chosen.includes(r.id) && r.status === "pending" && !["review","failed"].includes(r.taskStatus)).map(r=>r.id) : chosen;
+  const skipped=chosen.length-ids.length;
+  if (!ids.length) throw new Error(kind === "apply" ? "所选记录没有可申请订单，已申请、已开票及待核对记录保持原状态" : "请先勾选订单");
+  if(destination === "system" && !a.titleCompanyId) throw new Error("请在设置中先选择 ERP 公司抬头并同步台账");
   const title = kind === "apply" ? C.validateTitle(a.title) : null;
-  if (kind === "apply" && rows().filter(r => ids.includes(r.id)).some(r => r.status !== "pending")) throw new Error("请仅勾选待申请订单；异常订单请先更新开票进度并核对");
   $("confirmTitle").textContent = kind === "apply" ? `申请 ${ids.length} 笔订单的发票` : `下载 ${ids.length} 笔订单的票据`;
-  $("confirmBody").textContent = `采购账号：${a.name}。只处理本次勾选的订单。`;
+  $("confirmBody").textContent = `采购账号：${a.name}。只处理本次可执行的 ${ids.length} 笔${skipped ? `，其余 ${skipped} 笔保留原状态并跳过` : ""}。`;
   $("confirmDetails").textContent = title ? `申请金额合计：¥ ${C.money(rows().filter(r => ids.includes(r.id)).reduce((n,r) => n + (r.applicationAmountCents ?? C.cents(r.amount) ?? 0), 0))}（仅已知金额）\n抬头：${title.company}\n税号：${title.taxId}\n备查邮箱：${title.email || "未设置"}\n类型：企业普通发票` : "文件将保存到 Chrome 下载目录下的「采购发票 / 账号备注」文件夹，按订单号命名。平台仅展示图片时，下载的是预览图；PDF 原件请在发票详情领取。";
+  if(destination === "system") $("confirmDetails").textContent="附件将归档至当前 ERP 企业，单份上限5MB；平台图片会标明图片，不会冒充 PDF。";
   $("confirmHint").textContent = kind === "apply" ? "已申请、已开票和待核对订单会跳过。平台表单未提供邮箱字段时，不随申请提交邮箱；原件领取时可另填。" : "仅保存平台提供的票据文件或发票预览图，不截取网页。";
   const dialog = $("confirmDialog");
   dialog.returnValue = "cancel";
   dialog.showModal();
   const result = await new Promise(resolve => dialog.addEventListener("close", () => resolve(dialog.returnValue), {once: true}));
   if (result !== "confirm") return;
-  setModel(await request("START", {accountId: a.id, ids, kind}));
+  setModel(await request("START", {accountId: a.id, ids, kind, concurrency:Number($("concurrency").value),destination}));
   selected.clear();
   notice("任务已开始，可以在下方查看进度；请保持 Chrome 运行。");
 }
+$("cloudSync").addEventListener("click",()=>action(async()=>{notice("正在同步账号备注与台账到 ERP…");setModel(await request("ERP_SYNC",{accountId:model.active}));notice("系统台账同步完成，账号名称与开票记录已保存");}));
+$("erpRefresh").addEventListener("click",()=>action(async()=>{setModel(await request("ERP_COMPANIES"));notice("ERP 公司信息已读取，请选择开票公司");}));
+$("erpCompany").addEventListener("change",()=>action(async()=>{if(!$("erpCompany").value)return;setModel(await request("ERP_TITLE",{accountId:model.active,companyId:Number($("erpCompany").value)}));titleDirty=false;notice("已使用 ERP 的正式公司名称和税号，账号台账将自动同步");}));
+$("erpRestore").addEventListener("click",()=>action(async()=>{if(!confirm("从当前企业系统恢复采购账号和台账？同一账号的本地记录会替换为系统版本；未同步修改请先导出备份。"))return;setModel(await request("ERP_RESTORE"));notice("已恢复系统采购账号与记录，操作拼多多前请核对并重新绑定登录");}));
+$("archiveSystem").addEventListener("click",()=>action(()=>confirmBatch("download","system")));
 $("version").textContent = `v${chrome.runtime.getManifest().version}`;
 $("settingsOpen").addEventListener("click", () => { $("settingsDialog").showModal(); action(refreshTabs); });
 $("closeSettings").addEventListener("click", () => $("settingsDialog").close());
@@ -286,6 +309,7 @@ $("scan").addEventListener("click", () => $("scanDialog").showModal());
 $("scanCancel").addEventListener("click", () => $("scanDialog").close());
 $("imageClose").addEventListener("click", () => $("imageDialog").close());
 $("scanRange").addEventListener("change", () => { $("scanDates").hidden = $("scanRange").value !== "range"; });
+$("scanOpen").addEventListener("click",async()=>{try{await request("OPEN_SCAN");}catch(error){notice(error.message,true);}});
 $("scanStop").addEventListener("click", async () => { try { await request("SCAN_STOP"); notice("正在停止，已读取记录会保留"); } catch(e) { notice(e.message, true); } });
 $("scanForm").addEventListener("submit", event => { event.preventDefault(); action(async () => {
   const range = $("scanRange").value === "range";
@@ -361,5 +385,5 @@ async function poll() {
   catch (error) { notice(error.message, true); }
   finally { pollRunning = false; }
 }
-action(async () => { setModel(await request("STATE")); await refreshTabs(); notice(active() ? "助手已就绪。核对当前账号和发票抬头后，可读取订单。" : "先打开拼多多订单页并登录，再绑定第一个采购账号。"); });
+action(async () => { setModel(await request("STATE")); await refreshTabs(); try{setModel(await request("ERP_COMPANIES"));if(!model.accounts.length)setModel(await request("ERP_RESTORE"));}catch{} notice(active() ? "助手已就绪。核对当前账号和发票抬头后，可读取订单。" : "先打开拼多多订单页并登录，再绑定第一个采购账号。"); });
 setInterval(poll, 2500);

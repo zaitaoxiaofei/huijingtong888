@@ -1,3 +1,4 @@
+import {PDD_INVOICE_SCHEMA} from '../src/services/pdd-invoice-schema.js';
 import {FINANCE_AI_COST_SCHEMA} from '../src/services/finance-ai-cost-policy.js';
 import { FINANCE_CALIBRATION_SCHEMA } from '../src/services/finance-reconciliation-schema.js';
 import { OZON_RETURN_SCHEMA } from "../src/services/ozon-return-schema.js";
@@ -40,6 +41,7 @@ ${ORDER_PROFIT_DAILY_FX_SCHEMA};
 ${ORDER_PROFIT_FX_STATE_SCHEMA};
 ${OGL_DISPATCH_SCHEMA_SQL.join(";\n")};
 ${TENANT_PRIVATE_FILES_SCHEMA};
+${PDD_INVOICE_SCHEMA};
 ${TENANT_INVENTORY_SALES_REFRESH_SCHEMA};
 ${TENANT_AI_LIMITS_SCHEMA};
 ${TENANT_AI_USAGE_SCHEMA};

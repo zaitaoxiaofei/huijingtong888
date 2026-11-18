@@ -132,6 +132,7 @@ let boot;
 function ensureBoot() { return boot ||= (async () => {
   store = (await chrome.storage.local.get(KEY))[KEY] || {accounts: [], active: "", queue: null};
   C.recoverQueue(store.queue);
+  for(const a of store.accounts) a.erpUploading=false;
   if (store.lastScanProgress?.running) Object.assign(store.lastScanProgress, {running: false, complete: false, note: "上次读取中断，已保存记录；请重新同步继续读取"});
   if (store.queue) syncQueueRows();
   await save();
@@ -151,7 +152,7 @@ function account(id) {
 function busy() { return runner || scanBusy || store.queue?.state === "running"; }
 function idleOnly() { if (busy()) throw new Error("请先暂停任务，并等待当前订单处理结束"); }
 async function fingerprint() {
-  const cookie = await chrome.cookies.get({url: C.ORIGIN, name: "PDDAccessToken"});
+  const cookie = await deadline(chrome.cookies.get({url: C.ORIGIN, name: "PDDAccessToken"}),10000,"读取拼多多登录状态超时，请检查浏览器后继续");
   if (!cookie?.value) throw new Error("未检测到拼多多登录状态，请打开订单页扫码登录后再绑定");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(cookie.value));
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
@@ -167,7 +168,8 @@ function syncQueueRows() {
   for (const job of q.items) {
     const row = a.orders.find(item => item.id === job.id);
     if (!row) continue;
-    row.note = job.note || "";
+    row.note = job.status === "processing" ? `正在${q.kind === "apply" ? "申请" : q.kind === "refresh" ? "读取开票进度" : "归档附件"}，阶段：${job.stage || "准备页面"}` : job.note || "";
+    if(job.status === "processing")row.taskStatus="processing";else if(row.taskStatus === "processing")row.taskStatus="";
     const patch = {...job.facts};
     if (!["skipped", "processing", "downloading"].includes(job.status) && (job.status !== "pending" || job.facts?.platformCheckedAt)) {
       if (q.kind !== "download" || ["review", "failed"].includes(job.status)) {
@@ -182,28 +184,45 @@ function syncQueueRows() {
       if (["review", "failed"].includes(job.status)) row.taskStatus = job.status;
     }
     C.recordLedger(row, patch, "platform", job.updated || Date.now());
+    if(q.kind === "apply" && ["submitted","issued","rejected"].includes(job.status))row.invoiceCompany={id:q.companyId||null,name:q.title.company,taxId:q.title.taxId};
     if (job.downloads) row.downloads = job.downloads;
+    if (job.cloudFiles) row.cloudFiles = job.cloudFiles;
     row.updated = job.updated;
   }
 }
 function publicState(current) {
   // Session fingerprints never go to page scripts, exports, or the dashboard.
   const result = structuredClone(store);
-  result.scanProgress = scanContext ? {...scanContext.progress, running: true} : store.lastScanProgress;
+  result.scanProgress = scanContext ? {...scanContext.progress, tabId:scanContext.tabId, running: true} : store.lastScanProgress;
+  result.accounts=result.accounts.filter(a=>!a.erpTenant || a.erpTenant===store.erp?.tenantId);
+  if(!result.accounts.some(a=>a.id===result.active))result.active=result.accounts[0]?.id||"";
   for (const a of result.accounts) { a.connected = a.fingerprint === current; delete a.fingerprint; }
+  if(result.erp)delete result.erp.keyHash;
   if (result.queue) delete result.queue.fingerprint;
   return result;
 }
 async function state() { return publicState(await fingerprint().catch(() => "")); }
 function trustedUi(sender) { return sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("pdd-invoice/dashboard.html"); }
 
+function deadline(promise, ms, message) {
+  let timer;
+  return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Object.assign(new Error(message),{code:"PDD_TIMEOUT"})),ms);})]).finally(()=>clearTimeout(timer));
+}
+async function pageReply(tabId, message) {
+  const response=chrome.tabs.sendMessage(tabId,message);
+  if(message.type!=="PDD_INVOICE_SCAN") return deadline(response,45000,"拼多多页面45秒未返回结果，任务已暂停；请查看处理窗口，提交过的订单会先核对状态");
+  let finished=false;
+  const watched=(async()=>{while(!finished){await new Promise(resolve=>setTimeout(resolve,1000));if(finished)return;const last=scanContext?.heartbeatAt||Date.now();if(Date.now()-last>45000)throw Object.assign(new Error("读取采购订单超过45秒无响应，已保存已读记录；请查看拼多多页面后重新同步"),{code:"PDD_TIMEOUT"});}})();
+  try{return await Promise.race([response,watched]);}finally{finished=true;}
+}
+
 async function pageMessage(tabId, message) {
-  const deadline = Date.now() + 22000;
-  while (Date.now() < deadline) {
-    const tab = await chrome.tabs.get(tabId);
+  const expiresAt = Date.now() + 22000;
+  while (Date.now() < expiresAt) {
+    const tab = await deadline(chrome.tabs.get(tabId),10000,"读取处理窗口状态超时，请查看浏览器");
     if (!C.pddUrl(tab.url || "") && !C.pddUrl(tab.pendingUrl || "")) throw new Error("处理窗口已离开拼多多，请检查登录状态或验证码");
     if (tab.status === "complete" && !tab.pendingUrl) {
-      try { return await chrome.tabs.sendMessage(tabId, message); }
+      try { return await pageReply(tabId, message); }
       catch (error) {
         // Retry only connection setup; never repeat a potentially executed command.
         if (!/Receiving end does not exist|Could not establish connection/.test(error.message)) throw error;
@@ -215,7 +234,7 @@ async function pageMessage(tabId, message) {
 }
 async function visit(tabId, url) {
   if (!C.pddUrl(url)) throw new Error("订单链接不是受支持的拼多多买家页面");
-  await chrome.tabs.update(tabId, {url, active: false});
+  await deadline(chrome.tabs.update(tabId, {url, active: false}),12000,"打开订单页面超时，请查看处理窗口后继续");
 }
 async function scan(message) {
   idleOnly();
@@ -224,7 +243,7 @@ async function scan(message) {
   const tab = await chrome.tabs.get(message.tabId);
   if (tab.incognito || !C.pddUrl(tab.url || tab.pendingUrl || "")) throw new Error("请选择普通 Chrome 窗口中已登录的拼多多订单页");
   scanBusy = true;
-  scanContext = {tabId: tab.id, accountId: a.id, fingerprint: a.fingerprint, from: message.from || "", to: message.to || ""};
+  scanContext = {tabId: tab.id, accountId: a.id, fingerprint: a.fingerprint, startedAt:Date.now(), heartbeatAt:Date.now(), progress:{count:0,note:"正在等待拼多多页面返回第一批订单",updatedAt:Date.now()}, from: message.from || "", to: message.to || ""};
   try {
     const result = await pageMessage(tab.id, {type: "PDD_INVOICE_SCAN", loadMore: Boolean(message.loadMore), history: Boolean(message.history), purchase: Boolean(message.purchase), from: message.from || "", to: message.to || ""});
     await assertSession(a);
@@ -235,9 +254,59 @@ async function scan(message) {
     await save();
     return {...await state(), scanProgress: store.lastScanProgress, scan: {count: result.count ?? result.rows.length, note: result.note, complete: Boolean(result.complete)}};
   } catch (error) {
-    store.lastScanProgress = {...scanContext?.progress, running: false, complete: false, note: error.message};
+    void chrome.tabs.sendMessage(tab.id,{type:"PDD_INVOICE_SCAN_STOP"}).catch(()=>{});
+    store.lastScanProgress = {...scanContext?.progress, tabId:tab.id, running: false, complete: false, note: error.message};
     await save(); throw error;
   } finally { scanBusy = false; scanContext = null; }
+}
+
+let erpChain = Promise.resolve();
+async function erpRequest(path, payload) {
+  const config = await globalThis.OzonUnifiedConfig?.get?.();
+  if (!config?.localPluginToken) throw new Error("请先在统一插件首页绑定企业密钥，再同步公司与开票台账");
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 25000);
+  try {
+    const response = await fetch(`https://erp.hjt888.xyz/api/local-plugin/pdd-invoices/${path}`, {method: payload === undefined ? "GET" : "POST", signal: controller.signal,
+      headers: {"content-type":"application/json", "x-local-plugin-token":config.localPluginToken}, ...(payload === undefined ? {} : {body:JSON.stringify(payload)})});
+    const next = await globalThis.OzonUnifiedConfig.get();
+    if (next.localPluginToken !== config.localPluginToken) throw new Error("企业密钥已切换，本次同步已停止，请重新读取公司信息");
+    if (!(response.headers.get("content-type") || "").includes("application/json")) throw new Error("ERP 开票台账接口尚未就绪，请升级后台后再同步；本地记录已保留");
+    const body = await response.json();
+    if (body.code === "TENANT_PLUGIN_SCOPE_PENDING") throw new Error("当前后台尚未支持开票台账，请升级 ERP 后再同步；本地记录已保留");
+    if (!response.ok || !body.success) throw new Error(body.error || `ERP 同步失败（${response.status}），请确认后台已更新`);
+    return body.data;
+  } finally { clearTimeout(timer); }
+}
+async function erpCompanies() {
+  const config=await globalThis.OzonUnifiedConfig?.get?.(), token=config?.localPluginToken||"";
+  const keyHash=token?[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(token)))].map(b=>b.toString(16).padStart(2,"0")).join(""):"";
+  let data;
+  try{data=await erpRequest("companies");}catch(error){store.erpError=error.message;if(store.erp?.keyHash!==keyHash)store.erp=null;await save();throw error;}
+  store.erpError="";
+  store.erp = {tenantId:data.tenant_id, companies:data.companies, checkedAt:Date.now(),keyHash};
+  await save(); return data;
+}
+function syncAccount(a) {
+  const run = async () => {
+    a.erpSyncProgress={running:true,saved:0,total:a.orders.length,updatedAt:Date.now()};await save();
+    try {
+    if (!a.erpTenant) throw new Error("请先在设置中同步 ERP 公司并选择企业归属，再同步账号台账");
+    const context = await erpCompanies();
+    if (context.tenant_id !== a.erpTenant) throw new Error("采购账号属于另一企业，已停止上传，请切回原企业密钥");
+    const rows = structuredClone(a.orders);
+    for (let offset=0; offset < Math.max(1,rows.length); offset+=100) {
+      const result = await erpRequest("accounts", {accountId:a.id,name:a.name,companyId:a.titleCompanyId,revision:a.erpRevision||0,rows:rows.slice(offset,offset+100)});
+      a.erpRevision=result.revision;a.erpSyncProgress.saved=Math.min(rows.length,offset+100);a.erpSyncProgress.updatedAt=Date.now();await save();
+    }
+    a.erpSyncedAt=Date.now(); a.erpError=""; await save();
+    }catch(error){a.erpError=error.message;throw error;}finally{a.erpSyncProgress.running=false;await save();}
+  };
+  const pending=erpChain.catch(()=>{}).then(run);erpChain=pending;return pending;
+}
+function autoSync(a) {
+  if (!a.erpTenant || a.erpUploading) return;
+  a.erpUploading=true;
+  void syncAccount(a).catch(error=>{a.erpError=error.message;}).finally(async()=>{a.erpUploading=false;await save();});
 }
 
 async function startQueue(message) {
@@ -247,17 +316,23 @@ async function startQueue(message) {
   if (!message.ids?.length) throw new Error("请先勾选要处理的订单");
   if (!["apply", "download", "refresh"].includes(message.kind)) throw new Error("未知任务类型");
   if (store.queue?.items.some(item => item.status === "pending")) throw new Error("上次任务还有待处理订单，请先继续或结束上次任务");
+  if (message.kind === "apply" && a.erpTenant && !a.titleCompanyId) throw new Error("请先在设置中选择 ERP 公司抬头，再申请发票");
+  if (message.kind === "apply" && a.titleCompanyId) {
+    const context = await erpCompanies(), company = context.companies.find(c=>Number(c.id)===a.titleCompanyId);
+    if (context.tenant_id!==a.erpTenant || !company || company.name!==a.title.company || String(company.tax_number||"").toUpperCase()!==a.title.taxId) throw new Error("ERP 公司抬头已变化，请在设置重新选择后申请");
+  }
   const title = message.kind === "apply" ? C.validateTitle(a.title) : null;
   const selected = new Set(message.ids);
   const rows = a.orders.filter(row => selected.has(row.id));
   if (rows.length !== selected.size) throw new Error("部分订单已不存在，请刷新列表后重新勾选");
   const items = rows.map(row => {
-    const skip = message.kind === "apply" && row.status !== "pending";
+    const skip = message.kind === "apply" && (row.status !== "pending" || ["review","failed"].includes(row.taskStatus));
     const downloaded = message.kind === "download" && row.downloads?.length;
     return {id: row.id, url: row.url, status: skip || downloaded ? "skipped" : "pending",
       note: skip ? "该订单不是待申请状态，请先打开订单核对" : downloaded ? "该订单已有下载记录，请先在 Chrome 下载记录核对，本次跳过" : ""};
   });
-  store.queue = {id: crypto.randomUUID(), accountId: a.id, fingerprint: a.fingerprint, kind: message.kind,
+  const concurrency = Math.max(1, Math.min(8, Math.floor(Number(message.concurrency)||2)));
+  store.queue = {companyId:a.titleCompanyId||null, concurrency, destination:message.destination === "system" ? "system" : "local", id: crypto.randomUUID(), accountId: a.id, fingerprint: a.fingerprint, kind: message.kind,
     title, items, state: "running", created: Date.now(), tabId: null, note: "正在准备处理窗口"};
   syncQueueRows();
   await save();
@@ -273,89 +348,113 @@ async function runQueue() {
   try {
     const a = account(q.accountId);
     await assertSession(a, q.fingerprint);
-    // Keep the tab for inspection. Never close a window containing an uncertain result.
-    if (!q.tabId || !await chrome.tabs.get(q.tabId).catch(() => null)) {
-      const tab = await chrome.tabs.create({url: C.ORIGIN + "/orders.html", active: false});
-      q.tabId = tab.id;
-      await save();
-    }
-    for (const item of q.items) {
-      if (q.state !== "running") break;
-      if (item.status !== "pending") continue;
-      await assertSession(a, q.fingerprint);
-      item.status = "processing";
-      item.updated = Date.now();
-      item.stage = "open";
-      q.note = `正在${({apply: "申请", download: "下载", refresh: "查询状态"})[q.kind]}：${item.id}`;
-      syncQueueRows();
-      await save();
-      try {
-        await visit(q.tabId, q.kind === "apply" ? a.orders.find(row => row.id === item.id)?.applicationUrl || C.invoiceUrl(item.id) : C.invoiceUrl(item.id));
-        let result;
-        for (let hop = 0; hop < 4; hop++) {
+    const lanes = Math.min(q.concurrency || 1, q.items.filter(i=>i.status === "pending").length);
+    q.tabIds = [];q.tabId=null;
+    const laneResults = await Promise.allSettled(Array.from({length:lanes}, async () => {
+      let tab;
+      try{tab=await chrome.tabs.create({url:C.ORIGIN+"/orders.html",active:false});}catch(error){q.state="paused";q.note=`创建处理窗口失败：${error.message}`;throw error;}
+      const tabId=tab.id; q.tabIds.push(tabId); q.tabId ||= tabId;
+      while(q.state === "running") {
+        const item=q.items.find(i=>i.status === "pending");
+        if(!item) break;
+        item.status="processing"; item.tabId=tabId;
+        try {
           await assertSession(a, q.fingerprint);
-          if (q.state !== "running") { result = {status: "pending", note: "已暂停，尚未提交"}; break; }
-          result = await pageMessage(q.tabId, {type: "PDD_INVOICE_PROCESS", queueId: q.id, orderId: item.id, kind: q.kind, title: q.title});
-          if (!result?.ok) throw new Error(result?.error || "页面未返回处理结果");
-          if (!result.next) break;
-          if (!C.pddUrl(result.next) || C.orderId(result.next) !== item.id) throw new Error("开票链接的订单号不匹配，请人工核对");
-          await visit(q.tabId, result.next);
-        }
-        if (result?.next) result = {status: "review", note: "页面跳转次数超限，请打开订单手动核对"};
-        if (result?.files?.length && q.kind === "download") {
-          item.invoiceStatus = "issued";
-          item.downloads = [];
-          // Persist each download intent before starting it. An interrupted intent is never auto-retried.
-          for (const [index, value] of result.files.entries()) {
-            await assertSession(a, q.fingerprint);
-            if (q.state !== "running") break;
-            const file = C.invoiceFile(value);
-            if (!file) continue;
-            item.downloads.push({state: "starting", ext: file.ext});
-            await save();
-            const id = await chrome.downloads.download({url: file.url,
-      filename: `采购发票/${C.safeFilePart(a.name)}/${C.safeFilePart(item.id)}_${index + 1}${["png", "jpg", "jpeg"].includes(file.ext) ? "_平台图片" : ""}.${file.ext}`, conflictAction: "uniquify", saveAs: false});
-            Object.assign(item.downloads.at(-1), {id, state: "in_progress"});
-            syncQueueRows();
-            await save();
-          }
-          result = item.downloads.length ? {
-            status: item.downloads.every(d => d.state === "complete") ? "downloaded" : item.downloads.some(d => d.state === "interrupted") ? "review" : "downloading",
-            note: "已交给 Chrome 下载，请查看下载记录确认文件", facts: result.facts} : {status: "review", note: "下载前任务已暂停，请核对后重新选择"};
-        }
-        const allowed = ["pending", "submitted", "issued", "rejected", "skipped", "review", "downloading", "downloaded"];
-        item.status = allowed.includes(result?.status) ? result.status : "review";
-        item.note = result?.note || "页面没有可确认的结果，请人工核对";
-        item.facts = result?.facts;
-        if (result?.block || item.status === "review") { q.state = "paused"; q.note = item.note; }
-      } catch (error) {
-        item.status = ["authorized", "confirmed"].includes(item.stage) || q.kind === "download" ? "review" : "failed";
-        item.note = error.message;
-        // Successful submit may navigate and destroy the message channel. Inspect
-        // the new page read-only; never re-run an application to recover its reply.
-        if (["authorized", "confirmed"].includes(item.stage)) {
+
+          item.updated = Date.now();q.heartbeatAt=Date.now();q.currentStartedAt=Date.now();
+          item.stage = "open";
+          q.note = `正在${({apply: "申请", download: "下载", refresh: "查询状态"})[q.kind]}：${item.id}`;
+          syncQueueRows();
+          await save();
           try {
-            await assertSession(a, q.fingerprint);
-            // Merchant applications navigate to chat and destroy the reply channel.
-            // Recover only through the official invoice detail, never by re-submitting.
-            await visit(q.tabId, C.invoiceUrl(item.id));
-            const inspected = await pageMessage(q.tabId, {type: "PDD_INVOICE_INSPECT", orderId: item.id});
-            if (inspected?.ok && ["submitted", "issued", "rejected"].includes(inspected.status)) {
-              item.status = inspected.status; item.note = inspected.note; item.facts = inspected.facts;
+            await visit(tabId, q.kind === "apply" ? a.orders.find(row => row.id === item.id)?.applicationUrl || C.invoiceUrl(item.id) : C.invoiceUrl(item.id));
+            let result;
+            for (let hop = 0; hop < 4; hop++) {
+              await assertSession(a, q.fingerprint);
+              if (q.state !== "running") { result = {status: "pending", note: "已暂停，尚未提交"}; break; }
+              result = await pageMessage(tabId, {type: "PDD_INVOICE_PROCESS", queueId: q.id, orderId: item.id, kind: q.kind, title: q.title});
+              if (!result?.ok) throw new Error(result?.error || "页面未返回处理结果");
+              if (!result.next) break;
+              if (!C.pddUrl(result.next) || C.orderId(result.next) !== item.id) throw new Error("开票链接的订单号不匹配，请人工核对");
+              await visit(tabId, result.next);
             }
-          } catch { /* Preserve uncertain status. */ }
-        }
-        if (!["submitted", "issued", "rejected"].includes(item.status)) { q.state = "paused"; q.note = error.message; }
+            if (result?.next) result = {status: "review", note: "页面跳转次数超限，请打开订单手动核对"};
+            if (result?.files?.length && q.kind === "download") {
+              item.invoiceStatus = "issued";
+              item.downloads = [];
+              // Persist each download intent before starting it. An interrupted intent is never auto-retried.
+              for (const [index, value] of result.files.entries()) {
+                await assertSession(a, q.fingerprint);
+                if (q.state !== "running") break;
+                const file = C.invoiceFile(value);
+                if (!file) continue;
+                if (q.destination === "system") {
+                  await syncAccount(a);
+                  if (!/^https:\/\/pfs\.yangkeduo\.com\/order_invoice\//.test(file.url)) throw new Error("此文件地址尚未适配系统归档，请选择本地下载");
+                  const response = await fetch(file.url, {signal:AbortSignal.timeout(20000)});
+                  const length=Number(response.headers.get("content-length"));
+                  if(!response.ok || length>5*1024*1024) throw new Error("票据读取失败或超过5MB，请选择本地保存");
+                  const reader=response.body.getReader(),chunks=[];let total=0;
+                  while(true){const part=await reader.read();if(part.done)break;total+=part.value.length;if(total>5*1024*1024){await reader.cancel();throw new Error("票据超过5MB，请选择本地保存");}chunks.push(part.value);}
+                  const bytes=new Uint8Array(total);let position=0;for(const chunk of chunks){bytes.set(chunk,position);position+=chunk.length;}
+                  let binary="";for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));
+                  const archive = erpChain.catch(()=>{}).then(async()=>{const saved=await erpRequest("files", {accountId:a.id,orderId:item.id,base64:btoa(binary)});a.erpRevision=saved.revision;await save();return saved;});
+                  erpChain=archive;const saved=await archive;
+                  item.cloudFiles=[...(a.orders.find(r=>r.id===item.id)?.cloudFiles||[]).filter(f=>f.id!==saved.file.id),saved.file];
+                  item.downloads.push({state:"complete",system:true,id:saved.file.id});await save();continue;
+                }
+                item.downloads.push({state: "starting", ext: file.ext});
+                await save();
+                const id = await chrome.downloads.download({url: file.url,
+          filename: `采购发票/${C.safeFilePart(a.name)}/${C.safeFilePart(item.id)}_${index + 1}${["png", "jpg", "jpeg"].includes(file.ext) ? "_平台图片" : ""}.${file.ext}`, conflictAction: "uniquify", saveAs: false});
+                Object.assign(item.downloads.at(-1), {id, state: "in_progress"});
+                syncQueueRows();
+                await save();
+              }
+              result = item.downloads.length ? {
+                status: item.downloads.every(d => d.state === "complete") ? "downloaded" : item.downloads.some(d => d.state === "interrupted") ? "review" : "downloading",
+                note: q.destination === "system" ? "发票附件已归档至 ERP 系统，可在记录中下载" : "已交给 Chrome 下载，请查看下载记录确认文件", facts: result.facts} : {status: "review", note: "下载前任务已暂停，请核对后重新选择"};
+            }
+            const allowed = ["pending", "submitted", "issued", "rejected", "skipped", "review", "downloading", "downloaded"];
+            item.status = allowed.includes(result?.status) ? result.status : "review";
+            item.note = result?.note || "页面没有可确认的结果，请人工核对";
+            item.facts = result?.facts;
+            if (result?.block || item.status === "review") { q.tabId=tabId;q.state = "paused"; q.note = item.note; }
+          } catch (error) {
+            if(error.code === "PDD_TIMEOUT"){q.state="paused";q.note=error.message;}
+            item.status = ["authorized", "confirmed"].includes(item.stage) || q.kind === "download" ? "review" : "failed";
+            item.note = error.message;
+            // Successful submit may navigate and destroy the message channel. Inspect
+            // the new page read-only; never re-run an application to recover its reply.
+            if (["authorized", "confirmed"].includes(item.stage)) {
+              try {
+                await assertSession(a, q.fingerprint);
+                // Merchant applications navigate to chat and destroy the reply channel.
+                // Recover only through the official invoice detail, never by re-submitting.
+                await visit(tabId, C.invoiceUrl(item.id));
+                const inspected = await pageMessage(tabId, {type: "PDD_INVOICE_INSPECT", orderId: item.id});
+                if (inspected?.ok && ["submitted", "issued", "rejected"].includes(inspected.status)) {
+                  item.status = inspected.status; item.note = inspected.note; item.facts = inspected.facts;
+                }
+              } catch { /* Preserve uncertain status. */ }
+            }
+            if (!["submitted", "issued", "rejected"].includes(item.status)) { q.state = "paused"; q.note = error.message; }
+          }
+          item.updated = Date.now();q.heartbeatAt=Date.now();
+          syncQueueRows();
+          await save();
+          if (q.state === "running") await new Promise(resolve => setTimeout(resolve, 750));
+
+        } catch(error) { item.status="review";item.note=error.message;q.state="paused";q.note=error.message;syncQueueRows();await save(); }
       }
-      item.updated = Date.now();
-      syncQueueRows();
-      await save();
-      if (q.state === "running") await new Promise(resolve => setTimeout(resolve, 2500));
-    }
+    }));
+    const rejectedLane=laneResults.find(r=>r.status === "rejected");
+    if(rejectedLane){q.state="paused";q.note=`处理窗口异常：${rejectedLane.reason?.message || "请查看浏览器"}`;}
     if (q.state === "running") { q.state = "done"; q.note = "本批处理结束，请核对结果；已申请不代表商家已开票"; }
   } catch (error) { q.state = "paused"; q.note = error.message; }
   finally {
     runner = false;
+    autoSync(account(q.accountId));
     syncQueueRows();
     await save();
   }
@@ -364,11 +463,12 @@ async function runQueue() {
 async function authorize(message, sender) {
   const q = store.queue;
   const item = q?.items.find(row => row.id === message.orderId && row.status === "processing");
-  if (!sender.tab || sender.tab.id !== q?.tabId || sender.frameId !== 0 || q?.id !== message.queueId || !item || q.state !== "running" || q.kind !== "apply") throw new Error("任务已暂停或订单不匹配，未提交申请");
+  if (!sender.tab || sender.tab.id !== (item?.tabId || q?.tabId) || sender.frameId !== 0 || q?.id !== message.queueId || !item || q.state !== "running" || q.kind !== "apply") throw new Error("任务已暂停或订单不匹配，未提交申请");
   if (C.orderId(sender.url) !== item.id) throw new Error("当前开票页面的订单号不匹配");
   await assertSession(account(q.accountId), q.fingerprint);
   const confirming = message.phase === "confirm";
   if (q.state !== "running" || (confirming ? item.stage !== "authorized" : item.stage !== "open")) throw new Error("任务已暂停，或本单已授权提交，禁止重复提交");
+  q.heartbeatAt=Date.now();
   item.stage = confirming ? "confirmed" : "authorized";
   await save();
   return {authorized: true};
@@ -379,9 +479,9 @@ async function handle(message, sender) {
   if (message.type === "PDD_INVOICE_AUTHORIZE") return authorize(message, sender);
   if (message.type === "PDD_INVOICE_PAGE_STATE") {
     const q = store.queue;
-    if (!q || sender.tab?.id !== q.tabId || sender.frameId !== 0 || !C.pddUrl(sender.url)) throw new Error("没有与该页面匹配的处理任务");
+    if (!q || ![q.tabId,...(q.tabIds||[])].includes(sender.tab?.id) || sender.frameId !== 0 || !C.pddUrl(sender.url)) throw new Error("没有与该页面匹配的处理任务");
     await assertSession(account(q.accountId), q.fingerprint);
-    const [result] = await chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readInvoicePage});
+    const [result] = await deadline(chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readInvoicePage}),25000,"读取发票状态超过25秒无响应，请检查拼多多处理窗口");
     return result?.result || {ready: false};
   }
   if (message.type === "PDD_INVOICE_SCAN_PROGRESS") {
@@ -394,25 +494,55 @@ async function handle(message, sender) {
     });
     a.orders = C.mergeOrders(a.orders, incoming);
     const missingDates = incoming.filter(row => !(row.date || a.orders.find(old => old.id === row.id)?.date)).length;
-    scanContext.progress = {...message.progress, missingDates};
+    scanContext.heartbeatAt=Date.now();
+    scanContext.progress = {...message.progress, missingDates, updatedAt:Date.now()};
     store.lastScanProgress = {...scanContext.progress, running: true};
     await save(); return {};
   }
   if (message.type === "PDD_INVOICE_PURCHASE_PAGE") {
     if (!scanContext || sender.tab?.id !== scanContext.tabId || sender.frameId !== 0 || !C.pddUrl(sender.url) || new URL(sender.url).pathname !== "/orders.html") throw new Error("没有匹配的采购读取任务");
     await assertSession(account(scanContext.accountId), scanContext.fingerprint);
-    const [result] = await chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readPurchasePage, args: [String(message.offset || "")]});
+    scanContext.heartbeatAt=Date.now();
+    const [result] = await deadline(chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readPurchasePage, args: [String(message.offset || "")]}),25000,"采购分页超过25秒无响应，已保存已读记录，请检查网络或登录状态");
     return result?.result;
   }
   if (message.type === "PDD_INVOICE_RENDERED_ROWS") {
     if (!scanContext || sender.tab?.id !== scanContext.tabId || sender.frameId !== 0 || !C.pddUrl(sender.url)) throw new Error("没有进行中的订单读取任务");
     await assertSession(account(scanContext.accountId), scanContext.fingerprint);
-    const [result] = await chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readRenderedOrders});
+    scanContext.heartbeatAt=Date.now();
+    const [result] = await deadline(chrome.scripting.executeScript({target: {tabId: sender.tab.id}, world: "MAIN", func: readRenderedOrders}),25000,"读取历史订单页面超过25秒无响应，请检查处理窗口");
     return result?.result || [];
   }
   if (!trustedUi(sender)) throw new Error("此操作只能在开票助手面板执行");
   switch (message.type) {
     case "STATE": return state();
+    case "ERP_COMPANIES": await erpCompanies();return state();
+    case "ERP_TITLE": {
+      idleOnly();const a=account(message.accountId),context=await erpCompanies(),company=context.companies.find(c=>Number(c.id)===Number(message.companyId));
+      if(!company)throw new Error("请选择当前企业的公司抬头");
+      if(!/^(?:[A-Z0-9]{15}|[A-Z0-9]{18}|[A-Z0-9]{20})$/.test(String(company.tax_number||"").trim().toUpperCase())) throw new Error(`ERP 公司「${company.name}」的税号（finance_companies.tax_number）缺失或不适用于拼多多企业开票，请在 ERP 财务公司设置中核对后重新同步`);
+      a.title=C.validateTitle({company:company.name,taxId:String(company.tax_number||"").trim().toUpperCase(),email:a.title?.email||""});
+      if(a.erpTenant && a.erpTenant!==context.tenant_id)throw new Error("账号已绑定其他企业，请切回原密钥");
+      a.titleCompanyId=Number(company.id);a.erpTenant=context.tenant_id;await save();autoSync(a);return state();
+    }
+    case "ERP_SYNC": idleOnly();await syncAccount(account(message.accountId));return state();
+    case "ERP_RESTORE": {
+      idleOnly();const context=await erpCompanies(),remote=await erpRequest("accounts");
+      for(const item of remote.accounts){
+        let a=store.accounts.find(a=>a.id===item.id);
+        if(a?.erpTenant&&a.erpTenant!==context.tenant_id)throw new Error("采购账号归属不一致，未恢复");
+        if(!a){if(store.accounts.length>=3)continue;a={id:item.id,fingerprint:"",title:{},orders:[]};store.accounts.push(a);}
+        Object.assign(a,{name:item.name,orders:item.orders,erpTenant:context.tenant_id,erpRevision:item.revision,titleCompanyId:item.companyId});
+        const company=context.companies.find(c=>Number(c.id)===item.companyId);if(company)a.title={company:company.name,taxId:String(company.tax_number||"").trim().toUpperCase(),email:a.title?.email||""};
+      }
+      store.active ||= store.accounts[0]?.id || "";await save();return state();
+    }
+    case "ERP_FILE": {
+      const a=account(message.accountId),context=await erpCompanies();if(a.erpTenant!==context.tenant_id)throw new Error("请切回该记录所属企业密钥");
+      const file=await erpRequest("files?"+new URLSearchParams({accountId:a.id,fileId:message.fileId}));
+      await chrome.downloads.download({url:`data:${file.ext==="pdf"?"application/pdf":file.ext==="png"?"image/png":"image/jpeg"};base64,${file.base64}`,filename:`采购发票/${C.safeFilePart(a.name)}/${C.safeFilePart(file.name)}`,saveAs:false});return {};
+    }
+
     case "TABS": return (await chrome.tabs.query({url: C.ORIGIN + "/*"})).filter(t => !t.incognito && t.id !== store.queue?.tabId)
       .sort((a, b) => Number(!(a.url || "").includes("/orders.html")) - Number(!(b.url || "").includes("/orders.html")))
       .map(t => ({id: t.id, title: t.title || "拼多多页面"}));
@@ -437,12 +567,17 @@ async function handle(message, sender) {
         store.accounts.push(a);
       }
       store.active = a.id;
-      await save();
+      if (!a.erpTenant && store.erp?.tenantId) a.erpTenant = store.erp.tenantId;
+      await save();autoSync(a);
       return state();
     }
     case "ACCOUNT_SELECT": account(message.accountId); store.active = message.accountId; await save(); return state();
     case "TITLE_SAVE": idleOnly(); account(message.accountId).title = C.validateTitle(message.title); await save(); return state();
-    case "SCAN_STOP": if (scanContext) await chrome.tabs.sendMessage(scanContext.tabId, {type: "PDD_INVOICE_SCAN_STOP"}); return {};
+    case "OPEN_SCAN": {
+      const tabId=scanContext?.tabId||store.lastScanProgress?.tabId;if(!tabId)throw new Error("没有可查看的同步页面，请重新同步");
+      await chrome.tabs.update(tabId,{active:true});return {};
+    }
+    case "SCAN_STOP": if(scanContext){scanContext.progress.note="已请求停止，正在等待当前读取返回；不会提交申请";scanContext.progress.updatedAt=Date.now();await deadline(chrome.tabs.sendMessage(scanContext.tabId,{type:"PDD_INVOICE_SCAN_STOP"}),10000,"页面未响应停止请求，请打开同步页面检查；读取看门狗会自动结束本轮");}return {};
     case "SCAN_HISTORY": {
       idleOnly();
       if (message.from && !C.normalizeDate(message.from) || message.to && !C.normalizeDate(message.to) || message.from && message.to && message.from > message.to) throw new Error("请选择有效的下单日期范围");
@@ -462,6 +597,7 @@ async function handle(message, sender) {
       store.lastScanProgress = {...invoices.scanProgress, running: false, purchaseComplete: Boolean(loaded.scan.complete),
         note: `采购订单 ${loaded.scan.count} 笔，${loaded.scan.complete ? "已读到实际最早记录" : "本次尚未确认全部读完"}；${invoices.scan.note}`};
       await save();
+      autoSync(a);
       return {...await state(), scanProgress: store.lastScanProgress, scan: {count: loaded.scan.count, note: store.lastScanProgress.note}};
     }
     case "SCAN": return scan(message);

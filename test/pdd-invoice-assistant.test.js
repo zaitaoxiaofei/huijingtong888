@@ -50,7 +50,7 @@ async function harness(saved, processResult) {
     scripting: {executeScript: async () => [{result: []}]}
   };
   const context = vm.createContext({chrome, crypto: webcrypto, URL, TextEncoder, Uint8Array, Date, Intl, structuredClone, console,
-    setTimeout: fn => setTimeout(fn, 0), clearTimeout});
+    setTimeout: (fn,ms) => setTimeout(fn, ms >= 12000 ? ms : 0), clearTimeout});
   vm.runInContext(core + "\n" + reader + "\n" + worker, context);
   await vm.runInContext("boot", context);
   const sender = {id: "test", url: "chrome-extension://test/dashboard.html"};
@@ -373,4 +373,77 @@ test("merchant chat navigation after an authorized submit recovers through invoi
   });
   const id=await bound(h);await h.send("START",{accountId:id,ids:[firstId],kind:"apply"});await h.done();
   assert.equal(processCalls,1);assert.equal(h.data().queue.state,"done");assert.equal(h.data().accounts[0].orders[0].status,"submitted");
+});
+
+test("mixed selection applies only pending rows, preserving issued and submitted states",async()=>{
+ const h=await harness();const id=await bound(h);
+ await h.eval(`store.accounts[0].orders.push({id:${JSON.stringify(secondId)},url:${JSON.stringify(orderUrl(secondId))},status:"issued",invoiceAmountCents:2270})`);
+ await h.send("START",{accountId:id,ids:[firstId,secondId],kind:"apply",concurrency:8});await h.done();
+ assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,1);assert.equal(h.data().accounts[0].orders.find(r=>r.id===secondId).status,'issued');assert.equal(h.data().queue.items.find(r=>r.id===secondId).status,'skipped');
+});
+test("parallel queue uses separate tabs, caps concurrency at eight and processes each order once",async()=>{
+ let current=0,peak=0;const calls=new Map();
+ const h=await harness(undefined,async(message,tabId)=>{
+  if(message.type!=='PDD_INVOICE_PROCESS')return {ok:true};
+  current++;peak=Math.max(peak,current);calls.set(message.orderId,(calls.get(message.orderId)||0)+1);
+  await new Promise(r=>setTimeout(r,5));current--;return {ok:true,status:'submitted',note:'已确认'};
+ });const id=await bound(h);const ids=Array.from({length:20},(_,i)=>'261118-'+String(123456789012345+i));
+ await h.eval(`store.accounts[0].orders=${JSON.stringify(ids.map(id=>({id,url:orderUrl(id),status:'pending'})))}`);
+ await h.send('START',{accountId:id,ids,kind:'apply',concurrency:1000});await h.done();
+ assert.ok(peak>1);assert.ok(peak<=8);assert.equal(calls.size,20);assert.ok([...calls.values()].every(n=>n===1));assert.equal(h.data().queue.tabIds.length,8);assert.equal(h.data().queue.state,'done');
+});
+test("parallel submission authorization rejects a different lane's tab",async()=>{
+ const h=await harness();const id=await bound(h);
+ await h.eval(`store.queue={id:"q",accountId:${JSON.stringify(id)},fingerprint:store.accounts[0].fingerprint,kind:"apply",state:"running",tabId:7,tabIds:[7,8],items:[{id:${JSON.stringify(firstId)},status:"processing",stage:"open",tabId:8}]}`);
+ const sender={id:'test',frameId:0,tab:{id:7},url:orderUrl(firstId)};
+ await assert.rejects(h.send('PDD_INVOICE_AUTHORIZE',{queueId:'q',orderId:firstId},sender),/任务已暂停或订单不匹配/);
+ assert.equal((await h.send('PDD_INVOICE_AUTHORIZE',{queueId:'q',orderId:firstId},{...sender,tab:{id:8}})).authorized,true);
+});
+
+test('a page that never replies times out visibly and pauses without replaying the order',async()=>{
+ const h=await harness(undefined,async()=>new Promise(()=>{}));const id=await bound(h);
+ await h.eval('globalThis.realTimer=setTimeout;setTimeout=(fn,ms)=>realTimer(fn,ms===45000?0:ms)');
+ await h.send('START',{accountId:id,ids:[firstId],kind:'apply'});await h.done();
+ assert.equal(h.data().queue.state,'paused');assert.match(h.data().queue.note,/45秒未返回/);assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,1);
+});
+test('lost reply after authorization is read back once and stays paused after timeout',async()=>{
+ let h;h=await harness(undefined,async(message,tabId)=>{
+  if(message.type==='PDD_INVOICE_PROCESS'){
+   await h.send('PDD_INVOICE_AUTHORIZE',{queueId:h.data().queue.id,orderId:firstId},{id:'test',frameId:0,tab:{id:tabId},url:C.invoiceUrl(firstId,'apply','123')});return new Promise(()=>{});
+  }
+  return {ok:true,status:'submitted',note:'商家处理中',facts:{appliedAt:'2026-11-18'}};
+ });const id=await bound(h);await h.eval('globalThis.realTimer=setTimeout;setTimeout=(fn,ms)=>realTimer(fn,ms===45000?0:ms)');
+ await h.send('START',{accountId:id,ids:[firstId],kind:'apply'});await h.done();
+ assert.equal(h.data().accounts[0].orders[0].status,'submitted');assert.equal(h.data().queue.state,'paused');assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,1);assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_INSPECT').length,1);
+});
+
+test('a stalled history scan keeps previously read records and reports an explicit timeout',async()=>{
+ const h=await harness();const id=await bound(h);
+ h.chrome.tabs.sendMessage=async(_id,m)=>m.type==='PDD_INVOICE_SCAN'?new Promise(()=>{}):{ok:true};
+ const pending=h.send('SCAN',{accountId:id,tabId:1,loadMore:true});const checked=assert.rejects(pending,/45秒无响应/);
+ for(let i=0;i<100&&!h.eval("Boolean(scanContext)");i++)await settle();
+ await h.eval('scanContext.heartbeatAt=Date.now()-46000;scanContext.progress={count:1,loaded:1,note:"已读取1笔"}');
+ await checked;assert.equal(h.data().accounts[0].orders.length,1);assert.equal(h.data().lastScanProgress.running,false);assert.equal(h.data().lastScanProgress.count,1);assert.match(h.data().lastScanProgress.note,/已保存已读记录/);
+});
+
+test('ERP bridge reuses the enterprise key, stores account names without login fingerprints and rejects another tenant',async()=>{
+ const h=await harness();const id=await bound(h);let tenant=10,revision=0;const uploads=[];
+ h.context.AbortController=AbortController;
+ h.context.OzonUnifiedConfig={get:async()=>({localPluginToken:'private-key',tenantId:String(tenant)})};
+ h.context.fetch=async(url,options)=>{
+  assert.equal(options.headers['x-local-plugin-token'],'private-key');let data;
+  if(url.endsWith('/companies'))data={tenant_id:tenant,companies:[{id:101,name:title.company,tax_number:title.taxId}]};
+  else {const body=JSON.parse(options.body);uploads.push(body);data={revision:++revision};}
+  return{ok:true,headers:{get:()=> 'application/json'},json:async()=>({success:true,data})};
+ };
+ await h.send('ERP_TITLE',{accountId:id,companyId:101});await h.send('ERP_SYNC',{accountId:id});
+ assert.ok(uploads.length>0);assert.equal(uploads.at(-1).name,'采购一号');assert.ok(!JSON.stringify(uploads).includes('fingerprint'));assert.ok(!JSON.stringify(await h.send('STATE')).includes('private-key'));
+ tenant=20;await assert.rejects(h.send('ERP_SYNC',{accountId:id}),/另一企业/);
+ assert.equal((await h.send('STATE')).accounts.length,0);
+});
+test('restoring cloud account metadata preserves names and records but never restores a PDD login',async()=>{
+ const h=await harness();h.context.AbortController=AbortController;
+ h.context.OzonUnifiedConfig={get:async()=>({localPluginToken:'private-key',tenantId:'10'})};
+ h.context.fetch=async(url)=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({success:true,data:url.endsWith('/companies')?{tenant_id:10,companies:[{id:101,name:title.company,tax_number:title.taxId}]}:{accounts:[{id:'cloud-account-1',name:'已保存的采购账号',companyId:101,revision:5,orders:[{id:firstId,status:'issued',url:orderUrl(firstId),invoiceAmountCents:18585}]}]}})});
+ const state=await h.send('ERP_RESTORE');assert.equal(state.accounts[0].name,'已保存的采购账号');assert.equal(state.accounts[0].orders[0].invoiceAmountCents,18585);assert.equal(state.accounts[0].connected,false);assert.equal(h.data().accounts[0].fingerprint,'');
 });
