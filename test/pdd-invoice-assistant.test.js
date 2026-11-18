@@ -447,3 +447,12 @@ test('restoring cloud account metadata preserves names and records but never res
  h.context.fetch=async(url)=>({ok:true,headers:{get:()=> 'application/json'},json:async()=>({success:true,data:url.endsWith('/companies')?{tenant_id:10,companies:[{id:101,name:title.company,tax_number:title.taxId}]}:{accounts:[{id:'cloud-account-1',name:'已保存的采购账号',companyId:101,revision:5,orders:[{id:firstId,status:'issued',url:orderUrl(firstId),invoiceAmountCents:18585}]}]}})});
  const state=await h.send('ERP_RESTORE');assert.equal(state.accounts[0].name,'已保存的采购账号');assert.equal(state.accounts[0].orders[0].invoiceAmountCents,18585);assert.equal(state.accounts[0].connected,false);assert.equal(h.data().accounts[0].fingerprint,'');
 });
+
+test('private OSS archival refuses older backends before starting a download or writing a file',async()=>{
+ const h=await harness();const id=await bound(h);h.context.AbortController=AbortController;
+ h.context.OzonUnifiedConfig={get:async()=>({localPluginToken:'private-key',tenantId:'10'})};
+ h.context.fetch=async(url)=>{assert.ok(url.endsWith('/companies'));return{ok:true,headers:{get:()=> 'application/json'},json:async()=>({success:true,data:{tenant_id:10,companies:[{id:101,name:title.company,tax_number:title.taxId}]}})};};
+ await h.eval('store.accounts[0].erpTenant=10;store.accounts[0].titleCompanyId=101');
+ await assert.rejects(h.send('START',{accountId:id,ids:[firstId],kind:'download',destination:'system'}),/尚未提供私有 OSS/);
+ assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,0);assert.equal(h.data().queue,null);
+});

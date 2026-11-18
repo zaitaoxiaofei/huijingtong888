@@ -25,7 +25,11 @@ async function harness(t){
   throw Error('Unexpected write '+sql);
  };
  let chain=Promise.resolve();const transaction=worker=>{const next=chain.then(()=>worker({query,execute}));chain=next.catch(()=>{});return next;};
- return {ledger:createPddInvoiceLedger({query,execute,transaction,root}),accounts,root};
+ const objects=new Map(),storage={
+  async put(tenant,id,file,bytes){const objectKey=`private/tenants/${tenant}/pdd-invoices/${id}/${file.sha256}.${file.ext}`;objects.set(objectKey,Buffer.from(bytes));return{driver:'oss',bucket:'test-private',region:'oss-cn-test',objectKey,versionId:'v1'};},
+  async read(tenant,id,file){assert.ok(file.storage.objectKey.startsWith(`private/tenants/${tenant}/pdd-invoices/${id}/`));return objects.get(file.storage.objectKey);}
+ };
+ return {ledger:createPddInvoiceLedger({query,execute,transaction,root,storage}),accounts,root,objects,storage};
 }
 test('enterprise key scopes company, account and ledger storage; client tenant IDs are ignored',async t=>{
  const {ledger}=await harness(t);assert.equal((await ledger.companies(A)).companies[0].id,101);
@@ -41,18 +45,36 @@ test('stale device revisions cannot overwrite newer cloud ledger or account name
  const remote=(await ledger.list(A)).accounts[0];assert.equal(remote.name,'保留的采购名称');assert.equal(remote.orders[0].status,'submitted');
 });
 test('system invoice files are deduplicated, tenant private, preserved by ledger updates and checksum verified',async t=>{
- const {ledger,root}=await harness(t);const input={accountId,name:'采购一号',companyId:101,revision:0,rows:[row]};await ledger.save(A,input);
+ const {ledger,objects}=await harness(t);const input={accountId,name:'采购一号',companyId:101,revision:0,rows:[row]};await ledger.save(A,input);
  const bytes=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),Buffer.from('invoice-test')]);
  const upload={accountId,orderId,base64:bytes.toString('base64')};const a=await ledger.fileSave(A,upload),b=await ledger.fileSave(A,upload);assert.equal(a.file.id,b.file.id);assert.equal(b.revision,2);
  await assert.rejects(ledger.fileRead(B,{accountId,fileId:a.file.id}),e=>e.statusCode===404);
  await assert.rejects(ledger.fileSave(A,{...upload,base64:Buffer.from('<svg>script</svg>').toString('base64')}),/仅支持/);
  assert.equal((await ledger.fileRead(A,{accountId,fileId:a.file.id})).base64,upload.base64);
  await ledger.save(A,{...input,revision:2,rows:[{...row,cloudFiles:[]}]});assert.equal((await ledger.list(A)).accounts[0].orders[0].cloudFiles[0].id,a.file.id);
- await fs.writeFile(path.join(root,'10',a.file.id+'.png'),'corrupt');await assert.rejects(ledger.fileRead(A,{accountId,fileId:a.file.id}),/校验失败/);
+ objects.set(a.file.storage.objectKey,Buffer.from('corrupt'));await assert.rejects(ledger.fileRead(A,{accountId,fileId:a.file.id}),/校验失败/);
 });
 test('only narrow invoice routes are added and row metadata cannot carry arbitrary URLs or credentials',()=>{
- for(const [method,route] of [['GET','companies'],['GET','accounts'],['POST','accounts'],['POST','files'],['GET','files']])assert.equal(isTenantScopedPluginRoute(method,['api','local-plugin','pdd-invoices',route]),true);
+ for(const [method,route] of [['GET','companies'],['GET','accounts'],['POST','accounts'],['POST','files'],['GET','files'],['POST','migrate-file']])assert.equal(isTenantScopedPluginRoute(method,['api','local-plugin','pdd-invoices',route]),true);
  assert.equal(isTenantScopedPluginRoute('DELETE',['api','local-plugin','pdd-invoices','accounts']),false);
  assert.equal(isTenantScopedPluginRoute('POST',['api','local-plugin','finance-center','companies']),false);
  const safe=sanitizePddRow({...row,applicationUrl:'https://evil.test',thumbnail:'javascript:alert(1)',fingerprint:'secret'});assert.equal(safe.applicationUrl,undefined);assert.equal(safe.thumbnail,undefined);assert.ok(!JSON.stringify(safe).includes('secret'));
+});
+
+test('legacy migration previews without writing, updates the index only after verification and retains the original',async t=>{
+ const {ledger,accounts,root,objects}=await harness(t);await ledger.save(A,{accountId,name:'采购一号',companyId:101,revision:0,rows:[row]});
+ const bytes=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),Buffer.from('legacy')]);
+ const {createHash,randomUUID}=await import('node:crypto');const file={id:randomUUID(),ext:'png',size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),name:'old.png'};
+ const stored=accounts.get(`10:${accountId}`),data=JSON.parse(stored.payload_json);data.orders[0].cloudFiles=[file];stored.payload_json=JSON.stringify(data);
+ await fs.mkdir(path.join(root,'10'));const filename=path.join(root,'10',file.id+'.png');await fs.writeFile(filename,bytes);
+ const input={accountId,orderId,fileId:file.id};const preview=await ledger.migrateFile(A,input);assert.equal(preview.needsMigration,true);assert.equal(objects.size,0);assert.equal(stored.revision,1);
+ const migrated=await ledger.migrateFile(A,{...input,apply:true});assert.equal(migrated.file.id,file.id);assert.equal(migrated.file.storage.driver,'oss');assert.equal(migrated.localRetained,true);assert.deepEqual(await fs.readFile(filename),bytes);
+ assert.equal((await ledger.migrateFile(A,{...input,apply:true})).alreadyMigrated,true);assert.equal(stored.revision,2);
+ await assert.rejects(ledger.migrateFile(B,{...input,apply:true}),e=>e.statusCode===404);
+});
+test('OSS failures leave ledger indexes untouched and never fall back to local disk',async t=>{
+ const {ledger,storage,root}=await harness(t);await ledger.save(A,{accountId,name:'采购一号',companyId:101,revision:0,rows:[row]});
+ storage.put=async()=>{throw Error('OSS unavailable');};const bytes=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),Buffer.from('invoice')]);
+ await assert.rejects(ledger.fileSave(A,{accountId,orderId,base64:bytes.toString('base64')}),/OSS unavailable/);
+ const cloud=(await ledger.list(A)).accounts[0];assert.equal(cloud.revision,1);assert.equal(cloud.orders[0].cloudFiles.length,0);assert.deepEqual(await fs.readdir(root),[]);
 });

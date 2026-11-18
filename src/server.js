@@ -1764,12 +1764,14 @@ async function handleLocalPluginRoute(req, res, parts) {
 
   if (parts[2] === "pdd-invoices") {
     const action = parts[3], url = new URL(req.url, `http://${req.headers.host}`);
+    req._sensitiveResponse = true;
     let data;
     if(req.method === "GET" && action === "companies") data = await pddInvoiceLedger.companies(principal);
     else if(req.method === "GET" && action === "accounts") data = await pddInvoiceLedger.list(principal);
     else if(req.method === "POST" && action === "accounts") data = await pddInvoiceLedger.save(principal,await readJson(req,{limitBytes:2*1024*1024}));
     else if(req.method === "POST" && action === "files") data = await pddInvoiceLedger.fileSave(principal,await readJson(req,{limitBytes:8*1024*1024}));
     else if(req.method === "GET" && action === "files") data = await pddInvoiceLedger.fileRead(principal,Object.fromEntries(url.searchParams));
+    else if(req.method === "POST" && action === "migrate-file") data = await pddInvoiceLedger.migrateFile(principal,await readJson(req,{limitBytes:32*1024}));
     else return localPluginJson(req,res,{success:false,error:"开票台账接口不存在"},404);
     return localPluginJson(req,res,{success:true,data});
   }
