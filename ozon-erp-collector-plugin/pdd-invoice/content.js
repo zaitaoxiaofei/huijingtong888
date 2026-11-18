@@ -44,7 +44,7 @@
       if (!url || !id || !/order|invoice/i.test(new URL(url).pathname)) continue;
       const container = getRowContainer(anchor, id);
       const value = clean(container.innerText);
-      const status = /已开票/.test(value) ? "issued" : /开票申请已提交|申请中|等待商家开票/.test(value) ? "submitted" : /待发货|退款成功|交易关闭|待付款|待支付|售后中/.test(value) ? "skipped" : "pending";
+      const status = /已开票/.test(value) ? "issued" : /开票申请已提交|申请中|等待商家开票/.test(value) ? "submitted" : /待发货|退款成功|交易关闭|交易已取消|订单已取消|拼单失败|拼单未成功|待付款|待支付|售后中/.test(value) ? "skipped" : "pending";
       const date = value.match(/(?:下单|订单|创建|成交)时间[：:\s]*(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
       const amount = value.match(/(?:实付|实付款|实际付款|付款金额|合计)[：:\s]*[¥￥]?\s*(\d+(?:\.\d{1,2})?)/)?.[1] || "";
       const lines = (container.innerText || "").split(/\n/).map(clean).filter(Boolean);
@@ -244,6 +244,8 @@
     // Wait briefly for React/mobile page hydration, without calling private APIs.
     for (let i = 0; i < 8 && text().length < 30; i++) await sleep(250);
     const value = text();
+    // Canceled purchase pages have no invoice store. Classify them before hydration.
+    if (/预计拼单成功后.{0,12}发货|退款成功|交易关闭|交易已取消|订单已取消|拼单失败|拼单未成功|售后处理中|退款处理中|等待付款/.test(value)) return {status: "skipped", note: "页面显示待发货、退款、取消、关闭、售后或待付款，已跳过"};
     const state = await invoiceState();
     if (state.orderId !== message.orderId) return {status: "review", note: "平台返回的发票订单号不匹配", block: true};
     if (message.kind === "refresh") return inspectOrder(message.orderId);

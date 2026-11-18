@@ -78,3 +78,11 @@ test('OSS failures leave ledger indexes untouched and never fall back to local d
  await assert.rejects(ledger.fileSave(A,{accountId,orderId,base64:bytes.toString('base64')}),/OSS unavailable/);
  const cloud=(await ledger.list(A)).accounts[0];assert.equal(cloud.revision,1);assert.equal(cloud.orders[0].cloudFiles.length,0);assert.deepEqual(await fs.readdir(root),[]);
 });
+
+test('large account payloads are read in primary key order without sorting JSON by update time', async()=>{
+ let sql;
+ const ledger=createPddInvoiceLedger({execute:async()=>{},query:async query=>{sql=query;return[];}});
+ await ledger.list(A);
+ assert.match(sql,/WHERE tenant_id=\? ORDER BY account_id$/);
+ assert.doesNotMatch(sql,/ORDER BY updated_at/);
+});

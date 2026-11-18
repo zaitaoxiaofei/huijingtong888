@@ -101,7 +101,7 @@ async function pageMessage(tabId, message) {
   while (Date.now() < expiresAt) {
     const tab = await deadline(chrome.tabs.get(tabId),10000,"读取处理窗口状态超时，请查看浏览器");
     if (!C.pddUrl(tab.url || "") && !C.pddUrl(tab.pendingUrl || "")) throw new Error("处理窗口已离开拼多多，请检查登录状态或验证码");
-    if (tab.status === "complete" && !tab.pendingUrl) {
+    if (tab.status === "complete" && !tab.pendingUrl && (!message.orderId || C.orderId(tab.url) === message.orderId) && (!message.history || new URL(tab.url).pathname === "/commercial_pre_orders.html") && (!message.purchase || new URL(tab.url).pathname === "/orders.html")) {
       try { return await pageReply(tabId, message); }
       catch (error) {
         // Retry only connection setup; never repeat a potentially executed command.
@@ -115,6 +115,19 @@ async function pageMessage(tabId, message) {
 async function visit(tabId, url) {
   if (!C.pddUrl(url)) throw new Error("订单链接不是受支持的拼多多买家页面");
   await deadline(chrome.tabs.update(tabId, {url, active: false}),12000,"打开订单页面超时，请查看处理窗口后继续");
+  // update() acknowledges a request before Chrome necessarily commits it.
+  const expected = new URL(url), expiresAt = Date.now() + 22000;
+  while (Date.now() < expiresAt) {
+    const tab = await deadline(chrome.tabs.get(tabId),10000,"读取处理窗口状态超时，请查看浏览器");
+    const current = C.pddUrl(tab.url || "");
+    if (current && !tab.pendingUrl && tab.status === "complete") {
+      const actual = new URL(current);
+      if (actual.pathname === expected.pathname && actual.searchParams.get("order_sn") === expected.searchParams.get("order_sn") && actual.searchParams.get("_t_timestamp") === expected.searchParams.get("_t_timestamp")) return;
+      if (/login/.test(actual.pathname)) throw new Error("拼多多要求重新登录，请在处理窗口完成登录后继续");
+    }
+    await new Promise(resolve => setTimeout(resolve,350));
+  }
+  throw new Error("订单页面未完成切换，未发送申请；请查看处理窗口后继续");
 }
 async function scan(message) {
   idleOnly();
@@ -487,7 +500,7 @@ async function handle(message, sender) {
       if (loaded.scan.note.startsWith("已停止")) return loaded;
       account(message.accountId).purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
       await save();
-      await chrome.tabs.update(purchase.id, {url: C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3", active: false});
+      await visit(purchase.id, C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3");
       const tab = purchase;
       const invoices = await scan({...message, tabId: tab.id, history: true, loadMore: true});
       const a = account(message.accountId);
