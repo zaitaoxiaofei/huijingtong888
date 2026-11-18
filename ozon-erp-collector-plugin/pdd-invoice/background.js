@@ -14,7 +14,7 @@ function readRenderedOrders() {
         const url = new URL(order.orderLinkUrl, location.origin);
         if (url.origin !== "https://mobile.pinduoduo.com" || url.searchParams.get("order_sn") !== order.orderSn) break;
         const prompt = String(order.orderStatusPrompt || "");
-        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭/.test(prompt);
+        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭|交易已取消|订单已取消|拼单失败|拼单未成功/.test(prompt);
         const time = Number(order.orderTime);
         const date = time > 0 ? new Intl.DateTimeFormat("sv-SE", {timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(time * 1000)) : "";
         rows.set(order.orderSn, {id: order.orderSn, url: url.href,
@@ -104,7 +104,7 @@ function readPurchasePage(offset = "") {
         if (!/^[\d-]{10,40}$/.test(id)) continue;
         const goods = Array.isArray(order.order_goods) ? order.order_goods : [];
         const prompt = String(order.order_status_prompt || "");
-        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭/.test(prompt);
+        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭|交易已取消|订单已取消|拼单失败|拼单未成功/.test(prompt);
         const time = Number(order.order_time);
         rows.push({id, url: `https://mobile.pinduoduo.com/order.html?order_sn=${encodeURIComponent(id)}`,
           product: goods.map(g => String(g.goods_name || "")).join("；").slice(0, 250),
@@ -221,7 +221,7 @@ async function pageMessage(tabId, message) {
   while (Date.now() < expiresAt) {
     const tab = await deadline(chrome.tabs.get(tabId),10000,"读取处理窗口状态超时，请查看浏览器");
     if (!C.pddUrl(tab.url || "") && !C.pddUrl(tab.pendingUrl || "")) throw new Error("处理窗口已离开拼多多，请检查登录状态或验证码");
-    if (tab.status === "complete" && !tab.pendingUrl) {
+    if (tab.status === "complete" && !tab.pendingUrl && (!message.orderId || C.orderId(tab.url) === message.orderId) && (!message.history || new URL(tab.url).pathname === "/commercial_pre_orders.html") && (!message.purchase || new URL(tab.url).pathname === "/orders.html")) {
       try { return await pageReply(tabId, message); }
       catch (error) {
         // Retry only connection setup; never repeat a potentially executed command.
@@ -235,6 +235,19 @@ async function pageMessage(tabId, message) {
 async function visit(tabId, url) {
   if (!C.pddUrl(url)) throw new Error("订单链接不是受支持的拼多多买家页面");
   await deadline(chrome.tabs.update(tabId, {url, active: false}),12000,"打开订单页面超时，请查看处理窗口后继续");
+  // update() acknowledges a request before Chrome necessarily commits it.
+  const expected = new URL(url), expiresAt = Date.now() + 22000;
+  while (Date.now() < expiresAt) {
+    const tab = await deadline(chrome.tabs.get(tabId),10000,"读取处理窗口状态超时，请查看浏览器");
+    const current = C.pddUrl(tab.url || "");
+    if (current && !tab.pendingUrl && tab.status === "complete") {
+      const actual = new URL(current);
+      if (actual.pathname === expected.pathname && actual.searchParams.get("order_sn") === expected.searchParams.get("order_sn") && actual.searchParams.get("_t_timestamp") === expected.searchParams.get("_t_timestamp")) return;
+      if (/login/.test(actual.pathname)) throw new Error("拼多多要求重新登录，请在处理窗口完成登录后继续");
+    }
+    await new Promise(resolve => setTimeout(resolve,350));
+  }
+  throw new Error("订单页面未完成切换，未发送申请；请查看处理窗口后继续");
 }
 async function scan(message) {
   idleOnly();
@@ -605,7 +618,7 @@ async function handle(message, sender) {
       if (loaded.scan.note.startsWith("已停止")) return loaded;
       account(message.accountId).purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
       await save();
-      await chrome.tabs.update(purchase.id, {url: C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3", active: false});
+      await visit(purchase.id, C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3");
       const tab = purchase;
       const invoices = await scan({...message, tabId: tab.id, history: true, loadMore: true});
       const a = account(message.accountId);

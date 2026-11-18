@@ -11,7 +11,7 @@ export function readRenderedOrders() {
         const url = new URL(order.orderLinkUrl, location.origin);
         if (url.origin !== "https://mobile.pinduoduo.com" || url.searchParams.get("order_sn") !== order.orderSn) break;
         const prompt = String(order.orderStatusPrompt || "");
-        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭/.test(prompt);
+        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭|交易已取消|订单已取消|拼单失败|拼单未成功/.test(prompt);
         const time = Number(order.orderTime);
         const date = time > 0 ? new Intl.DateTimeFormat("sv-SE", {timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit"}).format(new Date(time * 1000)) : "";
         rows.set(order.orderSn, {id: order.orderSn, url: url.href,
@@ -101,7 +101,7 @@ export function readPurchasePage(offset = "") {
         if (!/^[\d-]{10,40}$/.test(id)) continue;
         const goods = Array.isArray(order.order_goods) ? order.order_goods : [];
         const prompt = String(order.order_status_prompt || "");
-        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭/.test(prompt);
+        const skip = /待发货|待付款|待支付|退款|售后中|交易关闭|订单关闭|交易已取消|订单已取消|拼单失败|拼单未成功/.test(prompt);
         const time = Number(order.order_time);
         rows.push({id, url: `https://mobile.pinduoduo.com/order.html?order_sn=${encodeURIComponent(id)}`,
           product: goods.map(g => String(g.goods_name || "")).join("；").slice(0, 250),

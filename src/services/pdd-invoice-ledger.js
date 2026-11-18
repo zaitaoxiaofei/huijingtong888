@@ -50,7 +50,7 @@ export function createPddInvoiceLedger({query:q=query,execute:e=execute,transact
   });
  }
  return {companies,
- async list(p){const tenant=await scope(p);await schema();const rows=await q('SELECT account_id,revision,payload_json FROM pdd_invoice_accounts WHERE tenant_id=? ORDER BY updated_at DESC',[tenant]);return {tenant_id:tenant,accounts:rows.map(r=>({id:r.account_id,revision:Number(r.revision),...decode(r)}))};},
+ async list(p){const tenant=await scope(p);await schema();const rows=await q('SELECT account_id,revision,payload_json FROM pdd_invoice_accounts WHERE tenant_id=? ORDER BY account_id',[tenant]);return {tenant_id:tenant,accounts:rows.map(r=>({id:r.account_id,revision:Number(r.revision),...decode(r)}))};},
  async save(p,input){
   accountId(input.accountId);if(!Array.isArray(input.rows)||input.rows.length>100)fail('每次最多同步100笔订单');
   const normalized=input.rows.map(sanitizePddRow),name=text(input.name,30).trim();if(!name)fail('请填写采购账号备注名称');

@@ -456,3 +456,21 @@ test('private OSS archival refuses older backends before starting a download or 
  await assert.rejects(h.send('START',{accountId:id,ids:[firstId],kind:'download',destination:'system'}),/尚未提供私有 OSS/);
  assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,0);assert.equal(h.data().queue,null);
 });
+
+test('navigation waits for the committed invoice document, not the update acknowledgement', async () => {
+ const h=await harness();
+ const destination=C.invoiceUrl(secondId,'apply','123');let reads=0,sends=0;
+ h.chrome.tabs.update=async()=>({id:1,url:orderUrl(firstId),status:'complete'});
+ h.chrome.tabs.get=async()=>({id:1,url:++reads<4?orderUrl(firstId):destination,status:'complete'});
+ h.chrome.tabs.sendMessage=async(id,message)=>{sends++;assert.ok(reads>=4);assert.equal(message.orderId,secondId);return{ok:true,status:'submitted'};};
+ await h.eval(`visit(1,${JSON.stringify(destination)})`);
+ assert.ok(reads>=4);assert.equal(sends,0);
+ reads=0;
+ await h.eval(`pageMessage(1,{type:'PDD_INVOICE_PROCESS',orderId:${JSON.stringify(secondId)}})`);
+ assert.equal(sends,1);assert.ok(reads>=4);
+});
+
+ test("canceled and failed group purchases are excluded from invoice applications",async()=>{
+ const ctx=vm.createContext({location:new URL("https://mobile.pinduoduo.com/orders.html"),AbortController,setTimeout,clearTimeout,URL,Intl,Date,fetch:async()=>({ok:true,json:async()=>({orders:["交易已取消","拼单失败","拼单未成功"].map((prompt,i)=>({order_sn:String(2611171234567890+i),order_status_prompt:prompt,offset:"next"}))})})});
+ vm.runInContext(reader,ctx);const result=await ctx.readPurchasePage();assert.equal(result.rows.length,3);assert.ok(result.rows.every(r=>r.status==="skipped"));
+ });
