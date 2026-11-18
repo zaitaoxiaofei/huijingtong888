@@ -36,6 +36,7 @@ import { requestPublicImage, resolvePublicImageTarget } from "./http/public-imag
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
+import { pddInvoiceLedger } from "./services/pdd-invoice-ledger.js";
 import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
 import { pluginTokenTenantIdFromRequest, tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
@@ -1760,6 +1761,18 @@ async function handleLocalPluginRoute(req, res, parts) {
     return localPluginJson(req, res, { success: false, error: scopeError.error, code: scopeError.code }, scopeError.status);
   }
   const tenantId = principal.tenantKey;
+
+  if (parts[2] === "pdd-invoices") {
+    const action = parts[3], url = new URL(req.url, `http://${req.headers.host}`);
+    let data;
+    if(req.method === "GET" && action === "companies") data = await pddInvoiceLedger.companies(principal);
+    else if(req.method === "GET" && action === "accounts") data = await pddInvoiceLedger.list(principal);
+    else if(req.method === "POST" && action === "accounts") data = await pddInvoiceLedger.save(principal,await readJson(req,{limitBytes:2*1024*1024}));
+    else if(req.method === "POST" && action === "files") data = await pddInvoiceLedger.fileSave(principal,await readJson(req,{limitBytes:8*1024*1024}));
+    else if(req.method === "GET" && action === "files") data = await pddInvoiceLedger.fileRead(principal,Object.fromEntries(url.searchParams));
+    else return localPluginJson(req,res,{success:false,error:"开票台账接口不存在"},404);
+    return localPluginJson(req,res,{success:true,data});
+  }
 
   if (await handleCollectorBrowserPoolRoute(req, res, parts, principal)) return true;
 

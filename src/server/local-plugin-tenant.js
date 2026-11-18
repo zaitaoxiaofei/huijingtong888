@@ -10,6 +10,7 @@ const TENANT_SELLER_ANALYTICS_PLUGIN_ROUTES = new Set([
 export function isTenantScopedPluginRoute(method, parts = []) {
   const verb = String(method || "GET").toUpperCase();
   const route = parts.slice(2);
+  if (route[0] === "pdd-invoices" && route.length === 2) return verb === "GET" && ["companies","accounts","files"].includes(route[1]) || verb === "POST" && ["accounts","files"].includes(route[1]);
   if (route[0] === "plugin" && route[1] === "status" && verb === "GET") return true;
   if (route[0] === "collected-products") {
     return (route[1] === "sync" && verb === "POST")
