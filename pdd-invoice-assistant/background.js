@@ -155,6 +155,9 @@ async function erpRequest(path, payload) {
     if (body.code === "TENANT_PLUGIN_SCOPE_PENDING") throw new Error("当前后台尚未支持开票台账，请升级 ERP 后再同步；本地记录已保留");
     if (!response.ok || !body.success) throw new Error(body.error || `ERP 同步失败（${response.status}），请确认后台已更新`);
     return body.data;
+  } catch(error) {
+    if(error.name === "AbortError" || error.name === "TimeoutError") throw new Error("系统请求超时，本地记录已保留；附件归档可能已完成，请先从系统核对后再重试");
+    throw error;
   } finally { clearTimeout(timer); }
 }
 async function erpCompanies() {
@@ -163,7 +166,7 @@ async function erpCompanies() {
   let data;
   try{data=await erpRequest("companies");}catch(error){store.erpError=error.message;if(store.erp?.keyHash!==keyHash)store.erp=null;await save();throw error;}
   store.erpError="";
-  store.erp = {tenantId:data.tenant_id, companies:data.companies, checkedAt:Date.now(),keyHash};
+  store.erp = {tenantId:data.tenant_id, companies:data.companies, storagePolicy:data.storagePolicy||null, checkedAt:Date.now(),keyHash};
   await save(); return data;
 }
 function syncAccount(a) {
@@ -195,6 +198,12 @@ async function startQueue(message) {
   await assertSession(a);
   if (!message.ids?.length) throw new Error("请先勾选要处理的订单");
   if (!["apply", "download", "refresh"].includes(message.kind)) throw new Error("未知任务类型");
+  if (message.kind === "download" && message.destination === "system") {
+    const context = await erpCompanies();
+    if (context.tenant_id !== a.erpTenant) throw new Error("请切回该采购账号所属企业密钥");
+    if (context.storagePolicy?.version !== 2 || context.storagePolicy.files !== "private-oss") throw new Error("当前后台尚未提供私有 OSS 归档，请升级后台或选择本地下载；不会写入旧版服务器目录");
+    if (!context.storagePolicy.configured) throw new Error("私有 OSS 尚未配置，请先使用本地下载或联系管理员配置");
+  }
   if (store.queue?.items.some(item => item.status === "pending")) throw new Error("上次任务还有待处理订单，请先继续或结束上次任务");
   if (message.kind === "apply" && a.erpTenant && !a.titleCompanyId) throw new Error("请先在设置中选择 ERP 公司抬头，再申请发票");
   if (message.kind === "apply" && a.titleCompanyId) {
@@ -270,6 +279,7 @@ async function runQueue() {
                 if (!file) continue;
                 if (q.destination === "system") {
                   await syncAccount(a);
+                  if (store.erp?.storagePolicy?.version !== 2 || store.erp.storagePolicy.files !== "private-oss" || !store.erp.storagePolicy.configured) throw new Error("后台私有 OSS 能力已变化，系统归档已停止，本地记录保留");
                   if (!/^https:\/\/pfs\.yangkeduo\.com\/order_invoice\//.test(file.url)) throw new Error("此文件地址尚未适配系统归档，请选择本地下载");
                   const response = await fetch(file.url, {signal:AbortSignal.timeout(20000)});
                   const length=Number(response.headers.get("content-length"));
@@ -293,7 +303,7 @@ async function runQueue() {
               }
               result = item.downloads.length ? {
                 status: item.downloads.every(d => d.state === "complete") ? "downloaded" : item.downloads.some(d => d.state === "interrupted") ? "review" : "downloading",
-                note: q.destination === "system" ? "发票附件已归档至 ERP 系统，可在记录中下载" : "已交给 Chrome 下载，请查看下载记录确认文件", facts: result.facts} : {status: "review", note: "下载前任务已暂停，请核对后重新选择"};
+                note: q.destination === "system" ? "发票附件已保存到私有 OSS，台账索引已同步 ERP，可在记录中下载" : "已交给 Chrome 下载，请查看下载记录确认文件", facts: result.facts} : {status: "review", note: "下载前任务已暂停，请核对后重新选择"};
             }
             const allowed = ["pending", "submitted", "issued", "rejected", "skipped", "review", "downloading", "downloaded"];
             item.status = allowed.includes(result?.status) ? result.status : "review";
@@ -418,6 +428,12 @@ async function handle(message, sender) {
         const company=context.companies.find(c=>Number(c.id)===item.companyId);if(company)a.title={company:company.name,taxId:String(company.tax_number||"").trim().toUpperCase(),email:a.title?.email||""};
       }
       store.active ||= store.accounts[0]?.id || "";await save();return state();
+    }
+    case "ERP_MIGRATE_FILE": {
+      idleOnly();const a=account(message.accountId),context=await erpCompanies();if(a.erpTenant!==context.tenant_id)throw new Error("请切回该附件所属企业密钥");
+      const run=erpChain.catch(()=>{}).then(async()=>{const result=await erpRequest("migrate-file",{accountId:a.id,orderId:message.orderId,fileId:message.fileId,apply:message.apply===true});
+        if(result.file){const row=a.orders.find(r=>r.id===message.orderId);if(row)row.cloudFiles=(row.cloudFiles||[]).map(f=>f.id===result.file.id?result.file:f);a.erpRevision=result.revision;await save();}return result;});
+      erpChain=run;return await run;
     }
     case "ERP_FILE": {
       const a=account(message.accountId),context=await erpCompanies();if(a.erpTenant!==context.tenant_id)throw new Error("请切回该记录所属企业密钥");

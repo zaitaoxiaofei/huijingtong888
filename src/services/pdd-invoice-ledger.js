@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {randomUUID,createHash} from 'node:crypto';
 import {resolveUploadSubdir} from '../runtime-uploads.js';
+import {pddInvoiceStorage} from './pdd-invoice-storage.js';
 const query=async(...args)=>(await import('../mysql-pool.js')).mysqlQuery(...args);
 const execute=async(...args)=>(await import('../mysql-pool.js')).mysqlExecute(...args);
 const transaction=async worker=>(await import('../mysql-pool.js')).withMysqlTransaction(c=>worker({query:async(...args)=>(await c.execute(...args))[0],execute:async(...args)=>(await c.execute(...args))[0]}));
@@ -22,12 +23,32 @@ export function sanitizePddRow(input){
  row.history=(Array.isArray(input.history)?input.history:[]).slice(-100).map(h=>({at:Number(h.at)||0,source:h.source==='manual'?'manual':'platform',changes:(Array.isArray(h.changes)?h.changes:[]).slice(0,12).filter(c=>['status','appliedAt','issuedAt','invoiceAmountCents','applicationAmountCents','invoiceNo','rejectionReason','ledgerNote'].includes(c.field)).map(c=>({field:c.field,before:typeof c.before==='number'?c.before:text(c.before),after:typeof c.after==='number'?c.after:text(c.after)}))}));
  return row;
 }
-export function createPddInvoiceLedger({query:q=query,execute:e=execute,transaction:tx=transaction,root=resolveUploadSubdir('pdd-invoice-private')}={}){
+export function createPddInvoiceLedger({query:q=query,execute:e=execute,transaction:tx=transaction,root=resolveUploadSubdir('pdd-invoice-private'),storage=pddInvoiceStorage}={}){
  let ready;
  async function scope(p){const id=Number(p?.tenantId);if(!Number.isSafeInteger(id)||id<=0||!p.tokenId)fail('请配置有效的企业专属插件密钥',403);return id;}
  async function schema(){await(ready||=(e(PDD_INVOICE_SCHEMA).catch(err=>{ready=null;throw err;})));}
- async function companies(p){const tenant=await scope(p);return{tenant_id:tenant,companies:await q(`SELECT id,name,tax_number FROM finance_companies WHERE status='active' AND (tenant_id=? OR (?='default' AND tenant_id IS NULL)) ORDER BY id`,[tenant,p.tenantSlug])};}
+ async function companies(p){const tenant=await scope(p);return{tenant_id:tenant,storagePolicy:{version:2,files:'private-oss',...(storage.status?.()||{configured:false})},companies:await q(`SELECT id,name,tax_number FROM finance_companies WHERE status='active' AND (tenant_id=? OR (?='default' AND tenant_id IS NULL)) ORDER BY id`,[tenant,p.tenantSlug])};}
  async function locked(p,id,worker){const tenant=await scope(p);accountId(id);await schema();return tx(async c=>{const [row]=await c.query('SELECT revision,payload_json FROM pdd_invoice_accounts WHERE tenant_id=? AND account_id=? FOR UPDATE',[tenant,id]);return worker(c,tenant,row,decode(row));});}
+ async function readAccount(p,id){const tenant=await scope(p);accountId(id);await schema();const [row]=await q('SELECT revision,payload_json FROM pdd_invoice_accounts WHERE tenant_id=? AND account_id=?',[tenant,id]);if(!row)fail('采购账号尚未同步至当前企业',404);return{tenant,row,data:decode(row)};}
+ async function legacyBytes(tenant,file){
+  if(file.storage && file.storage.driver!=='legacy-local')fail('附件存储类型未知，请联系管理员核对',409);
+  if(!/^[a-f0-9-]{36}$/.test(file.id)||!['png','jpg','pdf'].includes(file.ext))fail('历史附件索引无效',409);
+  const filename=path.join(root,String(tenant),file.id+'.'+file.ext);
+  let stat;try{stat=await fs.stat(filename);}catch(error){if(error.code==='ENOENT')fail('历史附件未找到，请从备份恢复或重新归档；台账记录已保留',404);throw error;}
+  if(!stat.isFile()||stat.size!==file.size||stat.size>5*1024*1024)fail('历史附件大小校验失败',409);
+  const bytes=await fs.readFile(filename);if(createHash('sha256').update(bytes).digest('hex')!==file.sha256)fail('系统附件校验失败，请重新归档',409);return bytes;
+ }
+ async function commitFile(p,input,file,reference){
+  return locked(p,input.accountId,async(c,tenant,row,data)=>{
+   const order=data?.orders.find(r=>r.id===input.orderId);if(!order)fail('订单归属已变化，附件未关联；请重新同步台账',409);
+   const existing=order.cloudFiles?.find(f=>f.sha256===file.sha256);
+   if(existing?.storage?.driver==='oss'&&existing.storage.objectKey===reference.objectKey&&existing.storage.bucket===reference.bucket&&existing.storage.region===reference.region)return{file:existing,revision:Number(row.revision),duplicate:true};
+   const saved={...(existing||file),kind:'invoice',storage:reference};
+   order.cloudFiles=[...(order.cloudFiles||[]).filter(f=>f.id!==saved.id),saved];const revision=Number(row.revision)+1;
+   await c.execute('UPDATE pdd_invoice_accounts SET revision=?,payload_json=? WHERE tenant_id=? AND account_id=?',[revision,JSON.stringify(data),tenant,input.accountId]);
+   return{file:saved,revision};
+  });
+ }
  return {companies,
  async list(p){const tenant=await scope(p);await schema();const rows=await q('SELECT account_id,revision,payload_json FROM pdd_invoice_accounts WHERE tenant_id=? ORDER BY updated_at DESC',[tenant]);return {tenant_id:tenant,accounts:rows.map(r=>({id:r.account_id,revision:Number(r.revision),...decode(r)}))};},
  async save(p,input){
@@ -54,18 +75,31 @@ export function createPddInvoiceLedger({query:q=query,execute:e=execute,transact
   const ext=bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))?'png':bytes[0]===255&&bytes[1]===216?'jpg':bytes.subarray(0,5).toString()==='%PDF-'?'pdf':'';
   if(!ext)fail('仅支持平台发票 PNG、JPEG 图片和 PDF 文件');
   const sha256=createHash('sha256').update(bytes).digest('hex');
-  return locked(p,input.accountId,async(c,tenant,row,data)=>{
-   const order=data?.orders.find(r=>r.id===input.orderId);if(!order)fail('请先将订单台账同步到系统',404);
-   const existing=order.cloudFiles?.find(f=>f.sha256===sha256);if(existing)return{file:existing,revision:Number(row.revision)};
-   const file={id:randomUUID(),ext,sha256,size:bytes.length,createdAt:Date.now(),name:`${order.id}${ext==='pdf'?'_官方文件':'_平台图片'}.${ext}`};
-   const directory=path.join(root,String(tenant));await fs.mkdir(directory,{recursive:true,mode:0o700});const filename=path.join(directory,file.id+'.'+ext);
-   await fs.writeFile(filename,bytes,{flag:'wx',mode:0o600});
-   order.cloudFiles=[...(order.cloudFiles||[]),file];const revision=Number(row.revision)+1;
-   try{await c.execute('UPDATE pdd_invoice_accounts SET revision=?,payload_json=? WHERE tenant_id=? AND account_id=?',[revision,JSON.stringify(data),tenant,input.accountId]);}catch(err){await fs.unlink(filename).catch(()=>{});throw err;}
-   return{file,revision};
-  });
+  const {tenant,data}=await readAccount(p,input.accountId),order=data.orders.find(r=>r.id===input.orderId);
+  if(!order)fail('请先将订单台账同步到系统',404);
+  const file={id:randomUUID(),ext,sha256,size:bytes.length,createdAt:Date.now(),name:`${order.id}${ext==='pdf'?'_官方文件':'_平台图片'}.${ext}`};
+  // Upload and verify before taking the SQL lock. Never commit an unverified object reference.
+  const reference=await storage.put(tenant,input.accountId,file,bytes);
+  return commitFile(p,input,file,reference);
  },
- async fileRead(p,input){const tenant=await scope(p);accountId(input.accountId);if(!/^[a-f0-9-]{36}$/.test(input.fileId||''))fail('附件不存在',404);await schema();const [row]=await q('SELECT payload_json FROM pdd_invoice_accounts WHERE tenant_id=? AND account_id=?',[tenant,input.accountId]);const file=decode(row)?.orders.flatMap(r=>r.cloudFiles||[]).find(f=>f.id===input.fileId);if(!file)fail('附件不存在或不属于当前企业',404);const bytes=await fs.readFile(path.join(root,String(tenant),file.id+'.'+file.ext));if(createHash('sha256').update(bytes).digest('hex')!==file.sha256)fail('系统附件校验失败，请重新归档',409);return{...file,base64:bytes.toString('base64')};}
+ async fileRead(p,input){
+  if(!/^[a-f0-9-]{36}$/.test(input.fileId||''))fail('附件不存在',404);
+  const {tenant,data}=await readAccount(p,input.accountId),file=data.orders.flatMap(r=>r.cloudFiles||[]).find(f=>f.id===input.fileId);
+  if(!file)fail('附件不存在或不属于当前企业',404);
+  const bytes=file.storage?.driver==='oss'?await storage.read(tenant,input.accountId,file):await legacyBytes(tenant,file);
+  if(bytes.length!==file.size||createHash('sha256').update(bytes).digest('hex')!==file.sha256)fail('系统附件校验失败，请重新归档',409);
+  return{...file,storageState:file.storage?.driver==='oss'?'private-oss':'legacy-local',needsMigration:file.storage?.driver!=='oss',base64:bytes.toString('base64')};
+ },
+ async migrateFile(p,input){
+  const {tenant,row,data}=await readAccount(p,input.accountId),order=data.orders.find(r=>r.id===input.orderId),file=order?.cloudFiles?.find(f=>f.id===input.fileId);
+  if(!file)fail('附件不存在或不属于当前企业',404);
+  if(file.storage?.driver==='oss'){await storage.read(tenant,input.accountId,file);return{file,revision:Number(row.revision),alreadyMigrated:true};}
+  const bytes=await legacyBytes(tenant,file);
+  if(input.apply!==true)return{fileId:file.id,orderId:order.id,bytes:file.size,sha256:file.sha256,needsMigration:true,localRetained:true};
+  const reference=await storage.put(tenant,input.accountId,file,bytes);
+  return{...await commitFile(p,input,file,reference),localRetained:true};
+ }
+
  };
 }
 export const pddInvoiceLedger=createPddInvoiceLedger();

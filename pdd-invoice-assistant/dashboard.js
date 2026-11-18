@@ -64,6 +64,7 @@ function render() {
   companyPicker.replaceChildren();const placeholder=node("option","","请选择 ERP 开票公司");placeholder.value="";companyPicker.append(placeholder);
   for(const c of model.erp?.companies||[]){const o=node("option","",`${c.name} · ${c.tax_number||"税号未设置"}`);o.value=c.id;companyPicker.append(o);}companyPicker.value=companyValue;
   $("cloudStatus").textContent=a?.erpError || model.erpError || (a?.erpSyncedAt ? `账号备注与台账已同步：${C.beijing(a.erpSyncedAt)}${a.erpUploading?" · 正在更新系统记录":""}` : "使用统一插件已绑定的企业密钥读取公司。选择抬头后自动同步台账，也可点击顶部同步系统。");
+  $("storageStatus").textContent=model.erp?.storagePolicy?.version===2 ? (model.erp.storagePolicy.configured ? "文件位置：私有 OSS；台账及附件索引：MySQL。" : "私有 OSS 尚未配置，系统文件归档不可用，可先本地下载。") : "后台尚未提供私有 OSS 归档能力，请升级后台后再保存系统附件；本地下载不受影响。";
   $("cloudSync").disabled=!a || locked || a.erpUploading;
   companyPicker.disabled=!a || model.queue?.state === "running";
   const scan = model.scanProgress;
@@ -202,7 +203,14 @@ function renderRows() {
     const resolve = button("编辑台账 / 历史", async () => openLedger(row));
     resolve.disabled = model.queue?.state === "running";
     actionBox.append(resolve);
-    for(const file of row.cloudFiles||[])actionBox.append(button(`系统附件 · ${file.ext.toUpperCase()}`,async()=>request("ERP_FILE",{accountId:row.accountId,fileId:file.id}),"",true));
+    for(const file of row.cloudFiles||[]){
+      actionBox.append(button(`${file.storage?.driver === "oss" ? "OSS 附件" : "旧系统附件"} · ${file.ext.toUpperCase()}`,async()=>request("ERP_FILE",{accountId:row.accountId,fileId:file.id}),"",true));
+      if(file.storage?.driver !== "oss")actionBox.append(button("迁移此附件到私有 OSS",async()=>{
+        await request("ERP_MIGRATE_FILE",{accountId:row.accountId,orderId:row.id,fileId:file.id,apply:false});
+        if(!confirm("已校验旧系统附件。将此文件迁移到私有 OSS 并更新索引？本地原件不会删除。"))return;
+        await request("ERP_MIGRATE_FILE",{accountId:row.accountId,orderId:row.id,fileId:file.id,apply:true});setModel(await request("STATE"));notice("附件已迁移到私有 OSS，本地原件仍保留");
+      }));
+    }
     actions.append(actionBox);
     tr.append(checkCell, product, shop, amount, status, dates, note, actions);
     $("rows").append(tr);
@@ -257,7 +265,7 @@ async function confirmBatch(kind, destination = "local") {
   $("confirmTitle").textContent = kind === "apply" ? `申请 ${ids.length} 笔订单的发票` : `下载 ${ids.length} 笔订单的票据`;
   $("confirmBody").textContent = `采购账号：${a.name}。只处理本次可执行的 ${ids.length} 笔${skipped ? `，其余 ${skipped} 笔保留原状态并跳过` : ""}。`;
   $("confirmDetails").textContent = title ? `申请金额合计：¥ ${C.money(rows().filter(r => ids.includes(r.id)).reduce((n,r) => n + (r.applicationAmountCents ?? C.cents(r.amount) ?? 0), 0))}（仅已知金额）\n抬头：${title.company}\n税号：${title.taxId}\n备查邮箱：${title.email || "未设置"}\n类型：企业普通发票` : "文件将保存到 Chrome 下载目录下的「采购发票 / 账号备注」文件夹，按订单号命名。平台仅展示图片时，下载的是预览图；PDF 原件请在发票详情领取。";
-  if(destination === "system") $("confirmDetails").textContent="附件将归档至当前 ERP 企业，单份上限5MB；平台图片会标明图片，不会冒充 PDF。";
+  if(destination === "system") $("confirmDetails").textContent="发票原文件将保存到当前企业的私有 OSS，MySQL 仅保存台账和附件索引，单份上限5MB。OSS 不可用时明确报错；平台图片不会冒充 PDF。";
   $("confirmHint").textContent = kind === "apply" ? "已申请、已开票和待核对订单会跳过。平台表单未提供邮箱字段时，不随申请提交邮箱；原件领取时可另填。" : "仅保存平台提供的票据文件或发票预览图，不截取网页。";
   const dialog = $("confirmDialog");
   dialog.returnValue = "cancel";
