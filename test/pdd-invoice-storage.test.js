@@ -10,7 +10,7 @@ function harness(){
   async head(key){if(!objects.has(key))throw Object.assign(Error('missing'),{status:404});return{res:{headers:{'content-length':String(objects.get(key).length),'x-oss-version-id':'v1'}}};},
   async put(key,body,options){puts.push({key,options});objects.set(key,Buffer.from(body));},
   async get(key){gets.push(key);return{content:objects.get(key),res:{headers:{'x-oss-version-id':'v1'}}};},
-  async getACL(){return{acl};},async delete(key){objects.delete(key);}
+  async getACL(){if(acl==='denied')throw Object.assign(Error('ACL metadata denied'),{status:403});return{acl};},async delete(key){objects.delete(key);}
  };
  const request=async(url,options)=>{requests.push({url,options});return{status:anonymous,ok:anonymous===200,headers:new Headers({'x-oss-request-id':'probe-id'}),body:{cancel:async()=>{}}};};
  return{storage:createPddInvoiceStorage({env,client,request}),objects,puts,requests,gets,setAcl:v=>acl=v,setAnonymous:v=>anonymous=v};
@@ -45,4 +45,9 @@ test('backup manifest records private object references without copying credenti
 test('provider request errors do not leak credentials, request headers or file content',async()=>{
  const secret='must-not-appear';const storage=createPddInvoiceStorage({env,client:{head:async()=>{throw Object.assign(Error(secret),{code:'AccessDenied',request:{authorization:secret,body:secret}});}}});
  await assert.rejects(storage.put(10,'account-001',file,bytes),error=>!JSON.stringify(error).includes(secret)&&!error.message.includes(secret)&&error.message.includes('AccessDenied'));
+});
+
+test('least-privilege credentials can verify privacy by unsigned denial, but cannot leave a new public object',async()=>{
+ const h=harness();h.setAcl('denied');await h.storage.put(10,'account-001',file,bytes);assert.equal(h.objects.size,1);
+ const leak=harness();leak.setAcl('denied');leak.setAnonymous(200);await assert.rejects(leak.storage.put(10,'account-001',file,bytes),/匿名访问/);assert.equal(leak.objects.size,0);
 });

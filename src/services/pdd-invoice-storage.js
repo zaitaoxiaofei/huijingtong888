@@ -1,6 +1,6 @@
 import OSS from 'ali-oss';
 import {createHash} from 'node:crypto';
-import {ossStorageConfig,verifyPrivateOssObject} from './object-storage.js';
+import {ossStorageConfig} from './object-storage.js';
 const MAX_BYTES=5*1024*1024;
 const fail=(message,statusCode=409)=>{throw Object.assign(new Error(message),{statusCode,pddStorageError:true});};
 function namespace(tenantId,accountId){
@@ -15,8 +15,8 @@ export function createPddInvoiceStorage({env=process.env,client=null,request=fet
   return {config,oss};
  }
  async function privateObject(oss,key,config){
-  let verified;try{verified=await verifyPrivateOssObject(oss,key,{storage:config,request});}catch(error){if(error.message === "Private OSS object ACL verification failed")throw Object.assign(new Error("OSS 私有权限校验失败，已停止归档"),{code:"PRIVATE_OBJECT_PUBLIC",statusCode:409,pddStorageError:true});throw error;}
-  if(verified.method==='unsigned_origin_read_denied')return;
+  try{const result=await oss.getACL(key);if(result.acl!=='private')throw Object.assign(new Error("OSS 私有权限校验失败，已停止归档"),{code:"PRIVATE_OBJECT_PUBLIC",statusCode:409,pddStorageError:true});}
+  catch(error){if(Number(error.status||error.statusCode)!==403)throw error;}
   const url=`https://${config.bucket}.${config.region}.aliyuncs.com/${key.split('/').map(encodeURIComponent).join('/')}`;
   const response=await request(url,{method:'GET',headers:{Range:'bytes=0-0','Cache-Control':'no-cache'},redirect:'error',signal:AbortSignal.timeout(10000)});
   try{if(response.status!==403||!response.headers.get('x-oss-request-id'))throw Object.assign(new Error('附件的 OSS 匿名访问未被拒绝，已停止系统归档，请检查私有存储权限'),{code:response.ok?'PRIVATE_OBJECT_PUBLIC':'PRIVATE_OBJECT_UNVERIFIED',statusCode:409,pddStorageError:true});}finally{await response.body?.cancel();}
