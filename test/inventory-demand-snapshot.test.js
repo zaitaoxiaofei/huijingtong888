@@ -61,3 +61,18 @@ test('a queued enterprise cooldown starts when its work actually starts',async()
   await read(2);await read(3);f.advance(60001);release();await waitForInventoryDemandJobs();
   f.change();const before=f.calls();assert.equal((await read(3)).snapshot.refreshing,false);assert.equal(f.calls(),before);
 });
+
+test('snapshot polling observes completed work and never starts another calculation',async()=>{
+  const f=fixture(),read=f.reader();
+  assert.equal((await read(2,{poll:true})).snapshot.status,'stale');
+  assert.equal(f.calls(),0);
+  await read(2);
+  await waitForInventoryDemandJobs();
+  f.advance(360000);
+  f.change();
+  const result=await read(2,{poll:true,fresh:true});
+  assert.equal(result.snapshot.stale,true);
+  assert.equal(result.snapshot.refreshing,false);
+  assert.equal(result.rows[0].product_id,20);
+  assert.equal(f.calls(),1);
+});

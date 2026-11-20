@@ -88,7 +88,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       const base=params.view==='workspace'?await workflow.workspaceProducts(params,session.tenant.id):await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
       const raw=Array.isArray(base)?base:base.rows||[];
       const ids=[...new Set(raw.map(r=>Number(r.product_id)).filter(id=>id>0))];
-      const cached=params.view==='workspace'?await workflow.workspaceSnapshot(session.tenant.id,{fresh:params.refresh==='1',productIds:ids}):null;
+      const cached=params.view==='workspace'?await workflow.workspaceSnapshot(session.tenant.id,{fresh:params.refresh==='1',poll:params.poll_snapshot==='1',productIds:ids}):null;
       const states=cached?.rows||[];
       if(params.view!=='workspace')for(let i=0;i<ids.length;i+=40)states.push(...await workflow.batch(ids.slice(i,i+40),session.tenant.id,{fresh:params.refresh==='1'}));
       const byId=new Map(states.map(state=>[state.product_id,state]));

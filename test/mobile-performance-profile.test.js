@@ -24,7 +24,7 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(bindings.trim().startsWith('{'))return `const ${bindings.replace(/\bas\b/g,':')}=require(${JSON.stringify(id)});`;
   return `const ${bindings.trim()}=require(${JSON.stringify(id)});`;
  }).replace(/export\s+default/,'module.exports.default =');
- const h={scope:'A',calls:[],timers:new Set(),mounted:[],auth,history:{state:{},replaceState(){}}};
+ const h={scope:'A',calls:[],timers:new Set(),timerCallbacks:new Map(),mounted:[],auth,history:{state:{},replaceState(){}}};
  const api={get:async(path,options)=>{h.calls.push({path,options});return get(path,options);},post:async(path,body)=>{h.calls.push({path,body,method:'POST'});return post(path,body);}};
  const deps={...vue,onMounted:fn=>h.mounted.push(fn),onBeforeUnmount:()=>{}};
  function require(id){
@@ -53,7 +53,7 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
  }
  const module={exports:{}};
  vm.runInNewContext(code,{module,exports:module.exports,require,AbortController,DOMException,URLSearchParams,Date,console,crypto,
- window:{history:h.history,addEventListener(){},removeEventListener(){},setTimeout(fn,ms){const id=setTimeout(fn,ms);h.timers.add(id);return id;},clearTimeout(id){h.timers.delete(id);clearTimeout(id);}},
+ window:{history:h.history,addEventListener(){},removeEventListener(){},setTimeout(fn,ms){const id=setTimeout(fn,ms);h.timers.add(id);h.timerCallbacks.set(id,fn);return id;},clearTimeout(id){h.timers.delete(id);h.timerCallbacks.delete(id);clearTimeout(id);}},
  clearTimeout(id){h.timers.delete(id);clearTimeout(id);},document:{querySelector(){return{scrollTo(){},scrollTop:0};}}});
  h.definition=module.exports.default;return h;
 }
@@ -65,14 +65,31 @@ test('mobile order packing requests only page rows and ignores stale enterprise 
  const pending=sut.loadOrders({nextPage:3});h.scope='B';sut.clearScope();resolveOld({rows:[{id:99}],total:100});await pending;
  assert.equal(sut.rows.value.length,0);assert.equal(h.timers.size,0);
 });
-test('procurement opens a lightweight product page, keeps structured filters, and never starts a demand polling loop',async()=>{
- const h=await component('components/mobile/MobileWorkQueue.vue',{get:async path=>path.includes('/alerts')?{rows:[],total:null,snapshot:{refreshing:true}}:{rows:[{id:7,name:'Fixture inventory'}],total:1}});
+test('procurement keeps registration available and reads the completed snapshot without rebuilding it',async()=>{
+ const row={product_id:7,product_name:'Fixture inventory',workflow:{supply_plan:{required_purchase:4}}};
+ const h=await component('components/mobile/MobileWorkQueue.vue',{get:async path=>{
+  if(!path.includes('/alerts'))return {rows:[{id:7,name:'Fixture inventory'}],total:1};
+  if(path.includes('poll_snapshot=1'))return {rows:[{...row,workflow:{supply_plan:{required_purchase:2}}}],total:1,snapshot:{available:true,stale:false,refreshing:false}};
+  return {rows:[row],total:1,snapshot:{available:true,stale:true,refreshing:true}};
+ }});
  const sut=h.definition.setup({warehouse:false},{expose(){}});
  await sut.load();assert.equal(sut.tab.value,'register');assert.equal(h.calls.length,1);assert.match(h.calls[0].path,/includeStock=0/);assert.ok(!h.calls[0].path.includes('/alerts'));
  sut.filters.searchMode='inventory_id';sut.filters.query='1-14';sut.filters.inventoryCategory='钥匙壳';sut.filters.vehicleModel=['J6'];sut.pageSize.value=50;
  const p=sut.filtersUrl();assert.equal(p.get('pageSize'),'50');assert.equal(p.get('searchMode'),'inventory_id');assert.equal(p.get('inventoryCategory'),'钥匙壳');assert.equal(p.get('vehicleModel'),'J6');
  sut.tab.value='required';await vue.nextTick();await new Promise(setImmediate);
- assert.equal(h.calls.filter(c=>c.path.includes('/alerts')).length,1);assert.match(h.calls.at(-1).path,/snapshot_only=1/);assert.equal(h.timers.size,0);sut.reset();
+ assert.equal(h.calls.filter(c=>c.path.includes('/alerts')).length,1);assert.match(h.calls.at(-1).path,/snapshot_only=1/);
+ sut.openPurchase(sut.rows.value[0]);
+ assert.equal(sut.purchase.visible,true);
+ assert.equal(sut.purchase.rows[0].manualPurchaseQuantity,true);
+ assert.equal(h.timers.size,1);
+ const [timer,runPoll]=h.timerCallbacks.entries().next().value;
+ clearTimeout(timer);h.timers.delete(timer);h.timerCallbacks.delete(timer);
+ await runPoll();
+ assert.match(h.calls.at(-1).path,/poll_snapshot=1/);
+ assert.doesNotMatch(h.calls.at(-1).path,/refresh=1/);
+ assert.equal(sut.rows.value[0].workflow.supply_plan.required_purchase,2);
+ assert.equal(sut.purchase.rows[0].workflow.supply_plan.required_purchase,4);
+ assert.equal(h.timers.size,0);sut.reset();
 });
 test('my account starts with an account overview and opens separate profile/password editors',async()=>{
  const h=await component('views/mobile/MobileAccountView.vue',{inlineTemplate:true});

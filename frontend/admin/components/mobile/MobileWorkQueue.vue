@@ -21,7 +21,8 @@ const MobilePurchaseBatchDialog=defineAsyncComponent(()=>import('./MobilePurchas
 const props=defineProps({warehouse:Boolean}),auth=useAuthStore();
 const canPurchase=computed(()=>hasPermission(auth.user,'procurement')),canReceive=computed(()=>hasPermission(auth.user,'packing')),canConfirmArrival=computed(()=>canPurchase.value||canReceive.value),warehouseMode=computed(()=>props.warehouse||!canPurchase.value&&canReceive.value);
 const rows=ref([]),total=ref(null),page=ref(1),pageSize=ref(20),tab=ref(warehouseMode.value?'pending':'register'),queueStatus=ref('pending'),purchaseRange=reactive({start:'',end:''}),filters=reactive({...inventorySearchDefaults(),searchMode:'inventory_id',query:'',inventoryType:'all'}),loading=ref(false),error=ref(''),snapshot=ref({}),busy=ref(false);
-const purchase=reactive({visible:false,rows:[]}),receive=reactive({visible:false,id:0,batch:0,name:''}),edit=reactive({row:null,tracking:'',courier:''});let generation=0,disposed=false,controller=null;
+const purchase=reactive({visible:false,rows:[]}),receive=reactive({visible:false,id:0,batch:0,name:''}),edit=reactive({row:null,tracking:'',courier:''});let generation=0,disposed=false,controller=null,demandPollTimer=null;
+const demandWaitExceeded=ref(false);
 const stocktake=reactive({visible:false,product:{}}),stockFeedback=ref(''),stockError=ref(false);const stockUpdates=new Map();
 const canWrite=computed(()=>hasPermission(auth.user,'inventory.write'));
 const tabs=computed(()=>warehouseMode.value?[['pending','采购收货']]:[['register','登记采购'],['required','必须采购'],['advisory','保障补货'],['pending','采购收货'],['history','采购记录']]);
@@ -50,7 +51,31 @@ const days=value=>{if(!value)return null;const n=(Date.now()-new Date(/[TZ]/.tes
 function photos(row){let values=row.receipt_images_json;try{if(typeof values==='string')values=JSON.parse(values);}catch{values=[];}return [...new Set([...(Array.isArray(values)?values:[]),...(String(row.purchase_note||'').match(/\/uploads\/team-attachments\/[^\s，]+/g)||[])])].filter(v=>String(v).startsWith('/uploads/team-attachments/')).slice(0,12).map(withImageToken);}
 function number(value){return value==null?'待计算':`${Number(value)} 件`;}
 function filtersUrl(){return appendInventorySearch(new URLSearchParams({page:String(page.value),pageSize:String(pageSize.value),query:filters.query.trim(),inventoryType:filters.inventoryType}),filters);}
+function applyDemandPage(result){
+ const raw=result.rows||[];
+ snapshot.value=result.snapshot||{};
+ rows.value=applyStockUpdates(raw,snapshot.value);
+ total.value=result.total==null?null:Math.max(0,Number(result.total)-raw.length+rows.value.length);
+ if(result.page!=null)page.value=Number(result.page);
+}
+function scheduleDemandPoll(endpoint,token,scope,request,remaining=8){
+ if(!snapshot.value.refreshing)return;
+ if(!remaining){demandWaitExceeded.value=true;return;}
+ demandPollTimer=window.setTimeout(async()=>{
+  if(disposed||token!==generation||scope!==currentApiCacheScope()||request.signal.aborted)return;
+  const timeout=window.setTimeout(()=>request.abort(),15000);
+  try{
+   const result=await apiClient.get(endpoint,{noCache:true,signal:request.signal});
+   if(disposed||token!==generation||scope!==currentApiCacheScope()||request.signal.aborted)return;
+   applyDemandPage(result);
+   scheduleDemandPoll(endpoint,token,scope,request,remaining-1);
+  }catch{
+   if(!disposed&&token===generation&&scope===currentApiCacheScope())demandWaitExceeded.value=true;
+  }finally{window.clearTimeout(timeout);}
+ },8000);
+}
 async function load(reset=false,fresh=false,day=reset?'':selectedDay.value){
+ window.clearTimeout(demandPollTimer);demandWaitExceeded.value=false;
  selected.value=[];if(reset)page.value=1;controller?.abort();controller=new AbortController();const request=controller,token=++generation,scope=currentApiCacheScope();loading.value=true;error.value='';
  const timeout=window.setTimeout(()=>request.abort(),15000);
  try {
@@ -63,18 +88,30 @@ async function load(reset=false,fresh=false,day=reset?'':selectedDay.value){
   else if(demand.value){p.set('view','workspace');p.set('compact','1');p.set('task',tab.value);p.set(fresh?'refresh':'snapshot_only','1');endpoint='/api/inventory-workflow/alerts?'+p;}
   else{p.set('status',tab.value==='history'?'all':tab.value==='received'?'received':queueStatus.value);if(tab.value==='history')p.set('recent','1');else if(pending.value){p.set('day_mode','pending');if(day)p.set('purchase_day',day);}endpoint='/api/inventory-workflow/purchase-arrivals?'+p;}
   const r=await apiClient.get(endpoint,{noCache:true,signal:request.signal});if(disposed||token!==generation||scope!==currentApiCacheScope())return;
+  if(demand.value){
+   applyDemandPage(r);
+   const pollParams=new URLSearchParams(endpoint.split('?')[1]);
+   pollParams.delete('refresh');pollParams.set('poll_snapshot','1');
+   scheduleDemandPoll('/api/inventory-workflow/alerts?'+pollParams,token,scope,request);
+   document.querySelector('.mobile-work-queue .mobile-list-scroll')?.scrollTo(0,0);
+   return;
+  }
   const raw=tab.value==='register'?(r.rows||[]).map(row=>({...row,product_id:row.id,product_name:row.name})):(r.rows||[]);snapshot.value=r.snapshot||{};rows.value=applyStockUpdates(raw,snapshot.value);total.value=r.total==null?null:Math.max(0,Number(r.total)-raw.length+rows.value.length);
   purchaseDays.value=pending.value?r.days||[]:[];selectedDay.value=pending.value?r.selected_day??day:'';if(r.page!=null)page.value=Number(r.page);
   document.querySelector('.mobile-work-queue .mobile-list-scroll')?.scrollTo(0,0);
  }catch(e){if(token===generation&&scope===currentApiCacheScope())error.value=e.name==='AbortError'?'读取超时，请点击查询重试':e.message;}
  finally{window.clearTimeout(timeout);if(token===generation)loading.value=false;}
 }
-function changed(){return load();}
+function changed(){return load(false,demand.value);}
 function resetFilters(){Object.assign(filters,inventorySearchDefaults(),{searchMode:'inventory_id',query:'',inventoryType:'all'});Object.assign(purchaseRange,{start:'',end:''});const statusChanged=queueStatus.value!=='pending';queueStatus.value='pending';if(!pending.value||!statusChanged)load(true);}
 function queueMore(command){if(loading.value||busy.value)return;if(command==='received'){tab.value='received';return;}if(command==='pending'){tab.value='pending';return;}if(command==='refresh')load(false,demand.value);}
 function changePage(value){page.value=value.page;pageSize.value=value.pageSize;load();}
 
-function openPurchase(row){if(row?.stocktake_pending||row?.stocktake_recheck_error)return;purchase.rows=row?[row]:[];purchase.visible=true;}
+function openPurchase(row){
+ if(!canPurchase.value||row?.stocktake_pending||row?.stocktake_recheck_error)return;
+ purchase.rows=row?[{...row,manualPurchaseQuantity:demand.value&&(snapshot.value.stale||snapshot.value.refreshing||!!snapshot.value.error)}]:[];
+ purchase.visible=true;
+}
 function canStocktake(row){const id=Number(row.product_id||(tab.value==='register'?row.id:0));return canWrite.value&&Number.isSafeInteger(id)&&id>0&&!row.is_bundle&&!row.review_required&&Number(row.component_count||0)===0;}
 function openStocktake(row){if(!canStocktake(row))return;stocktake.product={...row,id:Number(row.product_id||row.id),name:row.product_name||row.name};stocktake.visible=true;}
 function applyStockUpdates(values,meta={}){
@@ -97,7 +134,7 @@ async function stocktakeSaved(result){
 function openReceive(row){if(!pending.value||!canReceive.value||!selectable(row)||loading.value||busy.value||error.value)return;Object.assign(receive,{visible:true,id:Number(row.product_id),batch:Number(row.id),name:row.product_name});}
 async function saveLogistics(){if(!edit.row||busy.value)return;const row=edit.row,scope=currentApiCacheScope();busy.value=true;try{await apiClient.post('/api/inventory-workflow/purchase-arrivals',{operation:'logistics',id:row.id,expected_updated_at:row.updated_at,expected_courier_company:row.courier_company,expected_tracking_number:row.tracking_number,courier_company:edit.courier,tracking_number:edit.tracking});if(disposed||scope!==currentApiCacheScope())return;edit.row=null;ElMessage.success('采购物流已保存');await load();}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{busy.value=false;}}
 
-function reset(){for(const entry of stockUpdates.values())entry.controller?.abort();stockUpdates.clear();stocktake.visible=false;stockFeedback.value='';++generation;controller?.abort();rows.value=[];total.value=null;purchase.visible=false;receive.visible=false;batch.visible=false;selected.value=[];purchaseDays.value=[];selectedDay.value='';edit.row=null;error.value='';loading.value=false;busy.value=false;}
+function reset(){window.clearTimeout(demandPollTimer);demandWaitExceeded.value=false;for(const entry of stockUpdates.values())entry.controller?.abort();stockUpdates.clear();stocktake.visible=false;stockFeedback.value='';++generation;controller?.abort();rows.value=[];total.value=null;purchase.visible=false;receive.visible=false;batch.visible=false;selected.value=[];purchaseDays.value=[];selectedDay.value='';edit.row=null;error.value='';loading.value=false;busy.value=false;}
 watch(tab,()=>{rows.value=[];purchaseDays.value=[];selectedDay.value='';snapshot.value={};load(true);});watch(queueStatus,()=>{if(pending.value)load(true);});onMounted(()=>{load();window.addEventListener('erp:auth-scope-changed',reset);});onBeforeUnmount(()=>{disposed=true;reset();window.removeEventListener('erp:auth-scope-changed',reset);});
 watch([warehouseMode,canPurchase,canReceive],()=>{if(warehouseMode.value&&!['pending','received'].includes(tab.value))tab.value='pending';if(!canPurchase.value){purchase.visible=false;edit.row=null;}if(!canReceive.value)receive.visible=false;if(batch.visible&&((batch.status==='arrived'&&!canReceive.value)||(batch.status==='remind'&&!canPurchase.value)||!canConfirmArrival.value))batch.visible=false;},{flush:'sync'});
 </script>
@@ -109,11 +146,11 @@ watch([warehouseMode,canPurchase,canReceive],()=>{if(warehouseMode.value&&!['pen
  </MobileInventorySearch><el-alert v-if="stockFeedback" :title="stockFeedback" :type="stockError?'warning':'success'" :closable="false"/><el-alert v-if="error" :title="error" type="warning" :closable="false"/>
  <nav v-if="pending&&dateGroups.length" class="mobile-purchase-days" aria-label="按北京采购日期查看批次"><section v-for="group in dateGroups" :key="group.month" class="mobile-purchase-month"><small>{{group.monthLabel}}</small><div><button v-for="day in group.days" :key="day.date" type="button" :aria-label="dateDescription(day)" :title="dateDescription(day)" :aria-pressed="selectedDay===day.date" :disabled="loading" @click="changeDay(day.date)"><span>{{day.dayLabel}}</span><b :class="`is-${purchaseQueueBadgeTone(day.count,day.ageDays>=2)}`" aria-hidden="true">{{day.count}}</b></button></div></section></nav>
  <div v-if="canBatch" class="mobile-batch-toolbar"><el-checkbox :model-value="allSelected" :indeterminate="!!selectedRows.length&&!allSelected" :disabled="loading||!!error||!selectableRows.length" @change="selectPage">选择本页</el-checkbox><div class="mobile-batch-actions"><el-button v-if="canReceive" type="success" :aria-label="`批量验收入库（${selectedRows.length}）`" :disabled="loading||!!error||!selectedRows.length" @click="openBatch(selectedRows,'arrived')">验收入库（{{selectedRows.length}}）</el-button><el-button v-if="canPurchase" :aria-label="`批量提醒到货（${selectedUnarrived.length}）`" :disabled="loading||!!error||!selectedUnarrived.length" @click="openBatch(selectedUnarrived,'remind')">提醒到货（{{selectedUnarrived.length}}）</el-button><el-button v-if="canConfirmArrival" :aria-label="`批量确认实物到货（${selectedUnarrived.length}）`" :disabled="loading||!!error||!selectedUnarrived.length" @click="openBatch(selectedUnarrived,'open')">确认到货（{{selectedUnarrived.length}}）</el-button></div></div>
- <small v-if="loading" class="mobile-muted">正在读取…</small><small v-if="snapshot.refreshing" class="mobile-muted">采购建议正在准备，可先登记采购，稍后点击刷新查看。</small></div><div class="mobile-list-scroll">
+ <small v-if="loading" class="mobile-muted">正在读取…</small><small v-if="demandWaitExceeded" class="mobile-muted">等待最新采购建议超时，请稍后点击刷新。</small><small v-else-if="snapshot.error" class="mobile-muted">{{snapshot.error}}</small><small v-else-if="snapshot.refreshing" class="mobile-muted">{{snapshot.available?'正在更新采购建议，当前显示上次结果。':'正在计算采购建议，完成后会自动显示。'}}</small><small v-else-if="snapshot.stale" class="mobile-muted">当前是上次核算结果，可点击刷新获取最新建议。</small></div><div class="mobile-list-scroll">
 
  <article v-for="row in rows" :key="demand?row.product_id:row.id" class="mobile-record"><el-checkbox v-if="canBatch" :model-value="selected.includes(Number(row.id))" :disabled="loading||!!error||!selectable(row)" :aria-label="`选择采购批次 ${row.id}`" @change="value=>selectRow(row,value)">选择此批次</el-checkbox><div class="mobile-record-head"><ProductImagePreview :src="`/api/products/${row.product_id}/image?thumb=1`" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait"/><div><h3>{{row.product_name||row.name}}</h3><small>{{row.inventory_number||row.product_id}}</small><small v-if="!demand">{{row.order_no||row.shop_name||'采购记录'}} · #{{row.id}} <template v-if="row.ozon_sku">SKU {{row.ozon_sku}}</template></small></div></div>
  <template v-if="tab==='register'"><small v-if="row.workflow?.supply_plan?.cancelled_fbs>0" class="mobile-muted">已取消采购 {{row.workflow.supply_plan.cancelled_fbs}} 件，已转订单人工处理，不再进入待采购</small><div class="mobile-record-actions"><el-button v-if="canPurchase" type="primary" @click="openPurchase(row)">登记本商品采购</el-button><el-button v-if="canStocktake(row)" @click="openStocktake(row)">更新库存</el-button></div></template>
- <template v-else-if="demand"><div class="mobile-record-grid"><span>本地实物<b>{{number(row.workflow?.physical_recorded)}}</b></span><span>采购在途<b>{{number(row.workflow?.incoming)}}</b></span><span>必须采购<b :class="{required:Number(row.workflow?.supply_plan?.required_purchase)>0,covered:row.workflow?.supply_plan?.required_purchase===0}">{{number(row.workflow?.supply_plan?.required_purchase)}}</b></span><span>保障建议<b>{{number(row.workflow?.supply_plan?.optional_purchase)}}</b></span></div><small v-if="row.workflow?.supply_plan?.cancelled_fbs>0" class="mobile-muted">已取消采购 {{row.workflow.supply_plan.cancelled_fbs}} 件，已转订单人工处理，不再进入待采购</small><div class="mobile-record-actions"><el-button v-if="canPurchase" :disabled="loading||snapshot.refreshing||row.stocktake_pending||row.stocktake_recheck_error" type="primary" @click="openPurchase(row)">登记实际采购</el-button><el-button v-if="canStocktake(row)" :disabled="row.stocktake_pending" @click="openStocktake(row)">更新库存</el-button></div><small v-if="row.stocktake_pending" class="mobile-muted">正在更新采购缺口…</small></template>
+ <template v-else-if="demand"><div class="mobile-record-grid"><span>本地实物<b>{{number(row.workflow?.physical_recorded)}}</b></span><span>采购在途<b>{{number(row.workflow?.incoming)}}</b></span><span>必须采购<b :class="{required:Number(row.workflow?.supply_plan?.required_purchase)>0,covered:row.workflow?.supply_plan?.required_purchase===0}">{{number(row.workflow?.supply_plan?.required_purchase)}}</b></span><span>保障建议<b>{{number(row.workflow?.supply_plan?.optional_purchase)}}</b></span></div><small v-if="row.workflow?.supply_plan?.cancelled_fbs>0" class="mobile-muted">已取消采购 {{row.workflow.supply_plan.cancelled_fbs}} 件，已转订单人工处理，不再进入待采购</small><div class="mobile-record-actions"><el-button v-if="canPurchase" :disabled="row.stocktake_pending||row.stocktake_recheck_error" type="primary" @click="openPurchase(row)">登记实际采购</el-button><el-button v-if="canStocktake(row)" :disabled="row.stocktake_pending" @click="openStocktake(row)">更新库存</el-button></div><small v-if="row.stocktake_pending" class="mobile-muted">正在更新采购缺口…</small></template>
 
  <template v-else>
   <div v-if="pending&&Number(row.product_id)>0" class="mobile-record-actions"><InventoryProductEditAction :product-id="Number(row.product_id)" mobile @saved="changed"/><InventoryProductHistoryAction :product-id="Number(row.product_id)" mobile/></div>
@@ -128,7 +165,7 @@ watch([warehouseMode,canPurchase,canReceive],()=>{if(warehouseMode.value&&!['pen
   <p v-if="pending&&(row.review_required||row.composition_error)" class="mobile-muted">此批次原按套装采购，需采购人员先核对实际配件组成；不直接按套数入库。</p>
   <div v-else-if="pending" class="mobile-record-actions"><el-button v-if="canReceive" :disabled="loading||busy||!!error" type="success" @click="openReceive(row)">验收入库</el-button><el-button v-if="canPurchase&&!row.received_at" :disabled="loading||busy||!!error" @click="openBatch([row],'remind')">提醒到货</el-button><el-button v-if="canConfirmArrival&&!row.received_at" :disabled="loading||busy||!!error" @click="openBatch([row],'open')">确认实物到货</el-button><el-button v-if="canStocktake(row)" @click="openStocktake(row)">更新库存</el-button><el-button v-if="canPurchase" :disabled="busy" @click="Object.assign(edit,{row,tracking:row.tracking_number||'',courier:row.courier_company||''})">填写物流</el-button></div>
  </template><small v-if="row.stocktake_physical!=null&&!demand" class="mobile-muted">已核对本地实物 {{row.stocktake_physical}} 件，操作记录已保存</small></article>
- <p v-if="!loading&&!rows.length&&!error" class="mobile-muted">{{snapshot.refreshing?'需求正在计算，请稍候':'当前筛选暂无待处理记录'}}</p></div><MobilePagination :page="page" :page-size="pageSize" :total="total" :loading="loading" @change="changePage"/>
+ <p v-if="!loading&&!rows.length&&!error" class="mobile-muted">{{demand&&!snapshot.available?'暂未取得采购建议':'当前筛选暂无待处理记录'}}</p></div><MobilePagination :page="page" :page-size="pageSize" :total="total" :loading="loading" @change="changePage"/>
 
  <MobilePurchaseBatchDialog v-if="batch.visible" v-model="batch.visible" :status="batch.status" :rows="batch.rows" @changed="changed"/><MobileStocktakeDialog v-if="stocktake.visible" v-model="stocktake.visible" :product="stocktake.product" context-note="核对仓库实际总数；本批采购到货请用验收入库，避免重复登记。核对总数不会自动完成采购批次。" @saved="stocktakeSaved"/>
  <MobilePurchaseDialog v-if="purchase.visible" v-model="purchase.visible" :initial-rows="purchase.rows" @saved="changed"/><InventoryReceiveDialog v-if="receive.visible" v-model="receive.visible" :product-id="receive.id" :inbound-id="receive.batch" :product-name="receive.name" mobile @saved="changed"/>
