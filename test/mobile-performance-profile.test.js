@@ -31,7 +31,7 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(id==='vue')return deps;
   if(id==='vue-router')return{useRoute:()=>route,useRouter:()=>router};
   if(id==='element-plus')return{ElMessage:{warning(){},error(){},success(){},info(){}},ElMessageBox:{}};
-  if(id==='@element-plus/icons-vue')return{Search:{}};
+  if(id==='@element-plus/icons-vue'||id==='lucide-vue-next')return{Search:{}};
   if(id.endsWith('/stores/auth.js')||id.endsWith('/stores/auth'))return{useAuthStore:()=>auth};
   if(id.endsWith('/utils/api')||id.endsWith('/utils/api.js'))return{apiClient:api,currentApiCacheScope:()=>h.scope};
   if(id.endsWith('permissions.js'))return permissions;
@@ -197,4 +197,54 @@ test('mobile packing filters survive paging and a detail round-trip without rang
 test('packing rows keep each SKU inventory, image and quantity together, including missing bindings',()=>{
  const items=orderUtils.packingItems({skus:'sku-b,sku-a,sku-c',sku_inventory_numbers:'sku-a:1-2||sku-b:2-10',sku_inventory_names:'sku-a:钥匙壳||sku-b:门槛条',sku_images:'sku-a:https://a/img.jpg||sku-b:https://b/img.jpg',sku_quantities:'sku-a:2||sku-b:3||sku-c:1',unbound_skus:'sku-c'});
  assert.deepEqual(items.map(i=>[i.sku,i.inventoryNumber,i.quantity,i.imageUrl]),[['sku-b','2-10',3,'https://b/img.jpg'],['sku-a','1-2',2,'https://a/img.jpg'],['sku-c','',1,'']]);assert.equal(items[2].unbound,true);assert.equal(orderUtils.manualMarkLabel({mark_type:'issue'}),'有问题');
+});
+
+test('mobile purchase selection excludes stock checks, caps batches at 50, and clears on user navigation',async()=>{
+ const products=Array.from({length:55},(_,i)=>({id:i+1,name:`Physical ${i+1}`,component_count:0}));
+ const h=await component('components/mobile/MobileWorkQueue.vue',{get:async()=>({rows:products,total:55})}),sut=h.definition.setup({warehouse:false},{expose(){}});
+ await sut.load();sut.rows.value[0].stocktake_pending=true;sut.rows.value[1].stocktake_recheck_error=true;
+ sut.selectPurchasePage(true);assert.equal(sut.purchaseSelected.value.length,50);assert.equal(sut.purchaseSelected.value.includes(1),false);assert.equal(sut.purchaseSelected.value.includes(2),false);assert.equal(sut.allPurchasesSelected.value,true);
+ sut.selectPurchaseRow(sut.rows.value[54],true);assert.equal(sut.purchaseSelected.value.length,50);assert.equal(sut.purchaseSelected.value.includes(55),false);
+ sut.selectPurchaseRow(sut.rows.value[2],false);sut.selectPurchaseRow(sut.rows.value[54],true);assert.equal(sut.purchaseSelected.value.length,50);assert.equal(sut.purchaseSelected.value.includes(55),true);
+ sut.openBatchPurchase();assert.equal(sut.purchase.visible,true);assert.equal(sut.purchase.rows.length,50);assert.equal(h.calls.some(call=>call.method==='POST'),false,'selection never records purchases automatically');
+ sut.purchase.visible=false;await sut.load();assert.equal(sut.purchaseSelected.value.length,0);sut.selectPurchaseRow(sut.rows.value[0],true);sut.changePage({page:2,pageSize:20});assert.equal(sut.purchaseSelected.value.length,0);
+ await vue.nextTick();sut.selectPurchaseRow(sut.rows.value[0],true);sut.tab.value='history';await vue.nextTick();assert.equal(sut.purchaseSelected.value.length,0);assert.equal(sut.canBatchPurchase.value,false);sut.reset();
+});
+
+test('mobile batch registration retains deliberate manual quantities for stale suggestions and prunes obsolete selections',async()=>{
+ const rows=[7,8,9].map(id=>({product_id:id,product_name:`Stock ${id}`,workflow:{supply_plan:{required_purchase:3,optional_purchase:4}}}));
+ const h=await component('components/mobile/MobileWorkQueue.vue',{get:async()=>({rows,total:3,snapshot:{stale:true}})}),sut=h.definition.setup({warehouse:false},{expose(){}});
+ sut.tab.value='advisory';await vue.nextTick();await new Promise(setImmediate);sut.selectPurchasePage(true);assert.equal(sut.purchaseSelectedRows.value.length,3);
+ sut.applyDemandPage({rows:[rows[0],{...rows[1],stocktake_pending:true}],total:2,snapshot:{stale:true}});assert.deepEqual([...sut.purchaseSelected.value],[7]);
+ sut.openBatchPurchase();assert.equal(sut.purchase.rows.length,1);assert.equal(sut.purchase.rows[0].manualPurchaseQuantity,true);
+ sut.purchase.visible=false;sut.applyDemandPage({rows,total:3,snapshot:{stale:false,refreshing:false}});sut.selectPurchasePage(true);sut.openBatchPurchase();assert.equal(sut.purchase.rows.every(row=>row.manualPurchaseQuantity===false),true);
+ h.scope='B';sut.reset();assert.equal(sut.purchaseSelected.value.length,0);assert.equal(sut.purchase.visible,false);
+ const auth=vue.reactive({user:{...owner,roles:['procurement'],tenant:{id:2,role:'member'}}}),staff=await component('components/mobile/MobileWorkQueue.vue',{auth}),p=staff.definition.setup({warehouse:false},{expose(){}});
+ p.rows.value=rows;p.selectPurchasePage(true);p.openBatchPurchase();assert.equal(p.purchase.visible,true);auth.user={...auth.user,roles:['packing']};assert.equal(p.purchaseSelected.value.length,0);assert.equal(p.purchase.visible,false);assert.equal(p.canBatchPurchase.value,false);p.openBatchPurchase();assert.equal(p.purchase.visible,false);p.reset();
+});
+
+test('mobile batch initialization blocks partial submission and interactive additions until every selected item loads',async()=>{
+ let finish;const selected=[{id:101,name:'First physical',component_count:0},{id:201,name:'Selected bundle',component_count:2},{id:102,name:'Last physical',component_count:0}];
+ const h=await component('components/mobile/MobilePurchaseDialog.vue',{get:()=>new Promise(resolve=>finish=resolve)}),sut=h.definition.setup({modelValue:true,initialRows:selected},{expose(){},emit(){}});
+ await new Promise(setImmediate);assert.equal(sut.initializing.value,true);assert.equal(sut.inputDisabled.value,true);assert.deepEqual([...sut.items.value.map(row=>row.product_id)],[101]);
+ sut.items.value[0].amount=10;await sut.save();await sut.choose({id:999,name:'Extra',component_count:0});assert.equal(h.calls.some(call=>call.method==='POST'),false);assert.equal(sut.items.value.length,1);
+ finish({rows:[{is_bundle:true,components:[{product_id:202,product_name:'Part A',per_set_quantity:2},{product_id:203,product_name:'Part B',per_set_quantity:1}]}]});await new Promise(setImmediate);
+ assert.equal(sut.initializing.value,false);assert.equal(sut.inputDisabled.value,false);assert.deepEqual([...sut.items.value.map(row=>row.product_id)],[101,202,203,102]);assert.equal(sut.items.value[0].amount,10);
+});
+
+test('closed or foreign-scope initializers never continue into a reopened purchase batch',async()=>{
+ const pending=[];const h=await component('components/mobile/MobilePurchaseDialog.vue',{get:()=>new Promise((resolve,reject)=>pending.push({resolve,reject}))}),props=vue.reactive({modelValue:true,initialRows:[{id:201,name:'Old bundle',component_count:2},{id:102,name:'Old trailing physical',component_count:0}]}),sut=h.definition.setup(props,{expose(){},emit(){}});
+ props.modelValue=false;props.initialRows=[{id:301,name:'New bundle',component_count:2},{id:302,name:'New trailing physical',component_count:0}];props.modelValue=true;assert.equal(pending.length,2);
+ pending[0].resolve({rows:[{is_bundle:true,components:[{product_id:202,per_set_quantity:1}]}]});await new Promise(setImmediate);assert.equal(sut.items.value.length,0);assert.equal(sut.initializing.value,true,'old finally must not unlock the new batch');
+ pending[1].resolve({rows:[{is_bundle:true,components:[{product_id:303,per_set_quantity:1}]}]});await new Promise(setImmediate);assert.deepEqual([...sut.items.value.map(row=>row.product_id)],[303,302]);
+ props.modelValue=false;props.initialRows=[{id:501,name:'Foreign bundle',component_count:2},{id:502,name:'Foreign trailing physical',component_count:0}];props.modelValue=true;h.scope='B';sut.clear();pending[2].reject(Error('Old enterprise response failed'));await new Promise(setImmediate);assert.equal(sut.items.value.length,0);assert.equal(sut.error.value,'');await sut.save();assert.equal(h.calls.some(call=>call.method==='POST'),false);
+});
+
+test('failed selected bundle loading explicitly blocks subset purchases and allows a complete retry',async()=>{
+ let attempts=0;const selected=[{id:101,name:'First physical',component_count:0},{id:201,name:'Bundle',component_count:2},{id:102,name:'Last physical',component_count:0}];
+ const h=await component('components/mobile/MobilePurchaseDialog.vue',{get:async()=>{if(++attempts===1)throw Error('Composition unavailable');return{rows:[{is_bundle:true,components:[{product_id:202,product_name:'Part',per_set_quantity:2}]}]};}}),sut=h.definition.setup({modelValue:true,initialRows:selected},{expose(){},emit(){}});
+ await new Promise(setImmediate);assert.equal(sut.initializing.value,false);assert.equal(sut.initializationFailed.value,true);assert.equal(sut.inputDisabled.value,true);assert.match(sut.error.value,/未全部载入，不能提交部分采购/);assert.deepEqual([...sut.items.value.map(row=>row.product_id)],[101]);
+ sut.items.value[0].amount=10;await sut.save();await sut.choose({id:999,component_count:0});assert.equal(h.calls.some(call=>call.method==='POST'),false);assert.equal(sut.items.value.length,1);
+ await sut.initializeRows();assert.equal(sut.initializationFailed.value,false);assert.equal(sut.initializing.value,false);assert.equal(sut.error.value,'');assert.deepEqual([...sut.items.value.map(row=>row.product_id)],[101,202,102]);
+ for(const row of sut.items.value)row.amount=10;await sut.save();const post=h.calls.find(call=>call.method==='POST');assert.equal(post.body.items.length,3);assert.deepEqual([...post.body.items.map(row=>row.product_id)],[101,202,102]);
 });
