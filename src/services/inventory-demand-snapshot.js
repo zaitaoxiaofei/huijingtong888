@@ -81,17 +81,17 @@ export function createInventoryDemandSnapshot({query,calculate,products,revision
       }).catch(()=>{entry.error='后台核算失败，已保留上次成功结果，可点击重新核算重试';}).finally(()=>{entry.pending=null;entry.runningEpoch=null;entry.runningFull=null;if(entry.refreshAgain){entry.refreshAgain=false;refresh(entry,tenantId);}});
     }catch(error){entry.error=error.message;}
   }
-  return async function read(tenantId,{fresh=false,productIds=[]}={}){
+  return async function read(tenantId,{fresh=false,poll=false,productIds=[]}={}){
     const entry=await load(tenantId),have=entry.rows!==null;
     const covered=new Set(entry.rows?.map(r=>Number(r.product_id)));
     const missing=productIds.some(id=>!covered.has(Number(id)));
     const stale=!have||missing||entry.epoch!==revision()||now()-Date.parse(entry.fullAt||entry.at)>300000;
     // Automatic changes coalesce for at most one refresh/minute per active tenant.
     // Manual reconciliation bypasses this delay but shares any in-flight job.
-    if(fresh&&entry.pending&&entry.runningEpoch!=null&&(entry.runningEpoch!==revision()||entry.runningFull===false))entry.refreshAgain=true;
+    if(!poll&&fresh&&entry.pending&&entry.runningEpoch!=null&&(entry.runningEpoch!==revision()||entry.runningFull===false))entry.refreshAgain=true;
     const delta=have&&entry.epoch!=null?changes?.(entry.epoch,tenantId):null;
     const incremental=!entry.error&&Array.isArray(delta)&&delta.length>0&&now()-Date.parse(entry.fullAt||entry.at)<300000;
-    if(fresh||(stale&&!entry.pending&&(incremental||entry.attempt===0||now()-entry.attempt>=60000)))refresh(entry,tenantId,{forceFull:fresh});
+    if(!poll&&(fresh||(stale&&!entry.pending&&(incremental||entry.attempt===0||now()-entry.attempt>=60000))))refresh(entry,tenantId,{forceFull:fresh});
     return{rows:entry.rows||[],snapshot:{status:entry.pending?(have?'updating':'warming'):entry.error?'error':stale?'stale':'ready',
       available:have,incomplete:missing,calculated_at:entry.at,stale,refreshing:!!entry.pending,error:entry.error}};
   };
