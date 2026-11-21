@@ -3,6 +3,10 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
+import { useAuthStore } from '../../stores/auth.js';
+import { hasPermission } from '../../../../src/shared/permissions.js';
+import { useOrderImageSync } from '../../../orders/composables/useOrderImageSync.js';
+import { applyOrderImageSyncToItems, orderImageDisplayUrl } from '../../../orders/utils/order-image-sync.js';
 import MobileDialog from '../../components/mobile/MobileDialog.vue';
 import MobilePagination from '../../components/mobile/MobilePagination.vue';
 import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
@@ -44,6 +48,10 @@ const bindingForm = reactive({
 const orderId = computed(() => Number(route.params.id || 0));
 const order = computed(() => detail.value?.order || {});
 const items = computed(() => Array.isArray(detail.value?.items) ? detail.value.items : []);
+const auth = useAuthStore(), canSyncOrderImages = computed(() => hasPermission(auth.user, 'orders.manage'));
+const imageSync = useOrderImageSync(result => {
+  if (Number(result.order_id) === orderId.value && detail.value) detail.value = { ...detail.value, items: applyOrderImageSyncToItems(items.value, result) };
+});
 const unboundItems = computed(() => items.value.filter((item) => !item.product_name && !item.product_code));
 const purchasableProducts = computed(() => Array.isArray(procurement.value?.products) ? procurement.value.products : []);
 
@@ -237,12 +245,13 @@ onBeforeUnmount(()=>{disposed=true;resetBindingScope();window.removeEventListene
         <span>{{ items.length }} 项</span>
       </div>
       <article v-for="item in items" :key="item.id" class="mobile-item-card">
-        <img v-if="item.image_url" :src="item.image_url" alt="">
-        <div v-else class="mobile-item-card__fallback">SKU</div>
+        <img v-if="item.image_url && !imageSync.needsSync(orderId,item.id,item.image_url)" :key="imageSync.imageKey(orderId,item.id,item.image_url)" :src="orderImageDisplayUrl(item.image_url)" alt="" @error="imageSync.markFailed(orderId,item.id,item.image_url)">
+        <div v-else class="mobile-item-card__fallback">{{item.image_url?'图片加载失败':'无图'}}</div>
         <div class="mobile-item-card__main">
           <h3>{{ shortText(item.product_name || item.ozon_name, "未绑定商品") }}</h3>
           <p>Ozon SKU：{{ shortText(item.ozon_sku) }}</p>
           <p>货号：{{ shortText(item.offer_id || item.product_code) }}</p>
+          <el-button v-if="canSyncOrderImages && order.platform !== 'wb' && imageSync.needsSync(orderId,item.id,item.image_url)" size="small" :loading="imageSync.busy.value.has(Number(orderId))" :aria-label="`补同步订单 ${order.posting_number || orderId} 商品 ${item.ozon_sku} 主图`" @click.stop="imageSync.syncImage(orderId,item.id)">补同步主图</el-button>
           <div class="mobile-item-card__chips">
             <span>数量 {{ Number(item.quantity || 0) }}</span>
             <span>{{ money(item.sale_price, "₽") }}</span>

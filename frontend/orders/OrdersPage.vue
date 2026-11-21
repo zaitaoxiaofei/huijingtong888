@@ -28,6 +28,7 @@ import {
   orderStateKey
 } from "./constants/orders-ui.js";
 import { buildInventoryPickingSummary, buildProductDisplayRows, inventoryBindingReminders, firstCsvValue, splitCsv } from "./utils/order-display.js";
+import { applyOrderImageSyncToRow, applyOrderImageSyncToItems } from './utils/order-image-sync.js';
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
@@ -53,6 +54,7 @@ const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inv
 const canReceiveInventory = computed(() => hasPermission(inventoryAuth.user, "packing"));
 const canRemindProcurement = computed(() => canUpdateInventory.value || hasPermission(inventoryAuth.user, "packing"));
 const canManageOrderNotes = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
+const canSyncOrderImages = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
 const canEditProcurementNotes = computed(() => ['packing','procurement','inventory.write'].some(permission => hasPermission(inventoryAuth.user, permission)));
 const procurementOrderNotes = reactive({visible:false,productId:0,orderId:0});
 const router = useRouter();
@@ -2167,6 +2169,14 @@ function handleOrderCollaborationNoteSaved(event) {
   orderDetailCache.delete(orderId);
 }
 
+function handleOrderImagesSynced(result) {
+  vm.rows = (vm.rows || []).map(row => applyOrderImageSyncToRow(row, result));
+  orderDetailCache.delete(Number(result.order_id));
+  if (Number(detailDialog.orderId) === Number(result.order_id) && detailDialog.data?.items) {
+    detailDialog.data = { ...detailDialog.data, items: applyOrderImageSyncToItems(detailDialog.data.items, result) };
+  }
+}
+
 async function handleOpenOrderProcurement(orderId) {
   const order = tableRows.value.find(row => Number(row.id) === Number(orderId));
   if (order?.procurement_coverage?.quantity_needs_review && !order.procurement_coverage.shortage_quantity) {
@@ -2920,6 +2930,7 @@ onBeforeUnmount(() => {
     </el-dialog>
     <div class="orders-table-section">
       <OrdersTable
+        :can-sync-order-images="canSyncOrderImages"
         :can-update-inventory="canUpdateInventory"
         :can-receive-inventory="canReceiveInventory"
         :can-remind-procurement="canRemindProcurement"
@@ -2933,6 +2944,7 @@ onBeforeUnmount(() => {
         :confirming-inbound-record-id="confirmingInboundRecordId"
         table-height="100%"
         @toggle-all="toggleAll"
+        @images-synced="handleOrderImagesSynced"
         @toggle-row="toggleRow"
         @open-profit="openProfitDetail"
         @prepare-order="handlePrepareOrder"

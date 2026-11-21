@@ -18972,22 +18972,8 @@ export async function repairOrderOutboundMysql(tenantId = "admin", options = {})
 
 async function upsertOnlineProductFromOrderItemMysql(shop, item) {
   if (!item?.ozon_sku) return null;
-  const resolvedImageUrl = await resolveOrderItemImageUrlMysql(shop, item);
-  const mediaPayload = {
-    image_url: resolvedImageUrl,
-    primary_image: resolvedImageUrl,
-    images_json: JSON.stringify(resolvedImageUrl ? [resolvedImageUrl] : []),
-    raw_json: JSON.stringify(item)
-  };
-  const storageItem = await prepareOnlineProductMediaForStorage(mediaPayload, { timeoutMs: 15000 })
-    .catch((error) => {
-      console.warn(`[order-sync] media archive skipped for ${shop.name || shop.id} / ${item.ozon_sku}: ${error.message}`);
-      return {
-        ...mediaPayload,
-        raw_json: compactOnlineProductRawJson(mediaPayload.raw_json)
-      };
-    });
-  const storedImageUrl = String(storageItem.image_url || "");
+  // Order synchronization records supplied URLs only; image repair is an explicit single-order action.
+  const suppliedImageUrl = String(item.image_url || item.ozon_image_url || "").trim();
   const existing = await mysqlQueryOne("SELECT * FROM online_products WHERE shop_id = ? AND ozon_sku = ?", [shop.id, item.ozon_sku]);
   if (existing) {
     await mysqlExecute(`
@@ -18995,13 +18981,11 @@ async function upsertOnlineProductFromOrderItemMysql(shop, item) {
       SET offer_id = COALESCE(NULLIF(?, ''), offer_id),
         ozon_product_id = COALESCE(NULLIF(?, ''), ozon_product_id),
         name = CASE WHEN name = '' OR name LIKE 'Ozon product %' THEN COALESCE(NULLIF(?, ''), name) ELSE name END,
-        image_url = COALESCE(NULLIF(?, ''), image_url),
-        primary_image = COALESCE(NULLIF(?, ''), primary_image),
         sale_price = CASE WHEN sale_price = 0 THEN ? ELSE sale_price END,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `, [item.offer_id || "", item.ozon_product_id || "", item.name || "", storedImageUrl, storedImageUrl, Number(item.sale_price || 0), existing.id]);
-    return { ...existing, image_url: storedImageUrl || existing.image_url || "", primary_image: storedImageUrl || existing.primary_image || "" };
+    `, [item.offer_id || "", item.ozon_product_id || "", item.name || "", Number(item.sale_price || 0), existing.id]);
+    return { ...existing, image_url: suppliedImageUrl || existing.primary_image || existing.image_url || "" };
   }
   const result = await mysqlExecute(`
     INSERT INTO online_products
@@ -19013,84 +18997,111 @@ async function upsertOnlineProductFromOrderItemMysql(shop, item) {
     item.offer_id || "",
     item.ozon_product_id || "",
     item.name || `Ozon SKU ${item.ozon_sku}`,
-    storedImageUrl,
-    storedImageUrl,
+    suppliedImageUrl,
+    suppliedImageUrl,
     Number(item.sale_price || 0),
     ["RUB", "CNY"].includes(item.sale_currency) ? item.sale_currency : "RUB",
-    storageItem.raw_json
+    compactOnlineProductRawJson(JSON.stringify(item))
   ]);
-  return { id: Number(result.insertId), shop_id: shop.id, ozon_sku: item.ozon_sku, image_url: storedImageUrl, primary_image: storedImageUrl };
+  return { id: Number(result.insertId), shop_id: shop.id, ozon_sku: item.ozon_sku, image_url: suppliedImageUrl, primary_image: suppliedImageUrl };
 }
 
 function pickLiveProductImageMysql(detail = {}) {
   const images = Array.isArray(detail?.images) ? detail.images : [];
-  return String(
+  const image = (
     detail?.primary_image
     || detail?.image_url
     || images.find((item) => String(item || "").trim())
     || ""
-  ).trim();
+  );
+  return String(typeof image === "object" ? image?.url || image?.file_name || "" : image).trim();
 }
 
-async function resolveOrderItemImageUrlMysql(shop, item = {}) {
-  const directImage = String(item.image_url || item.ozon_image_url || "").trim();
-  if (directImage) return directImage;
-
-  const offerIds = [item.offer_id, item.ozon_sku]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean);
-  if (offerIds.length) {
-    const details = await fetchOzonProductInfoAttributes(shop, { offerIds, limit: 10 }).catch(() => []);
-    const matched = (Array.isArray(details) ? details : [details]).find((detail) => {
-      const offerId = String(detail?.offer_id || "").trim();
-      const sku = String(detail?.sku || detail?.id || detail?.product_id || "").trim();
-      return offerIds.includes(offerId) || offerIds.includes(sku);
-    }) || (Array.isArray(details) ? details[0] : details);
-    const image = pickLiveProductImageMysql(matched);
-    if (image) return image;
-  }
-
-  const productId = Number(item.ozon_product_id || item.product_id || 0);
-  if (productId) {
-    const details = await fetchOzonProductInfoAttributes(shop, { productIds: [productId], limit: 1 }).catch(() => []);
-    const matched = Array.isArray(details) ? details[0] : details;
-    const image = pickLiveProductImageMysql(matched);
-    if (image) return image;
-  }
-
-  const refreshed = await refreshOnlineProductImageFromCatalogMysql(shop, item).catch(() => null);
-  if (refreshed?.image_url) return String(refreshed.image_url || "").trim();
-
-  return "";
-}
-
-async function refreshOnlineProductImageFromCatalogMysql(shop, item = {}) {
+async function resolveOrderItemImageUrlMysql(shop, item, options) {
+  const sku = String(item.ozon_sku || "").trim();
+  const productId = String(item.ozon_product_id || "").trim();
   const offerId = String(item.offer_id || "").trim();
-  const ozonSku = String(item.ozon_sku || item.sku || "").trim();
-  const ozonProductId = String(item.ozon_product_id || item.product_id || "").trim();
+  const filter = sku ? { skus: [sku] } : productId ? { productIds: [productId] } : offerId ? { offerIds: [offerId] } : null;
+  if (!filter) return "";
+  const details = await fetchOzonProductInfoAttributes(shop, { ...filter, limit: 1, ...options });
+  if (details.length !== 1) return "";
+  const detail = details[0];
+  const returnedSkus = [detail.sku, detail.ozon_sku, ...(Array.isArray(detail.sources) ? detail.sources.map(source => source.sku) : [])]
+    .map(value => String(value || "").trim()).filter(Boolean);
+  const returnedProductId = String(detail.product_id || detail.id || "").trim();
+  if (sku && returnedSkus.length && !returnedSkus.includes(sku)) return "";
+  if (!sku && productId && returnedProductId && productId !== returnedProductId) return "";
+  if (!sku && !productId && String(detail.offer_id || "") !== offerId) return "";
+  return pickLiveProductImageMysql(detail);
+}
 
-  if (ozonProductId) {
-    const byId = await fetchOzonProductsByIds(shop, [Number(ozonProductId)]).catch(() => []);
-    const matchedById = (Array.isArray(byId) ? byId : [byId]).find((row) => String(row?.image_url || row?.primary_image || "").trim()) || null;
-    if (matchedById) {
-      await upsertOnlineProductDualWrite(shop.id, matchedById);
-      return matchedById;
+export async function syncOrderImagesMysql(orderId, body = {}, tenantId = "admin", options = {}) {
+  ensureMysqlCutoverEnabled();
+  const id = Number(orderId), itemId = body?.item_id == null ? null : Number(body.item_id);
+  if (!Number.isSafeInteger(id) || id <= 0 || !body || typeof body !== "object" || Array.isArray(body)
+    || Object.keys(body).some(key => key !== "item_id") || (itemId !== null && (!Number.isSafeInteger(itemId) || itemId <= 0 || Array.isArray(body.item_id)))) {
+    throw Object.assign(new Error("请只选择一个订单及可选的单条订单商品补图"), { statusCode: 400 });
+  }
+  if (!options.session) throw Object.assign(new Error("手动补图需要有效的当前企业操作人员，请重新登录"), { statusCode: 403 });
+  const scope = await orderOwnershipTenantScopeMysql(tenantId);
+  const authorize = async (query = mysqlQuery) => {
+    throwIfAbortedMysql(options.signal);
+    const actor = await authorizeBusinessTaskSession(options.session, query);
+    if (Number(actor.tenant.id) !== scope.id || !hasPermission(actor, "orders.manage")) {
+      throw Object.assign(new Error("当前企业成员已无权手动补图"), { statusCode: 403 });
+    }
+    throwIfAbortedMysql(options.signal);
+  };
+  const loadItems = async (query = mysqlQuery, lock = false) => query(`SELECT oi.id,oi.ozon_sku,oi.ozon_product_id,oi.ozon_image_url,o.shop_id,op.offer_id
+    FROM order_items oi JOIN orders o ON o.id=oi.order_id
+    JOIN shops s ON s.id=o.shop_id AND ${orderTenantPredicateMysql("s", scope)}
+    LEFT JOIN online_products op ON op.shop_id=o.shop_id AND op.ozon_sku=oi.ozon_sku
+    WHERE o.id=? AND ${scope.defaultTenant ? "s.status<>'deleted'" : "s.status='active'"}
+      AND COALESCE(s.platform,'ozon')='ozon' ${itemId === null ? "" : "AND oi.id=?"}
+    ORDER BY oi.id${lock ? " FOR UPDATE" : ""}`, itemId === null ? [id] : [id, itemId]);
+  await authorize();
+  const selected = await loadItems();
+  if (!selected.length) throw Object.assign(new Error("订单或订单商品不存在、店铺不可用或不属于当前企业"), { statusCode: 404 });
+  const result = { ok: true, order_id: id, updated_count: 0, failed_count: 0, items: [] };
+  for (const item of selected) {
+    const matchesItem = row => Number(row.id) === Number(item.id) && Number(row.shop_id) === Number(item.shop_id)
+      && String(row.ozon_sku || "") === String(item.ozon_sku || "")
+      && (item.ozon_sku || String(row.ozon_product_id || "") === String(item.ozon_product_id || ""));
+    const guard = async () => {
+      await authorize();
+      const current = await loadItems();
+      if (!current.some(matchesItem)) {
+        throw Object.assign(new Error("订单商品归属已变化，请刷新后重试"), { statusCode: 404 });
+      }
+    };
+    try {
+      await guard();
+      const shop = await activeShopForTenantMysql(item.shop_id, scope.id);
+      const imageUrl = await resolveOrderItemImageUrlMysql(shop, item, { signal: options.signal, beforeRequest: guard, afterRequest: guard });
+      await guard();
+      if (!/^https?:\/\//i.test(imageUrl)) throw new Error("Ozon 尚未返回本商品的可用图片，请稍后手动重试");
+      const updated = await withMysqlTransaction(async connection => {
+        const query = async (sql, params) => (await connection.query(sql, params))[0];
+        await authorize((sql, params) => query(sql + " FOR SHARE", params));
+        const current = (await loadItems(query, true)).find(matchesItem);
+        if (!current || String(current.ozon_image_url || "") !== String(item.ozon_image_url || "")) {
+          throw Object.assign(new Error("订单图片已由其他操作更新，请刷新后核对"), { statusCode: 409 });
+        }
+        throwIfAbortedMysql(options.signal);
+        if (imageUrl === String(current.ozon_image_url || "")) return false;
+        await connection.execute("UPDATE order_items SET ozon_image_url=? WHERE id=? AND order_id=?", [imageUrl, Number(item.id), id]);
+        return true;
+      });
+      result.updated_count += Number(updated);
+      if (updated) invalidateOrderReadCache();
+      result.items.push({ id: Number(item.id), ozon_sku: String(item.ozon_sku || ""), image_url: imageUrl, updated });
+    } catch (error) {
+      if ([403, 404].includes(Number(error.statusCode || error.status)) || options.signal?.aborted) throw error;
+      result.failed_count++;
+      result.items.push({ id: Number(item.id), ozon_sku: String(item.ozon_sku || ""), image_url: item.ozon_image_url || "", updated: false, error: error.message });
     }
   }
-
-  const products = await fetchOzonProducts(shop).catch(() => []);
-  const matched = (Array.isArray(products) ? products : []).find((row) => {
-    const rowOffer = String(row?.offer_id || "").trim();
-    const rowSku = String(row?.ozon_sku || "").trim();
-    const rowProductId = String(row?.ozon_product_id || "").trim();
-    if (!String(row?.image_url || row?.primary_image || "").trim()) return false;
-    return (offerId && rowOffer === offerId)
-      || (ozonSku && rowSku === ozonSku)
-      || (ozonProductId && rowProductId === ozonProductId);
-  }) || null;
-  if (!matched) return null;
-  await upsertOnlineProductDualWrite(shop.id, matched);
-  return matched;
+  return result;
 }
 
 function orderLifecycleMysql(posting) {
@@ -20202,12 +20213,11 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
         UPDATE order_items
         SET sku_mapping_id = COALESCE(?, sku_mapping_id),
           ozon_name = COALESCE(NULLIF(?, ''), ozon_name),
-          ozon_image_url = COALESCE(NULLIF(?, ''), ozon_image_url),
           ozon_product_id = COALESCE(NULLIF(?, ''), ozon_product_id),
           quantity = ?,
           sale_price = ?
         WHERE id = ?
-      `, [mapping?.id || null, item.name || "", normalizedItem.image_url || "", item.ozon_product_id || "", nextQuantity, item.sale_price, existingItem.id]);
+      `, [mapping?.id || null, item.name || "", item.ozon_product_id || "", nextQuantity, item.sale_price, existingItem.id]);
       if (product && mapping && previousQuantity !== nextQuantity) {
         const quantityDelta = previousQuantity - nextQuantity;
         await postProductInventoryWithComponentsMysql(mysqlPoolConnectionAdapter, {

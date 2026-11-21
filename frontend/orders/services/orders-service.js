@@ -508,6 +508,10 @@ export async function fetchOrderDetail(orderId) {
   return apiClient.get(`/api/orders/${orderId}`);
 }
 
+export async function syncOrderImages(orderId, itemId = 0, options = {}) {
+  return apiClient.post(`/api/orders/${Number(orderId)}/sync-images`, Number(itemId) > 0 ? { item_id: Number(itemId) } : {}, options);
+}
+
 export async function prepareSingleOrder(orderId) {
   return bulkPrepareOrders([orderId]);
 }

@@ -1,10 +1,14 @@
 <script setup>
 import MarketplaceBadge from "../../components/MarketplaceBadge.vue";
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Search } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
+import { useAuthStore } from '../../stores/auth.js';
+import { hasPermission } from '../../../../src/shared/permissions.js';
+import { useOrderImageSync } from '../../../orders/composables/useOrderImageSync.js';
+import { applyOrderImageSyncToRow, orderImageDisplayUrl } from '../../../orders/utils/order-image-sync.js';
 import { orderSearchMatchForInput } from "../../../../src/shared/order-search.js";
 import {
   MOBILE_STATUS_OPTIONS,
@@ -25,6 +29,8 @@ const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
 const rows = ref([]);
+const auth = useAuthStore(), canSyncOrderImages = computed(() => hasPermission(auth.user, 'orders.manage'));
+const imageSync = useOrderImageSync(result => { rows.value = rows.value.map(row => applyOrderImageSyncToRow(row, result)); });
 const total = ref(0);
 const noteOrder = ref(null);
 const page = ref(1);
@@ -184,12 +190,13 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
         </div>
         <p v-if="row.printed_at" class="mobile-order-card__print-time" title="最近一次确认已打印的时间"><span>打印时间（北京）</span><span>{{printedTime(row.printed_at)}}</span></p>
         <div v-for="item in packingItems(row)" :key="item.sku" class="mobile-order-card__body">
-          <img v-if="item.imageUrl" :src="item.imageUrl" loading="lazy" decoding="async" width="64" height="84" alt="">
-          <div v-else class="mobile-order-card__image-fallback">无图</div>
+          <img v-if="item.imageUrl && !imageSync.needsSync(row.id,item.orderItemId,item.imageUrl)" :key="imageSync.imageKey(row.id,item.orderItemId,item.imageUrl)" :src="orderImageDisplayUrl(item.imageUrl)" loading="lazy" decoding="async" width="64" height="84" alt="" @error="imageSync.markFailed(row.id,item.orderItemId,item.imageUrl)">
+          <div v-else class="mobile-order-card__image-fallback">{{item.imageUrl?'图片加载失败':'无图'}}</div>
           <div class="mobile-order-card__main">
             <h2>{{item.inventoryName || item.name}}</h2>
             <div class="mobile-order-card__facts"><strong>库存 {{item.inventoryNumber || (item.inventoryMode==='combo'?'组合库存':'未绑定')}}</strong><span>{{item.quantity}} 件</span></div>
             <p>SKU {{item.sku}}</p>
+            <el-button v-if="canSyncOrderImages && row.platform !== 'wb' && imageSync.needsSync(row.id,item.orderItemId,item.imageUrl)" size="small" :loading="imageSync.busy.value.has(Number(row.id))" :aria-label="`补同步订单 ${row.posting_number || row.id} 商品 ${item.sku} 主图`" @click.stop="imageSync.syncImage(row.id,item.orderItemId)">补同步主图</el-button>
           </div>
         </div>
         <button v-if="row.mark_type || row.mark_note" type="button" class="mobile-order-note" @click.stop="noteOrder=row">{{manualMarkLabel(row)}}<span>{{row.mark_note || '查看人工标记'}}</span><b>查看</b></button>
