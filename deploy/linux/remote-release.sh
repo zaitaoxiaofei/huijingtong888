@@ -342,9 +342,9 @@ names=['scripts/archive-mysql-binlogs.mjs','scripts/lib/verify-mysql-binlog.mjs'
 with zipfile.ZipFile(archive) as package:
  contents={}
  for name in names:
-  members=[i for i in package.infolist() if i.filename==name]
+  members=[i for i in package.infolist() if i.filename in (name,'./'+name)]
   if len(members)!=1 or members[0].file_size>2*1024*1024 or stat.S_ISLNK(members[0].external_attr>>16):raise RuntimeError('Invalid immutable worker source')
-  contents[name]=package.read(name)
+  contents[name]=package.read(members[0])
 identity=hashlib.sha256(str(dependencies).encode()+b''.join(name.encode()+contents[name] for name in names)).hexdigest()
 root=pathlib.Path('/usr/local/libexec/ozon-storage-workers');root.mkdir(mode=0o755,parents=True,exist_ok=True);target=root/identity
 if not target.exists():
