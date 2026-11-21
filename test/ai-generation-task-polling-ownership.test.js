@@ -15,6 +15,6 @@ test("AI task reads and retries are scoped to the current person", () => {
   assert.match(taskSource, /filters\.push\("created_by_person_id = \?"\)/);
   assert.match(taskSource, /ownershipSql = " AND tenant_id = \? AND created_by_person_id = \?"/);
   assert.match(taskSource, /const ownershipParams = \[aiTenantId\(\), currentPersonId\]/);
-  assert.match(taskSource, /WHERE task_no = \? AND status IN \('failed', 'cancelled', 'provider_pending'\)\$\{ownershipSql\}/);
+  assert.match(taskSource, /WHERE task_no = \? AND status IN \('failed', 'cancelled', 'provider_pending', 'reconciliation_required'\)\$\{ownershipSql\}/);
   assert.match(taskSource, /SELECT \* FROM ai_generation_tasks WHERE task_no = \?\$\{ownershipSql\} LIMIT 1/);
 });

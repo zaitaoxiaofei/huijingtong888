@@ -474,7 +474,7 @@ async function generateOptimizedImage(sourceImage, prompt, title, item, slot) {
     onProviderJob: async providerJob => { await saveProviderReceipt(item, slot, providerJob); await assertMaterialActor(item); }
     });
   } catch (error) {
-    if (error.code === "AI_CREDIT_RESULT_PENDING" && error.creditTaskId) await saveCheckpoint(item, { images: { [slot]: { ...previous, state: "submitting", credit_task_id: error.creditTaskId } } });
+    if (["AI_CREDIT_RESULT_PENDING", "AI_CREDIT_RECONCILIATION_REQUIRED"].includes(error.code) && error.creditTaskId) await saveCheckpoint(item, { images: { [slot]: { ...previous, state: "submitting", credit_task_id: error.creditTaskId } } });
     throw error;
   }
   await assertMaterialActor(item);

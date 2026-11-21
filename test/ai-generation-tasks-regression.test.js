@@ -33,7 +33,8 @@ test("ai generation task routes expose create, query, and retry APIs", () => {
 test("ai generation task worker isolates field failures", () => {
   assert.match(serviceSource, /status = 'running'/);
   assert.match(serviceSource, /status = 'done'/);
-  assert.match(serviceSource, /status = CASE WHEN \? = 1 THEN 'provider_pending' WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END/);
+  assert.match(serviceSource, /const status = taskFailureStatus\(error, row\)/);
+  assert.match(serviceSource, /finished_at = CASE WHEN \? = 'failed' THEN CURRENT_TIMESTAMP ELSE NULL END/);
   assert.match(serviceSource, /activeByField/);
   assert.match(serviceSource, /WORKER_LIMITS/);
   assert.match(serviceSource, /video: 1/);
@@ -43,6 +44,74 @@ test("ai generation task worker isolates field failures", () => {
   assert.match(serviceSource, /field_key IN \('mainImage', 'detailImages'\)/);
   assert.doesNotMatch(serviceSource, /mainImage: 1/);
   assert.doesNotMatch(serviceSource, /detailImages: 1/);
+});
+
+test("unqueryable credit results pause instead of consuming retry attempts or becoming failed", () => {
+  const row = { attempts: 2576, max_attempts: 1 };
+  assert.equal(aiTaskInternals.taskFailureStatus({ code: "AI_CREDIT_RECONCILIATION_REQUIRED" }, row), "reconciliation_required");
+  for (const code of ["provider_pending", "AI_CREDIT_RESULT_PENDING", "AI_GENERATION_STORAGE_PENDING"]) {
+    assert.equal(aiTaskInternals.taskFailureStatus({ code }, row), "provider_pending", code);
+  }
+  assert.equal(aiTaskInternals.taskFailureStatus({ code: "generation_failed" }, row), "failed");
+  assert.equal(aiTaskInternals.taskFailureStatus({ code: "generation_failed" }, { attempts: 0, max_attempts: 2 }), "queued");
+  assert.match(serviceSource, /WHERE status IN \('queued', 'provider_pending'\)/);
+  assert.doesNotMatch(serviceSource, /WHERE status IN \('queued', 'provider_pending', 'reconciliation_required'\)/);
+  assert.match(serviceSource, /WHERE status IN \('running', 'provider_pending'\)/);
+  assert.doesNotMatch(serviceSource, /WHERE status IN \('running', 'provider_pending', 'reconciliation_required'\)/);
+});
+
+test("worker persists an unresolved task outside the runnable queue and retains its receipt and image checkpoint", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("CREATE TABLE ai_generation_tasks (id INTEGER PRIMARY KEY, status TEXT, error_json TEXT, finished_at TEXT, provider_job_json TEXT, output_json TEXT)");
+    db.prepare("INSERT INTO ai_generation_tasks VALUES (?, ?, NULL, NULL, ?, ?)").run(1, "provider_pending", '{"jobs":[]}', '{"stage":"generated_image_v1","images":["saved"]}');
+    const broadcasts = [];
+    const deps = { execute: async (sql, params) => db.prepare(sql).run(...params), broadcast: (_row, status) => broadcasts.push(status) };
+    const row = { id: 1, attempts: 2576, max_attempts: 1 };
+    await aiTaskInternals.persistTaskFailure(row, { code: "AI_CREDIT_RECONCILIATION_REQUIRED", message: "Original receipt requires review" }, {}, deps);
+    const saved = db.prepare("SELECT * FROM ai_generation_tasks WHERE id = 1").get();
+    assert.equal(saved.status, "reconciliation_required");
+    assert.equal(saved.finished_at, null);
+    assert.equal(JSON.parse(saved.error_json).code, "AI_CREDIT_RECONCILIATION_REQUIRED");
+    assert.equal(saved.provider_job_json, '{"jobs":[]}');
+    assert.equal(saved.output_json, '{"stage":"generated_image_v1","images":["saved"]}');
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM ai_generation_tasks WHERE status IN ('queued', 'provider_pending')").get().count, 0);
+    assert.deepEqual(broadcasts, ["reconciliation_required"]);
+    await aiTaskInternals.persistTaskFailure(row, { code: "provider_pending" }, {}, deps);
+    assert.equal(db.prepare("SELECT status, finished_at FROM ai_generation_tasks WHERE id = 1").get().status, "provider_pending");
+    assert.equal(db.prepare("SELECT finished_at FROM ai_generation_tasks WHERE id = 1").get().finished_at, null);
+    await aiTaskInternals.persistTaskFailure(row, { code: "AI_CREDIT_TASK_FAILED" }, {}, deps);
+    const failed = db.prepare("SELECT status, finished_at FROM ai_generation_tasks WHERE id = 1").get();
+    assert.equal(failed.status, "failed");
+    assert.ok(failed.finished_at);
+  } finally { db.close(); }
+});
+
+test("a stale worker snapshot cannot reclaim a task after another attempt requeues it", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("CREATE TABLE ai_generation_tasks (id INTEGER PRIMARY KEY, status TEXT, attempts INTEGER, max_attempts INTEGER, started_at TEXT, error_json TEXT, finished_at TEXT)");
+    db.prepare("INSERT INTO ai_generation_tasks VALUES (1, 'queued', 0, 2, NULL, NULL, NULL)").run();
+    const snapshot = () => db.prepare("SELECT * FROM ai_generation_tasks WHERE id = 1").get();
+    const first = snapshot(), stale = snapshot();
+    const execute = async (sql, params) => ({ affectedRows: Number(db.prepare(sql).run(...params).changes) });
+    const failureDeps = { execute, broadcast: () => {} };
+    assert.equal((await aiTaskInternals.claimTask(first, execute)).affectedRows, 1);
+    await aiTaskInternals.persistTaskFailure(first, { code: "generation_failed" }, {}, failureDeps);
+    assert.equal(snapshot().status, "queued"); assert.equal(snapshot().attempts, 1);
+
+    assert.equal((await aiTaskInternals.claimTask(stale, execute)).affectedRows, 0, "the stale attempt counter must not claim a newer queued attempt");
+    assert.equal(snapshot().status, "queued"); assert.equal(snapshot().attempts, 1);
+    const refreshed = snapshot();
+    assert.equal((await aiTaskInternals.claimTask(refreshed, execute)).affectedRows, 1);
+    await aiTaskInternals.persistTaskFailure(refreshed, { code: "generation_failed" }, {}, failureDeps);
+    assert.equal(snapshot().status, "failed"); assert.equal(snapshot().attempts, 2);
+    assert.ok(snapshot().finished_at);
+    assert.equal((await aiTaskInternals.claimTask(refreshed, execute)).affectedRows, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM ai_generation_tasks WHERE status IN ('queued', 'provider_pending')").get().count, 0);
+  } finally { db.close(); }
 });
 
 test("ai generation task inputs are compacted before MySQL insert", () => {

@@ -80,10 +80,11 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
           catch(error){state.status='unknown';state.error=error.message;return {status:'awaiting_review',error:`已返回的结果待核对：${error.message}`};}
           return {status:'running'};
         }
-        if(['failed','cancelled'].includes(task.status)){
+        if(['failed','cancelled','reconciliation_required'].includes(task.status)){
           if(node.type==='image'&&!isConfirmedImageTaskFailure(task)){
-            if(state.status==='resubmit'){await guard();await retryTask(state.taskId);state.status='running';state.error=null;return {status:'running'};}
-            state.status='unknown';state.failureKind='unconfirmed';state.error=`原任务结果待核对：${task.error?.message||'未收到明确生成结果'}；可核对并恢复原任务，不自动新建生图请求。`;return {status:'awaiting_review',error:state.error};
+            if(state.status==='resubmit'){await guard();await retryTask(state.taskId);state.status='running';state.phase='queued';state.progressMessage='排队中，等待核对原任务';state.error=null;return {status:'running'};}
+            state.status='unknown';state.failureKind='unconfirmed';state.phase=null;state.progressMessage=null;
+            state.error=task.status==='reconciliation_required'?(task.error?.message||'原任务无法自动核对，请联系平台管理员核对供应商结果与积分记录，处理后点击“核对并恢复原任务”。'):`原任务结果待核对：${task.error?.message||'未收到明确生成结果'}；可核对并恢复原任务，不自动新建生图请求。`;return {status:'awaiting_review',error:state.error};
           }
           state.status='failed';if(node.type==='image')state.failureKind='provider_confirmed';state.error=task.error?.message||'生成失败';return {status:'failed',error:`${variant.label} / ${node.label}：${state.error}`};
         }

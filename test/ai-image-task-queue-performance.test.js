@@ -7,8 +7,8 @@ const frontendSource = readFileSync(new URL("../frontend/admin/api/tools/aiImage
 
 test("general AI image generation uses the persistent task worker", () => {
   assert.match(taskSource, /if \(\["mainImage", "detailImages"\]\.includes\(fieldKey\)\) \{/);
-  assert.match(taskSource, /const output = await generateImages\(input\)/);
-  assert.match(taskSource, /return persistGeneratedImageOutput\(output, input, fieldKey\)/);
+  assert.match(taskSource, /completeCheckpointedImage\(input,\{generate:generateImages/);
+  assert.match(taskSource, /persist:\(output,payload\)=>persistGeneratedImageOutput\(output,payload,fieldKey\),checkpoint:input.onGeneratedOutput/);
   assert.match(taskSource, /finalPrompt: limitText/);
   assert.match(taskSource, /sourceImageUrl: cleanText/);
   assert.match(taskSource, /finalPrompt: value\.finalPrompt/);

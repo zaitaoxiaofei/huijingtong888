@@ -15,6 +15,25 @@ function canonical(value, depth = 0, budget = { fields: 0 }) {
 const pending = task => Object.assign(new Error("AI 任务已提交，正在等待结果核对；请查询原任务，不要重新提交"), {
   status: 409, statusCode: 409, code: "AI_CREDIT_RESULT_PENDING", creditTaskId: task.id
 });
+const AI_CREDIT_RECEIPT_GRACE_MS = 15 * 60 * 1000;
+const reconciliationRequired = (task, reason) => Object.assign(new Error(`${reason}，无法自动核对结果。请联系平台管理员核对供应商记录和原任务积分后处理。`), {
+  status: 409, statusCode: 409, code: "AI_CREDIT_RECONCILIATION_REQUIRED", creditTaskId: task.id
+});
+
+function recoveryStatusError(task, attempt, provider) {
+  if (!attempt?.provider_receipt) {
+    // A concurrent call may arrive before the original submit saves its receipt.
+    // Only keep that in-flight window bounded; expiry never settles the wallet.
+    const created = attempt?.created_at;
+    const utcCreated = typeof created === "string" && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(created) ? `${created.replace(" ", "T")}Z` : created;
+    const elapsed = Date.now() - new Date(utcCreated || 0).getTime();
+    if (task.status !== "unknown" && attempt?.status === "submitted" && Number.isFinite(elapsed) && elapsed >= 0 && elapsed < AI_CREDIT_RECEIPT_GRACE_MS) return pending(task);
+    return reconciliationRequired(task, "AI 原任务未保存供应商任务号，且提交结果无法确认");
+  }
+  if (attempt.provider !== provider.name || attempt.model !== provider.model) return reconciliationRequired(task, "AI 原任务所属通道或模型与当前配置不一致");
+  if (typeof provider.query !== "function") return reconciliationRequired(task, "AI 原任务所属通道不支持按任务号查询");
+  return pending(task);
+}
 
 // A provider adapter owns all actual upstream calls; it must distinguish a
 // definite rejection from a timeout/unknown acceptance. Internal retries share
@@ -52,8 +71,7 @@ export function createAiCreditExecutor({ ledger, resultStore, providers, authori
           return { task: settled, result };
         }
       }
-      if (!recovery?.provider_receipt || typeof provider.query !== "function") throw pending(task);
-      if (recovery.provider !== provider.name || recovery.model !== provider.model) throw pending(task);
+      if (!recovery?.provider_receipt || typeof provider.query !== "function" || recovery.provider !== provider.name || recovery.model !== provider.model) throw recoveryStatusError(task, recovery, provider);
       await authorize(session);
       const checked = await provider.query(recovery.provider_receipt, { session, task });
       if (!checked || checked.status === "pending") throw pending(task);
@@ -72,7 +90,7 @@ export function createAiCreditExecutor({ ledger, resultStore, providers, authori
       await authorize(session);
       return { task: current, result: await resultStore.read(current.result_reference, current.result_sha256, current) };
     }
-    if (["submitted", "unknown"].includes(last?.status)) throw pending(task);
+    if (["submitted", "unknown"].includes(last?.status)) throw recoveryStatusError(task, last, provider);
     if (Number(last?.attempt_number || 0) >= maxAttempts) {
       await ledger.releaseUnsubmitted(session, task.id);
       throw Object.assign(new Error("AI 重试已结束，积分已释放"), { status: 502, code: "AI_CREDIT_TASK_FAILED", creditTaskId: task.id });
@@ -99,7 +117,7 @@ export function createAiCreditExecutor({ ledger, resultStore, providers, authori
         await ledger.recordOutcome(session, task.id, { attemptId: attempt.id,
           outcome: definite ? "failed" : "unknown", retryable, outcomeSha256: digest(`failure:${attempt.id}:${String(error?.code || "unknown")}`) });
         if (retryable) continue;
-        if (!definite) throw pending(task);
+        if (!definite) throw recoveryStatusError({ ...task, status: "unknown" }, await ledger.latestAttempt(session, task.id), provider);
         throw Object.assign(new Error("AI 生成失败，积分已释放"), { status: 502, code: "AI_CREDIT_TASK_FAILED", creditTaskId: task.id });
       }
       return saveAndSettle(result, attempt, false);

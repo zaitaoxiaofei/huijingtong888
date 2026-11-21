@@ -257,7 +257,7 @@ export async function retryAiGenerationTask(taskId, session = null) {
   await mysqlExecute(`
     UPDATE ai_generation_tasks
     SET status = 'queued', error_json = NULL, output_json = CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.stage')) = 'generated_image_v1' THEN output_json ELSE NULL END, started_at = NULL, finished_at = NULL
-    WHERE task_no = ? AND status IN ('failed', 'cancelled', 'provider_pending')${ownershipSql}
+    WHERE task_no = ? AND status IN ('failed', 'cancelled', 'provider_pending', 'reconciliation_required')${ownershipSql}
   `, [taskNo, ...ownershipParams]);
   startAiGenerationTaskWorker();
   scheduleWorkerTick(10);
@@ -345,12 +345,16 @@ async function resolveImageWorkerLimit() {
   return imageWorkerLimitCache.value;
 }
 
-async function claimAndRunTask(row) {
-  const claimed = await mysqlExecute(`
+async function claimTask(row, execute = mysqlExecute) {
+  return execute(`
     UPDATE ai_generation_tasks
     SET status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP), error_json = NULL
-    WHERE id = ? AND status IN ('queued', 'provider_pending')
-  `, [row.id]);
+    WHERE id = ? AND status IN ('queued', 'provider_pending') AND attempts = ?
+  `, [row.id, Number(row.attempts || 0)]);
+}
+
+async function claimAndRunTask(row) {
+  const claimed = await claimTask(row);
   if (!claimed.affectedRows) return;
   const fieldKey = row.field_key;
   activeByField.set(fieldKey, (activeByField.get(fieldKey) || 0) + 1);
@@ -400,17 +404,26 @@ async function executeAuthorizedAiGenerationTask(row) {
     `, [JSON.stringify(output || {}), row.id]);
     broadcastTaskStatus(row, "done", { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
   } catch (error) {
-    const providerPending = ["provider_pending", "AI_CREDIT_RESULT_PENDING"].includes(error?.code)||error?.code==="AI_GENERATION_STORAGE_PENDING";
-    const failed = !providerPending && Number(row.attempts || 0) + 1 >= Number(row.max_attempts || 0);
-    await mysqlExecute(`
-      UPDATE ai_generation_tasks
-      SET status = CASE WHEN ? = 1 THEN 'provider_pending' WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
-          error_json = ?,
-          finished_at = CASE WHEN ? = 1 THEN NULL WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP ELSE NULL END
-      WHERE id = ?
-    `, [providerPending ? 1 : 0, JSON.stringify(normalizeTaskError(error)), providerPending ? 1 : 0, row.id]);
-    broadcastTaskStatus(row, providerPending ? "provider_pending" : (failed ? "failed" : "queued"), { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
+    await persistTaskFailure(row, error, { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
   }
+}
+
+async function persistTaskFailure(row, error, timing, { execute = mysqlExecute, broadcast = broadcastTaskStatus } = {}) {
+  const status = taskFailureStatus(error, row);
+  await execute(`
+    UPDATE ai_generation_tasks
+    SET status = ?,
+        error_json = ?,
+        finished_at = CASE WHEN ? = 'failed' THEN CURRENT_TIMESTAMP ELSE NULL END
+    WHERE id = ?
+  `, [status, JSON.stringify(normalizeTaskError(error)), status, row.id]);
+  broadcast(row, status, timing);
+}
+
+function taskFailureStatus(error, row) {
+  if (error?.code === "AI_CREDIT_RECONCILIATION_REQUIRED") return "reconciliation_required";
+  if (["provider_pending", "AI_CREDIT_RESULT_PENDING", "AI_GENERATION_STORAGE_PENDING"].includes(error?.code)) return "provider_pending";
+  return Number(row.attempts || 0) + 1 >= Number(row.max_attempts || 0) ? "failed" : "queued";
 }
 
 function broadcastTaskStatus(row, status, timing = {}) {
@@ -1198,6 +1211,9 @@ function cleanText(value = "") {
 }
 
 export const __test__ = {
+  claimTask,
+  taskFailureStatus,
+  persistTaskFailure,
   assertVariantTextMatchesTarget,
   fallbackVariantDescription,
   normalizeVariantTags,

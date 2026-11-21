@@ -110,8 +110,8 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
     await t.test("invalid 200 image stays uncharged and held, with no blind retry", async () => {
       behavior = "invalid";
       const before = submissions;
-      await assert.rejects(generate("bad-image"), { code: "AI_CREDIT_RESULT_PENDING" });
-      await assert.rejects(generate("bad-image"), { code: "AI_CREDIT_RESULT_PENDING" });
+      await assert.rejects(generate("bad-image"), { code: "AI_CREDIT_RECONCILIATION_REQUIRED" });
+      await assert.rejects(generate("bad-image"), { code: "AI_CREDIT_RECONCILIATION_REQUIRED" });
       assert.equal(submissions, before + 1);
       assert.equal(Number((await ledger.wallet(actor)).frozen_points), 10);
       behavior = "success";
@@ -126,7 +126,7 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
       assert.equal(task.status, "unknown");
       const beforePolls = polls;
       await configure("tasks_65535", "rotated-account");
-      await assert.rejects(generate("receipt-recovery"), { code: "AI_CREDIT_RESULT_PENDING" });
+      await assert.rejects(generate("receipt-recovery"), { code: "AI_CREDIT_RECONCILIATION_REQUIRED" });
       assert.equal(submissions, before + 1); assert.equal(polls, beforePolls, "Never query the old receipt using a changed upstream account");
       await configure("tasks_65535");
       behavior = "success";
@@ -159,7 +159,7 @@ test("prepaid image workflow: real SQL, real image decode, offline transport, re
       assert.ok(aiImageRuntimeMetrics().waitingTotal > 0);
       await ledger.configureAccount(admin, { tenantId: 2, status: "disabled" });
       release(); await blocking;
-      await assert.rejects(queued, { code: "AI_CREDIT_RESULT_PENDING" });
+      await assert.rejects(queued, { code: "AI_CREDIT_RECONCILIATION_REQUIRED" });
       assert.equal(submissions, before);
       await ledger.configureAccount(admin, { tenantId: 2, status: "active" });
     });
