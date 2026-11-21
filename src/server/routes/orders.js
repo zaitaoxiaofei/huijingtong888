@@ -30,6 +30,16 @@ function orderInventoryAvailability(services, req, url) {
 }
 
 export async function handleOrderRestRoute({ req, res, url, parts, services, readJson, json, notFound, writeHead }) {
+  if (req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "orders" && /^\d+$/.test(parts[2]) && parts[3] === "sync-images") {
+    if (typeof services.syncOrderImages !== "function") {
+      throw Object.assign(new Error("当前数据服务不支持单个订单补同步主图"), { statusCode: 503 });
+    }
+    return json(res, await services.syncOrderImages(Number(parts[2]), await readJson(req), tenantIdFromRequest(req), {
+      session: req._session,
+      signal: req._abortSignal
+    }));
+  }
+
   if (req.method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "orders" && parts[2] === "inventory-availability") {
     return json(res, await orderInventoryAvailability(services, req, url));
   }

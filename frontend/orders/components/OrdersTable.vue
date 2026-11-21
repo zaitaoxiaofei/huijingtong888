@@ -10,6 +10,8 @@ import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
 import InventoryIdentity from './InventoryIdentity.vue';
 import OrderProductAliases from './OrderProductAliases.vue';
+import { useOrderImageSync } from '../composables/useOrderImageSync.js';
+import { orderImageDisplayUrl } from '../utils/order-image-sync.js';
 import { orderAliasProducts } from '../utils/order-product-aliases.js';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
@@ -20,6 +22,7 @@ const aftersaleRow = ref(null);
 const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/components/procurement/ProcurementLedgerDialog.vue"));
 
 const props = defineProps({
+  canSyncOrderImages: { type: Boolean, default: false },
   canRemindProcurement: { type: Boolean, default: false },
   canUpdateInventory: { type: Boolean, default: false },
   canReceiveInventory: { type: Boolean, default: false },
@@ -38,6 +41,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits([
+  "images-synced",
   "toggle-all",
   "toggle-row",
   "open-profit",
@@ -61,6 +65,7 @@ const emit = defineEmits([
   "open-ogl-batch",
   "confirm-procurement-inbound"
 ]);
+const imageSync = useOrderImageSync(result => emit('images-synced', result));
 
 function openStockTopup(row) {
   const items=inventoryOverview(row).items;
@@ -473,15 +478,18 @@ function canEditCollaborationNote(row) {
                 <div class="orders-thumb">
                   <el-image
                     v-if="item.imageUrl"
-                    :src="item.imageUrl"
-                    :preview-src-list="[item.imageUrl]"
+                    :key="imageSync.imageKey(row.id,item.orderItemId,item.imageUrl)"
+                    :src="orderImageDisplayUrl(item.imageUrl)"
+                    :preview-src-list="[orderImageDisplayUrl(item.imageUrl)]"
                     preview-teleported
                     lazy
                     fit="contain"
                     class="orders-thumb-image"
-                  />
+                    @error="imageSync.markFailed(row.id,item.orderItemId,item.imageUrl)"
+                  ><template #error><div class="orders-thumb-empty">图片加载失败</div></template></el-image>
                   <div v-else class="orders-thumb-empty">无图</div>
                 </div>
+                <el-button v-if="canSyncOrderImages && row.platform !== 'wb' && imageSync.needsSync(row.id,item.orderItemId,item.imageUrl)" link type="primary" size="small" :loading="imageSync.busy.value.has(Number(row.id))" :aria-label="`补同步订单 ${row.posting_number || row.id} 商品 ${item.sku} 主图`" @click.stop="imageSync.syncImage(row.id,item.orderItemId)">补同步主图</el-button>
               </div>
               <div class="orders-product-copy">
                 <a

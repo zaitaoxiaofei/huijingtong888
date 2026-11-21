@@ -115,6 +115,7 @@ const recordRoutes = [
   ['POST', /^products\/\d+\/(?:add-to-inventory|remove-from-inventory|undo-merge|recalculate-profits|force-recalculate-profits)$/],
   ['GET', /^online-products\/\d+\/edit-draft$/],
   ['POST', /^orders\/\d+\/recalculate-profit$/],
+  ['POST', /^orders\/\d+\/sync-images$/],
   ['GET', /^products\/\d+\/(?:order-profit-details|cancel-details)$/],
   ['GET', /^team\/tasks\/\d+\/operational-details$/],
   ['PUT|DELETE', /^team\/(?:tasks|development-projects|development-candidates|development-ideas)\/\d+$/],
