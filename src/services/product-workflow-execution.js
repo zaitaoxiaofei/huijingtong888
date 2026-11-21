@@ -68,6 +68,9 @@ function acceptOutput(node,raw) {
 }
 
 export function isConfirmedImageTaskFailure(task){return task?.status==='failed'&&['AI_CREDIT_TASK_FAILED','provider_job_terminal_failed'].includes(task.error?.code);}
+export function workflowTaskId(runId,variantId,nodeId,submissionKey) {
+  return `wf-${createHash('sha256').update(`${runId}:${variantId}:${nodeId}:${submissionKey}`).digest('hex').slice(0,40)}`;
+}
 // One bounded tick, independent of any browser. commit persists submit intent before creating an AI task.
 export async function advanceProductWorkflow({id,payload}, {findTask,createTask,retryTask,commit,guard}) {
   const definition=payload.definition;
@@ -114,7 +117,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
         pending=true;continue;
       }
       const submissionKey=randomUUID();
-      const taskId=`wf-${createHash('sha256').update(`${id}:${variant.id}:${node.id}:${submissionKey}`).digest('hex').slice(0,40)}`;
+      const taskId=workflowTaskId(id,variant.id,node.id,submissionKey);
       results[node.id]={taskId,submissionKey,status:'submitting',approved:false};
       await commit();await guard();
       try {await createTask(taskRequest(id,variant,node,results[node.id],definition,results));results[node.id].status='running';}
@@ -137,5 +140,11 @@ function taskRequest(id,variant,node,state,definition,results) {
 export function invalidateWorkflowResults(payload,variantId,nodeId) {
   const ids=new Set([nodeId]);
   for(const node of payload.definition.nodes)if(node.inputs.some(id=>ids.has(id)))ids.add(node.id);
-  for(const id of ids)delete payload.outputs[variantId]?.[id];
+  const displacedTasks=[];
+  for(const id of ids){
+    const state=payload.outputs[variantId]?.[id];
+    if(state?.taskId)displacedTasks.push({nodeId:id,taskId:state.taskId,submissionKey:state.submissionKey||''});
+    delete payload.outputs[variantId]?.[id];
+  }
+  return displacedTasks;
 }

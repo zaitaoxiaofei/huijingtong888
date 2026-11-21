@@ -6,7 +6,7 @@ import { mysqlExecute, mysqlQuery, withMysqlTransaction } from '../mysql-pool.js
 import { restoreBusinessTaskSession, authorizeBusinessTaskSession, assertBusinessTaskPermission } from './business-task-tenant.js';
 import { productWorkflowStore, importProductWorkflowDraft } from './product-workflows.js';
 import {workflowAiTaskAccess} from './product-workflow-ai-tasks.js';
-import { advanceProductWorkflow, invalidateWorkflowResults, isConfirmedImageTaskFailure } from './product-workflow-execution.js';
+import { advanceProductWorkflow, invalidateWorkflowResults, isConfirmedImageTaskFailure, workflowTaskId } from './product-workflow-execution.js';
 import { buildWorkflowDraft, workflowInputContext, workflowError } from '../shared/product-workflow.js';
 import { workflowIncompleteNodes, workflowNodeHasOutput } from '../shared/workflow-completion.js';
 
@@ -93,12 +93,15 @@ async function processNextWorkflowJob() {
 
 export async function productWorkflowAction(body,session,{store=productWorkflowStore,transaction=withMysqlTransaction,ensureJobs=ensureProductWorkflowJobs,tasks=(id,workflowId,actor)=>workflowAiTaskAccess.find(workflowId,id,actor),startRunner=startProductWorkflowRunner}={}) {
   const {tenant,actor}=await store.scope(session);
-  if(!body||typeof body.id!=='string'||!['start','approve-all','approve','save-copy','retry','archive'].includes(body.action))throw workflowError('请选择有效的任务操作');
+  if(!body||typeof body.id!=='string'||!['start','approve-all','approve','save-copy','retry','regenerate','archive'].includes(body.action))throw workflowError('请选择有效的任务操作');
+  const regenerationId=body.action==='regenerate'&&typeof body.requestId==='string'?body.requestId.toLowerCase():'';
+  if(body.action==='regenerate'&&!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(regenerationId))throw workflowError('重新生成缺少有效的固定请求编号，请重新确认后提交');
   await ensureJobs();
   let unchanged=false;
   await transaction(async connection=>{
     const [jobs]=await connection.execute("SELECT *, lease_until > UTC_TIMESTAMP() AS busy FROM product_workflow_jobs WHERE tenant_id = ? AND run_id = ? FOR UPDATE",[tenant,body.id]);
-    if(Number(jobs[0]?.busy))throw Object.assign(new Error('后台正在更新该任务，请稍后重试'),{status:409});
+    const leased=Number(jobs[0]?.busy);
+    if(leased&&body.action!=='regenerate')throw Object.assign(new Error('后台正在更新该任务，请稍后重试'),{status:409});
     const [rows]=await connection.execute("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' AND id = ? FOR UPDATE",[tenant,body.id]);
     if(!rows[0])throw Object.assign(new Error('当前企业中没有这个任务'),{status:404});
     const payload=JSON.parse(rows[0].payload_json);
@@ -116,6 +119,14 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
       unchanged=true;return;
     }
     if(payload.draftId||payload.draftImportStatus==='unknown')throw workflowError('该任务已进入操作箱，请在操作箱编辑或核对导入状态');
+    if(body.action==='regenerate'){
+      const previous=payload.regenerationRequests?.[regenerationId];
+      if(previous){
+        if(body.confirmNewGeneration!==true||previous.variantId!==body.variantId||previous.nodeId!==body.nodeId||previous.previousTaskId!==body.expectedTaskId||previous.previousSubmissionKey!==body.expectedSubmissionKey)throw Object.assign(new Error('该重新生成请求编号已用于其他节点或原任务，请刷新后重新确认'),{status:409});
+        unchanged=true;return;
+      }
+      if(leased)throw Object.assign(new Error('后台正在更新该任务，请稍后重试'),{status:409});
+    }
     let next='queued';
     if(body.action!=='start'&&body.action!=='approve-all') {
       const variant=payload.variants.find(v=>v.id===body.variantId);
@@ -135,6 +146,17 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
         if(!text||typeof text!=='object'||Array.isArray(text)||Object.keys(text).some(key=>!['title','tags','description','text'].includes(key))||('tags'in text&&(!Array.isArray(text.tags)||text.tags.some(x=>typeof x!=='string')))||['title','description','text'].some(key=>key in text&&typeof text[key]!=='string')||JSON.stringify(text).length>40000)throw workflowError('文案格式无效');
         for(const key of ['title','tags','description'])if(key in text)text[key]=validateWorkflowCopy(key,text[key],key==='tags'?[]:variant.fitments||[]);
         const retained={...state,text,approved:false};invalidateWorkflowResults(payload,variant.id,node.id);results[node.id]=retained;
+      }else if(body.action==='regenerate') {
+        if(body.confirmNewGeneration!==true)throw workflowError('请明确确认重新生成会发起新任务并可能再次消耗积分，原任务仍保留结算');
+        if(typeof body.expectedTaskId!=='string'||typeof body.expectedSubmissionKey!=='string')throw workflowError('重新生成缺少原任务标识，请刷新后重新确认');
+        if(!['image','copy','video'].includes(node.type)||node.type==='image'&&node.imageMode==='material')throw workflowError('该节点不支持发起新的 AI 生成任务');
+        if(!state||!['unknown','failed','cancelled'].includes(state.status)||workflowNodeHasOutput(node,state)||state.completionIgnored)throw Object.assign(new Error('只有未完成且已停止或待核对的节点才能重新生成，请刷新任务状态'),{status:409});
+        if((state.taskId||'')!==body.expectedTaskId||(state.submissionKey||'')!==body.expectedSubmissionKey)throw Object.assign(new Error('原任务标识已变化，请刷新后重新确认，避免重复生成'),{status:409});
+        const taskId=workflowTaskId(body.id,variant.id,node.id,regenerationId);
+        const displacedTasks=invalidateWorkflowResults(payload,variant.id,node.id);
+        payload.regenerationRequests ||= {};
+        payload.regenerationRequests[regenerationId]={variantId:variant.id,nodeId:node.id,previousTaskId:body.expectedTaskId,previousSubmissionKey:body.expectedSubmissionKey,newTaskId:taskId,newSubmissionKey:regenerationId,requestedBy:actor.personId,requestedAt:new Date().toISOString(),displacedTasks};
+        results[node.id]={taskId,submissionKey:regenerationId,status:'resubmit',phase:'queued',approved:false,progressMessage:'已确认发起新生成任务，原任务记录与积分结算保留'};
       }else if(body.action==='retry') {
         if(['running','submitting'].includes(state?.status))throw workflowError('该节点仍在生成，请等待后台更新');
         const original=node.type==='image'&&state?.taskId&&!state.url?await tasks(state.taskId,body.id,actor):null;
