@@ -1,4 +1,4 @@
-import OSS from 'ali-oss';
+import {createServerOssClient} from './oss-client.js';
 import {createHash} from 'node:crypto';
 import {ossStorageConfig} from './object-storage.js';
 const MAX_BYTES=5*1024*1024;
@@ -11,7 +11,7 @@ export function createPddInvoiceStorage({env=process.env,client=null,request=fet
  function context(){
   let config;try{config=ossStorageConfig(env);}catch{fail('私有 OSS 配置不完整，请由管理员检查存储配置；可先下载到本地');}
   if(!config.enabled)fail('系统尚未启用私有 OSS，未将附件写入服务器磁盘；请先配置 OSS 或选择本地下载');
-  const oss=client||new OSS({region:config.region,bucket:config.bucket,accessKeyId:config.accessKeyId,accessKeySecret:config.accessKeySecret,stsToken:config.stsToken||undefined,secure:true,timeout:15000});
+  const oss=client||createServerOssClient(config,{env,timeoutMs:15000});
   return {config,oss};
  }
  async function privateObject(oss,key,config){

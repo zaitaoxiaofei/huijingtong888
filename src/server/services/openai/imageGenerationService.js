@@ -36,7 +36,9 @@ const AI_IMAGE_PROVIDER_TIMEOUT_MS = AI_IMAGE_GENERATION_WAIT_MS + AI_IMAGE_TRAN
 const AI_IMAGE_DOWNLOAD_TIMEOUT_MS = Math.max(10000, Number(process.env.AI_IMAGE_DOWNLOAD_TIMEOUT_MS || 60000));
 const AI_IMAGE_DOWNLOAD_ATTEMPTS = Math.max(1, Number(process.env.AI_IMAGE_DOWNLOAD_ATTEMPTS || 3));
 
-export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4", imageCount = 1, runtimeConfig = null, providerJob = null, onProviderJob = null }) {
+// The workflow defers archival until its generated-result checkpoint is saved.
+// Direct adapter callers keep the default persistence contract.
+export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4", imageCount = 1, runtimeConfig = null, providerJob = null, onProviderJob = null, deferMediaArchive = false }) {
   return withMediaCacheLease(async () => {
   const resolvedRuntimeConfig = runtimeConfig || await aiImageRuntimeConfig();
   const safeTaskId = validateTaskId(taskId);
@@ -49,7 +51,7 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
     const filename = `generated_${String(index).padStart(3, "0")}.png`;
     const filePath = path.join(taskDir, filename);
     if (await restoreMediaCacheFile(filePath)) {
-      if(process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await archiveMediaCacheFile(filePath);
+      if(!deferMediaArchive&&process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await archiveMediaCacheFile(filePath);
       generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
       continue;
     }
@@ -63,7 +65,7 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
     await assertCurrentAiTenantPermission();
     if (image?.remoteUrl) await downloadGeneratedImageToFile(image.remoteUrl, filePath);
     else await fs.writeFile(filePath, image);
-    if(process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await archiveMediaCacheFile(filePath);
+    if(!deferMediaArchive&&process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await archiveMediaCacheFile(filePath);
     generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
   }
 

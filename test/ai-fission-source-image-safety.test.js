@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 import { requestPublicImage, resolvePublicImageTarget } from '../src/http/public-image-request.js';
+import { requestServerImage } from '../src/services/server-image-request.js';
 
 const source = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const workflow = source('src/server/services/ai/aiWorkflowService.js');
 const lab = source('src/services/ai-variant-lab.js');
 function imageReader(request = requestPublicImage) {
-  const context = vm.createContext({withMediaCacheLease,  requestPublicImage: request, Response, AbortSignal, URL,
+  const context = vm.createContext({withMediaCacheLease, requestServerImage: (url, options) => requestServerImage(url, options, { request, isManaged: () => false }), Response, AbortSignal, URL,
     AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS: 20000 });
   vm.runInContext(workflow.slice(workflow.indexOf('async function fetchSourceImageResponse('),
     workflow.indexOf('function normalizeFetchableSourceUrl(')), context);

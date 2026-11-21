@@ -66,6 +66,7 @@ import {
 } from "./listing-media-readiness.js";
 import { waitForOzonSellerMediaJobs } from "./ozon-seller-media-wait.js";
 import { isManagedOssObjectUrl, mediaObjectPrefixForRetention, ossStorageConfig, promoteManagedOssObjectUrl, putContentAddressedFile, putContentAddressedObject } from "./object-storage.js";
+import { createServerOssClient } from "./oss-client.js";
 import { resolveMappedMediaInValue } from "./media-migration-map.js";
 import { standardizeListingTemplatePayload } from "./listing-template-standardizer.js";
 import { getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
@@ -320,15 +321,17 @@ function resolveListingMediaRoots() {
   return roots;
 }
 
-async function writeListingMediaFile(storedName, buffer, contentType = "application/octet-stream", objectPrefix = "listing-media") {
+async function writeListingMediaFile(storedName, buffer, contentType = "application/octet-stream", objectPrefix = "listing-media", { client = null, onStored } = {}) {
   return withMediaCacheLease(async () => {
   const extension = path.extname(storedName).toLowerCase();
   const ossObject = await putContentAddressedObject(buffer, {
     prefix: objectPrefix,
     extension,
-    contentType
+    contentType,
+    client
   });
   if (ossObject) {
+    onStored?.(ossObject);
     return {
       localPath: "",
       previewUrl: ossObject.url,
@@ -5665,12 +5668,12 @@ export async function registerListingMediaAssetFromFile(body = {}, session = nul
   const role = sanitizeListingMediaFilename(body.role || "asset").replace(/\.[^.]+$/, "").slice(0, 32) || "asset";
   const sourceName = sanitizeListingMediaFilename(body.original_name || path.basename(sourcePath));
   const storedName = `${Date.now()}-${crypto.randomUUID()}-${role}${extension}`;
-  const storedMedia = await writeListingMediaFile(storedName, buffer, contentType);
+  const storage = ossStorageConfig();
+  const client = storage.enabled ? createServerOssClient(storage) : null;
+  let storedObject;
+  const storedMedia = await writeListingMediaFile(storedName, buffer, contentType, "listing-media", { client, onStored: object => { storedObject = object; } });
   const cacheRelative = path.relative(path.resolve("uploads"), sourcePath).split(path.sep);
-  if (MEDIA_CACHE_ROOTS.includes(cacheRelative[0]) && (cacheRelative[0] !== "temp" || cacheRelative[1] === "image-cropper")) await archiveMediaCacheFile(sourcePath, { storedObject: storedMedia.driver ? storedMedia : {
-    bucket: ossStorageConfig().bucket, objectKey: storedMedia.storageName, hashSha256: storedMedia.hashSha256,
-    size: buffer.length, url: storedMedia.publishUrl
-  } });
+  if (MEDIA_CACHE_ROOTS.includes(cacheRelative[0]) && (cacheRelative[0] !== "temp" || cacheRelative[1] === "image-cropper")) await archiveMediaCacheFile(sourcePath, { storedObject, client });
   const targetPath = storedMedia.localPath;
   const url = storedMedia.previewUrl;
   const configuredPublishUrl = buildListingMediaPublishUrl(url);

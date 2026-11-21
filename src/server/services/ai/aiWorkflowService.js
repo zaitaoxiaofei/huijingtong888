@@ -12,7 +12,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { config } from "../../../config.js";
-import { requestPublicImage } from "../../../http/public-image-request.js";
+import { requestServerImage } from "../../../services/server-image-request.js";
 import { mysqlQuery } from "../../../mysql-pool.js";
 import { aiTenantId, assertCurrentAiTenantPermission, currentAiTenantSession } from "../../../services/ai-tenant-context.js";
 import { assembleListingDraftStoredRow } from "../../../services/listing-frozen-content.js";
@@ -179,7 +179,7 @@ async function generateImagesInternal(payload = {}, taskId = null) {
       : await resolveSourceImagesWithFallback(payload);
     const generatedImages = sourceImage
       ? await generateImageEdits({ taskId, finalPrompt, ratio, imageCount, sourceImage, runtimeConfig: imageRuntimeConfig, providerJob: payload.providerJob, onProviderJob: payload.onProviderJob })
-      : await generateOpenAiImages({ taskId, finalPrompt, ratio, imageCount, runtimeConfig: imageRuntimeConfig, providerJob: payload.providerJob, onProviderJob: payload.onProviderJob });
+      : await generateOpenAiImages({ taskId, finalPrompt, ratio, imageCount, runtimeConfig: imageRuntimeConfig, providerJob: payload.providerJob, onProviderJob: payload.onProviderJob, deferMediaArchive: true });
     const crop = payload.autoCrop === false
       ? { croppedImages: [], cropStatus: "skipped" }
       : await cropGeneratedImages({ taskId, generatedImages, cropMode: payload.cropMode || "auto" });
@@ -542,9 +542,10 @@ function resolveLocalPublicSourceImage(value = "", pathname = "") {
 async function fetchSourceImageResponse(url) {
   return withMediaCacheLease(async () => {
   for (const retry of [false, true]) {
-    const image = await requestPublicImage(url, {
+    const image = await requestServerImage(url, {
       headers: sourceImageFetchHeaders(url, { retry }),
       signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS),
+      timeoutMs: AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS,
       maxBytes: 20 * 1024 * 1024
     });
     if (image) return new Response(image.buffer, { headers: { "Content-Type": image.contentType } });

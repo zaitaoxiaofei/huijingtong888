@@ -1,14 +1,13 @@
 import { requestPublicMedia } from "../http/public-image-request.js";
-import { isManagedOssObjectUrl, readManagedOssObject } from "./object-storage.js";
+import { readManagedOssObject } from "./object-storage.js";
+import { ossInternalEnabled } from "./oss-client.js";
+import { isManagedPublicImageSource } from "./server-image-request.js";
 
 const MAX_BYTES = 30 * 1024 * 1024;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function isManagedListingSourceImage(url, { env = process.env } = {}) {
-  if (!isManagedOssObjectUrl(url, { prefix: "listing-media", env })) return false;
-  const parsed = new URL(url);
-  return parsed.protocol === "https:" && !parsed.username && !parsed.password && !parsed.port
-    && /^\/listing-media\/[a-f0-9]{2}\/[a-f0-9]{64}\.[a-z0-9]+$/i.test(parsed.pathname);
+  return isManagedPublicImageSource(url, { env });
 }
 
 export function isTransientImageDownloadError(error) {
@@ -23,7 +22,7 @@ export function isTransientImageDownloadError(error) {
 // always retain the public DNS, redirect and size checks.
 export async function downloadListingSourceImage(url, {
   beforeRequest,
-  internal = process.env.OSS_INTERNAL_READ === "true",
+  internal = ossInternalEnabled(),
   isManaged = isManagedListingSourceImage,
   readManaged = readManagedOssObject,
   request = requestPublicMedia,
@@ -40,7 +39,7 @@ export async function downloadListingSourceImage(url, {
     try {
       const timeoutMs = managed && internal && attempt === 1 ? 15000 : 45000;
       const response = managed
-        ? await readManaged(url, { maxBytes: MAX_BYTES, timeoutMs, internal: internal && attempt === 1 })
+        ? await readManaged(url, { maxBytes: MAX_BYTES, timeoutMs, internal })
         : await request(url, { maxBytes: MAX_BYTES, signal: AbortSignal.timeout(timeoutMs), beforeRequest });
       await beforeRequest?.();
       if (response?.ok === false) throw Object.assign(new Error(`Image HTTP ${response.status}`), { status: response.status });
@@ -56,7 +55,7 @@ export async function downloadListingSourceImage(url, {
       lastError = error;
       const transient = isTransientImageDownloadError(error);
       if (!transient || attempt === 3) break;
-      onRetry({ attempt, route: managed ? (internal && attempt === 1 ? "oss_internal" : "oss_public") : "public",
+      onRetry({ attempt, route: managed ? (internal ? "oss_internal" : "oss_public") : "public",
         elapsed_ms: Date.now() - startedAt, code: error.code || error.status || error.name });
       await waitImpl(attempt * 1000);
     }

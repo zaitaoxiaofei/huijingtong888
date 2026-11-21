@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 const workflowSource = readFileSync(new URL("../src/server/services/ai/aiWorkflowService.js", import.meta.url), "utf8");
 const imageGenerationSource = readFileSync(new URL("../src/server/services/openai/imageGenerationService.js", import.meta.url), "utf8");
@@ -191,12 +192,32 @@ test("AI image pool concurrency follows operator configuration without a fixed c
   assert.doesNotMatch(aiSettingsViewSource, /maxConcurrency, 1, 8, 1/);
 });
 
-test("AI image source fetch retries draft images with browser-like headers", () => {
-  assert.match(workflowSource, /function sourceImageFetchHeaders/);
-  assert.match(workflowSource, /User-Agent/);
-  assert.match(workflowSource, /Referer/);
-  assert.match(workflowSource, /requestPublicImage\(url,/);
-  assert.doesNotMatch(workflowSource, /falling back to text-to-image/);
+test("AI image source fetch retries draft images through the server reader with browser-like headers", async () => {
+  const calls = [];
+  const context = vm.createContext({ URL, Response, AbortSignal, Error,
+    AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS: 20000, withMediaCacheLease: action => action(),
+    requestServerImage: async (url, options) => {
+      calls.push({ url, options });
+      return calls.length === 1 ? null : { buffer: Buffer.from("image"), contentType: "image/png" };
+    }
+  });
+  vm.runInContext([
+    workflowSource.match(/^async function fetchSourceImageResponse\([^]*?^}/m)[0],
+    workflowSource.match(/^function sourceImageFetchHeaders\([^]*?^}/m)[0]
+  ].join("\n"), context);
+  const response = await context.fetchSourceImageResponse("https://cdn.ozon.ru/draft.jpg");
+  assert.equal(await response.text(), "image");
+  assert.equal(calls.length, 2);
+  for (const { url, options } of calls) {
+    assert.equal(url, "https://cdn.ozon.ru/draft.jpg");
+    assert.equal(options.maxBytes, 20 * 1024 * 1024);
+    assert.equal(options.timeoutMs, 20000);
+    assert.match(options.headers["User-Agent"], /Mozilla/);
+  }
+  assert.equal(calls[0].options.headers.Referer, undefined);
+  assert.equal(calls[1].options.headers.Referer, "https://www.ozon.ru/");
+  assert.equal(calls[1].options.headers.Origin, "https://www.ozon.ru");
+  assert.notEqual(calls[0].options.signal, calls[1].options.signal);
 });
 
 test("AI image workflow reads local generated references without HTTP site permissions", () => {

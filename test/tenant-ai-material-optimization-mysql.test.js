@@ -73,7 +73,7 @@ test("material optimization is enterprise scoped through real SQL, workers and m
       aiImageRuntimePoolConfig: async () => [], adaptiveAiImageConcurrency: value => value, aiImageRuntimeMetrics: () => ({}),
       sharp,
       resolvePublicImageTarget: async () => ({ address: "1.1.1.1" }),
-      requestPublicImage: async () => ({ buffer: imageBytes, contentType: "image/png" }),
+      requestServerImage: async () => ({ buffer: imageBytes, contentType: "image/png" }),
       getAiTaskFile: async (_task, _scope, _file, actor) => { fileReads++; if (actor.tenant.id !== 2) throw denial("Wrong private owner"); return { size: 2, filePath: imagePath, contentType: "image/png" }; },
       materializeListingMediaAssetUrl: async url => { materializations++; await context.assertCurrentAiTenantPermission(); return { finalUrl: url }; },
       putContentAddressedObject: async bytes => { await sharp(bytes).metadata(); return { url: "https://fixture.invalid/composed.png" }; },
@@ -448,10 +448,10 @@ test("material optimization is enterprise scoped through real SQL, workers and m
       const publicResult = await context.aiImageOptimizerComposeText({ imageUrl: "https://fixture.invalid/public.png", title: "Verified" }, session(2));
       assert.equal(publicResult.composed, true);
       await assert.rejects(context.aiImageOptimizerComposeText({ imageUrl: "/api/ai/file/private/generated/test.png", title: "Verified" }, session(3)), { status: 404 });
-      const requestImage = context.requestPublicImage;
-      context.requestPublicImage = async () => { await query("UPDATE tenant_members SET active = 0 WHERE tenant_id = 2 AND person_id = 7"); return { buffer: imageBytes, contentType: "image/png" }; };
+      const requestImage = context.requestServerImage;
+      context.requestServerImage = async () => { await query("UPDATE tenant_members SET active = 0 WHERE tenant_id = 2 AND person_id = 7"); return { buffer: imageBytes, contentType: "image/png" }; };
       await assert.rejects(context.aiImageOptimizerComposeText({ imageUrl: "https://fixture.invalid/public.png", title: "Verified" }, session(2)), { statusCode: 403 });
-      context.requestPublicImage = requestImage; await query("UPDATE tenant_members SET active = 1 WHERE tenant_id = 2 AND person_id = 7");
+      context.requestServerImage = requestImage; await query("UPDATE tenant_members SET active = 1 WHERE tenant_id = 2 AND person_id = 7");
     });
 
     await t.test("forged result and template job references are denied before materializing bytes", async () => {
