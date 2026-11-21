@@ -12787,6 +12787,24 @@ export async function deleteListingAiVariantAssets(body = {}, session = null) {
   return { ok: true, deleted: Number(result.affectedRows || 0), ids };
 }
 
+function preserveWorkflowPartialDraftFacts(manualFacts, payload, existingAiPayload = {}) {
+  const partial = [payload.ai_payload, existingAiPayload].some(value => value?.source === "product_workflow" && value.completion_review?.mode === "partial");
+  if (!partial) return manualFacts;
+  const template = objectValue(payload.template_payload);
+  const editable = objectValue(template.editable_payload);
+  // Final review owns these fields, including explicit blanks. Internal draft
+  // names and the live category template are not replacement product facts.
+  return sanitizeDraftManualFactsMedia({
+    ...editable,
+    title: String(editable.title ?? template.title ?? ""),
+    name: String(editable.name ?? editable.title ?? template.name ?? template.title ?? ""),
+    description: String(editable.description ?? template.description ?? ""),
+    attributes: normalizeArray(editable.attributes ?? template.attributes ?? []),
+    images: normalizeArray(payload.source_images),
+    user_facts: payload.manual_facts
+  }, normalizeArray(payload.source_images), { forceImages: true });
+}
+
 export async function createListingDraft(body, session) {
   const requestedDraftId = draftIdFromPayload(body);
   if (requestedDraftId) return updateListingDraft(requestedDraftId, body, session);
@@ -12829,7 +12847,7 @@ export async function createListingDraft(body, session) {
   if (!template) throw new Error("Listing category template not found");
   const normalizedTemplate = normalizeTemplateRow(template);
   const draftEditable = objectValue(payload.template_payload?.editable_payload);
-  const manualFacts = sanitizeDraftManualFactsMedia({
+  const manualFacts = preserveWorkflowPartialDraftFacts(sanitizeDraftManualFactsMedia({
     ...(normalizedTemplate.editable_payload || {}),
     ...draftEditable,
     title: payload.product_name || draftEditable.title || normalizedTemplate.title || "",
@@ -12838,7 +12856,7 @@ export async function createListingDraft(body, session) {
     attributes: normalizedTemplate.attributes || [],
     images: normalizedTemplate.images || [],
     user_facts: payload.manual_facts
-  }, payload.source_images, { forceImages: true });
+  }, payload.source_images, { forceImages: true }), payload);
   const aiPayload = {
     ...(payload.ai_payload || {}),
     manual_facts: payload.manual_facts || {},
@@ -12911,6 +12929,8 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
       session
     )
   ), session);
+  const existingPartialWorkflow = existing.ai_payload?.source === "product_workflow" && existing.ai_payload.completion_review?.mode === "partial";
+  if (existingPartialWorkflow && !Object.keys(objectValue(payload.template_payload)).length) payload.template_payload = cloneJsonValue(existing.template_payload, {});
   assertDraftMediaIsPublishable(payload, "草稿");
   if (!payload.template_id) throw new Error("Template is required");
   if (!payload.product_name) throw new Error("Product name is required");
@@ -12926,7 +12946,7 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
     ? existing.template_payload
     : template ? normalizeTemplateRow(template) : existing.template_payload;
   const draftEditable = objectValue(payload.template_payload?.editable_payload);
-  const manualFacts = sanitizeDraftManualFactsMedia({
+  const manualFacts = preserveWorkflowPartialDraftFacts(sanitizeDraftManualFactsMedia({
     ...(normalizedTemplate.editable_payload || {}),
     ...draftEditable,
     title: payload.product_name || draftEditable.title || normalizedTemplate.title || "",
@@ -12935,12 +12955,13 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
     attributes: normalizedTemplate.attributes || [],
     images: normalizedTemplate.images || [],
     user_facts: payload.manual_facts
-  }, payload.source_images, { forceImages: true });
+  }, payload.source_images, { forceImages: true }), payload, existing.ai_payload);
   const aiPayload = {
     ...(existing.ai_payload || {}),
     ...(payload.ai_payload || {}),
     manual_facts: payload.manual_facts || {},
-    source: payload.ai_payload?.source || existing.ai_payload?.source || (payload.manual_facts?.ai_optimization_result_id ? "ai_optimization_v2" : "listing_draft")
+    source: payload.ai_payload?.source || existing.ai_payload?.source || (payload.manual_facts?.ai_optimization_result_id ? "ai_optimization_v2" : "listing_draft"),
+    ...(existingPartialWorkflow ? { source: "product_workflow", workflow_run_id: existing.ai_payload.workflow_run_id, completion_review: existing.ai_payload.completion_review } : {})
   };
   const templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
     ? applyDraftSalePriceToTemplatePayload(payload.template_payload, payload.sale_price)

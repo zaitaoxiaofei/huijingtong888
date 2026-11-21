@@ -8,6 +8,7 @@ import { productWorkflowStore, importProductWorkflowDraft } from './product-work
 import {workflowAiTaskAccess} from './product-workflow-ai-tasks.js';
 import { advanceProductWorkflow, invalidateWorkflowResults, isConfirmedImageTaskFailure } from './product-workflow-execution.js';
 import { buildWorkflowDraft, workflowInputContext, workflowError } from '../shared/product-workflow.js';
+import { workflowIncompleteNodes, workflowNodeHasOutput } from '../shared/workflow-completion.js';
 
 let schema;
 export async function ensureProductWorkflowJobs() {
@@ -94,6 +95,7 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
   const {tenant,actor}=await store.scope(session);
   if(!body||typeof body.id!=='string'||!['start','approve-all','approve','save-copy','retry','archive'].includes(body.action))throw workflowError('请选择有效的任务操作');
   await ensureJobs();
+  let unchanged=false;
   await transaction(async connection=>{
     const [jobs]=await connection.execute("SELECT *, lease_until > UTC_TIMESTAMP() AS busy FROM product_workflow_jobs WHERE tenant_id = ? AND run_id = ? FOR UPDATE",[tenant,body.id]);
     if(Number(jobs[0]?.busy))throw Object.assign(new Error('后台正在更新该任务，请稍后重试'),{status:409});
@@ -108,6 +110,10 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
       await connection.execute("UPDATE product_workflow_documents SET payload_json = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND kind = 'run' AND id = ?",[JSON.stringify(payload),tenant,body.id]);
       await connection.execute("UPDATE product_workflow_jobs SET status = 'archived', lease_token = NULL, lease_until = NULL WHERE tenant_id = ? AND run_id = ?",[tenant,body.id]);
       return;
+    }
+    if(payload.completionReview?.mode==='partial'){
+      if(body.action!=='approve-all')throw Object.assign(new Error('该任务已按确认的现有结果完成，请进入操作箱编辑；不能重新启动被忽略的节点'),{status:409});
+      unchanged=true;return;
     }
     if(payload.draftId||payload.draftImportStatus==='unknown')throw workflowError('该任务已进入操作箱，请在操作箱编辑或核对导入状态');
     let next='queued';
@@ -137,12 +143,25 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
         else invalidateWorkflowResults(payload,variant.id,node.id);
       }else throw workflowError('不支持此任务操作');
     }else if(body.action==='approve-all') {
-      for(const variant of payload.variants)for(const node of payload.definition.nodes.filter(n=>['image','copy','video'].includes(n.type))) {
-        if(workflowNodeSkipped(node,variant))continue;
-        const state=payload.outputs[variant.id]?.[node.id];
-        if(!state?.url&&!state?.text)throw workflowError(`${variant.label}的“${node.label}”尚未生成完成`);
-        workflowInputContext(payload.definition,variant,node,payload.outputs[variant.id]);state.approved=true;
+      const incomplete=workflowIncompleteNodes(payload);
+      if(incomplete.length&&body.ignoreIncomplete!==true)throw workflowError(`${incomplete[0].variantLabel}的“${incomplete[0].nodeLabel}”尚未生成完成，请确认遗漏内容后再完成生产`);
+      if(body.ignoreIncomplete===true){
+        const supplied=body.incompleteNodes;
+        const identity=item=>JSON.stringify([item?.variantId,item?.nodeId,item?.taskId]);
+        const expected=new Set(incomplete.map(identity));
+        if(!Array.isArray(supplied)||supplied.some(item=>!item||typeof item.variantId!=='string'||typeof item.nodeId!=='string'||typeof item.taskId!=='string')||supplied.length!==expected.size||new Set(supplied.map(identity)).size!==supplied.length||supplied.some(item=>!expected.has(identity(item))))throw Object.assign(new Error('未完成节点或原任务已变化，请刷新任务并重新确认遗漏内容'),{status:409});
       }
+      for(const variant of payload.variants){
+        const results=payload.outputs[variant.id] ||= {};
+        for(const node of payload.definition.nodes.filter(n=>['image','copy','video','approval'].includes(n.type))){
+          if(workflowNodeSkipped(node,variant))continue;
+          if(node.type==='approval'){results[node.id]={...results[node.id],approved:true,approvalMode:'final_review'};continue;}
+          if(workflowNodeHasOutput(node,results[node.id]))results[node.id].approved=true;
+          else results[node.id]={...results[node.id],completionIgnored:true,approved:false};
+        }
+        if(!incomplete.length)for(const node of payload.definition.nodes.filter(n=>['image','copy','video'].includes(n.type)&&!workflowNodeSkipped(n,variant)))workflowInputContext(payload.definition,variant,node,results);
+      }
+      if(incomplete.length)payload.completionReview={mode:'partial',confirmedBy:actor.personId,confirmedAt:new Date().toISOString(),ignoredNodes:incomplete};
       buildWorkflowDraft(payload.definition,payload.variants,payload.outputs,{},body.id);
       next='ready';
     }
@@ -152,7 +171,7 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
       ON DUPLICATE KEY UPDATE status = VALUES(status), person_id = VALUES(person_id), error_message = NULL, lease_token = NULL, lease_until = NULL, next_tick_at = UTC_TIMESTAMP()`,[tenant,body.id,actor.personId,next]);
   });
   if(body.action==='archive')return {ok:true,id:body.id};
-  await startRunner();
+  if(!unchanged)await startRunner();
   return store.get('run',body.id,actor);
 }
 

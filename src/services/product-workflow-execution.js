@@ -2,6 +2,7 @@ import { workflowNodeSkipped, NO_KEY_REFERENCE_RULE } from '../shared/workflow-c
 import { createHash, randomUUID } from 'node:crypto';
 import { workflowInputContext } from '../shared/product-workflow.js';
 import { workflowNodeForVariant } from '../shared/product-workflow-inputs.js';
+import { workflowResultIgnored } from '../shared/workflow-completion.js';
 
 const PRODUCT_IDENTITY_RULES=[
   'PRODUCT IDENTITY AND LOGO RULES (override conflicting template instructions):',
@@ -75,6 +76,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
     const results=payload.outputs[variant.id] ||= {};
     for(const node of definition.nodes.filter(n=>['image','copy','video','approval'].includes(n.type))) {
       const state=results[node.id];
+      if(workflowResultIgnored(state))continue;
       if(workflowNodeSkipped(node,variant)){results[node.id]={status:'skipped',approved:true,reason:'未提供或未匹配到适配钥匙图'};continue;}
       if(node.type==='approval') {
         if(!state?.approved&&definition.reviewMode==='automatic'&&dependenciesReady(definition,variant,node,results)){results[node.id]={approved:true,approvalMode:'automatic'};for(const input of node.inputs)if(results[input])results[input].approved=true;}

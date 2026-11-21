@@ -1,6 +1,7 @@
 import { workflowNodeSkipped } from './workflow-conditions.js';
+import { workflowResultIgnored, workflowNodeHasOutput } from './workflow-completion.js';
 import {validateMaterialRefs, normalizeMaterialBindings} from './workflow-materials.js';
-import { validateWorkflowBindings, applyWorkflowBindings } from './product-workflow-bindings.js';
+import { validateWorkflowBindings, applyWorkflowBindings, composeWorkflowRichContent } from './product-workflow-bindings.js';
 import { attributeSelectedValues, readableWorkflowValue } from './product-workflow-inputs.js';
 // Portable workflow format. Node types and dependencies are independent of product category.
 export const WORKFLOW_TYPES = {
@@ -145,27 +146,32 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
   const pack=definition.nodes.find(n=>n.type==="package");
   const rows=variants.map((variant,i)=>{
     const result=outputs[variant.id]||{};
+    const partial=definition.nodes.some(node=>workflowResultIgnored(result[node.id]));
     for(const node of definition.nodes.filter(n=>["image","copy","video","approval"].includes(n.type))){
-      if(workflowNodeSkipped(node,variant))continue;
+      if(workflowNodeSkipped(node,variant)||workflowResultIgnored(result[node.id]))continue;
       if(["image","copy","video"].includes(node.type)&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未检查通过`);
-      workflowInputContext(definition,variant,node,result);
+      if(["image","copy","video"].includes(node.type)&&!workflowNodeHasOutput(node,result[node.id]))throw workflowError(`${variant.label}的“${node.label}”尚未返回可用结果`);
+      // Final review may retain an existing result even when an upstream output
+      // was explicitly omitted; execution still checks dependencies when generating.
+      if(!partial)workflowInputContext(definition,variant,node,result);
       if(node.type==="approval"&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未人工确认`);
     }
-    const videoUrls=definition.nodes.filter(n=>n.type==='video').map(n=>{if(!result[n.id]?.url)throw workflowError(`${n.label}缺少视频结果`);return result[n.id].url;});
+    const videoUrls=definition.nodes.filter(n=>n.type==='video'&&!workflowResultIgnored(result[n.id])).map(n=>{if(!result[n.id]?.url)throw workflowError(`${n.label}缺少视频结果`);return result[n.id].url;});
     const videoFields={video_urls:videoUrls,video_cover_urls:videoUrls};
     if(definition.bindings) {
       const mapped=applyWorkflowBindings(definition,variant,result);
       return {...mapped,...videoFields,offer_id:`WF-${runId.slice(0,8)}-${i+1}`,sku:`WF-${runId.slice(0,8)}-${i+1}`,images_manually_edited:true,image_edit_intent:'manual',workflow_variant_id:variant.id,workflow_facts:clone(variant.values)};
     }
-    const images=imageNodes.filter(n=>!workflowNodeSkipped(n,variant)).map(n=>{if(!result[n.id]?.url || !result[n.id]?.approved) throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`); return result[n.id].url;});
-    const copy={};
-    for(const n of copyNodes){if(!result[n.id]?.approved || !result[n.id]?.text)throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`);Object.assign(copy,result[n.id].text);}
-    if(!String(copy.title||"").trim() || !String(copy.description||"").trim() || !Array.isArray(copy.tags) || !copy.tags.length)throw workflowError(`${variant.label}缺少标题、标签或描述，请检查文案节点输出`);
+    const images=imageNodes.filter(n=>!workflowNodeSkipped(n,variant)&&!workflowResultIgnored(result[n.id])).map(n=>{if(!result[n.id]?.url || !result[n.id]?.approved) throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`); return result[n.id].url;});
+    const copy={title:'',description:'',tags:[]};
+    for(const n of copyNodes.filter(n=>!workflowResultIgnored(result[n.id]))){if(!result[n.id]?.approved || !result[n.id]?.text)throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`);Object.assign(copy,result[n.id].text);}
+    const omittedCopy=key=>copyNodes.some(n=>workflowResultIgnored(result[n.id])&&(!n.target||n.target==='bundle'||n.target===key));
+    if((!String(copy.title||"").trim()&&!omittedCopy('title')) || (!String(copy.description||"").trim()&&!omittedCopy('description')) || ((!Array.isArray(copy.tags)||!copy.tags.length)&&!omittedCopy('tags')))throw workflowError(`${variant.label}缺少标题、标签或描述，请检查文案节点输出`);
     const dimensions=pack?{weight:Number(pack.weight),weight_g:Number(pack.weight),depth:Number(pack.length)*10,width:Number(pack.width)*10,height:Number(pack.height)*10,length_mm:Number(pack.length)*10,width_mm:Number(pack.width)*10,height_mm:Number(pack.height)*10,weight_unit:"g",dimension_unit:"mm"}:{};
     const attributes=(baseTemplate.editable_payload?.variants?.[0]?.dynamic_attributes)||{};
     const dynamic_attributes=clone(attributes);
     if(definition.richContentEnabled===false)delete dynamic_attributes[11254];
-    const richContent=JSON.stringify({content:[{widgetName:"raShowcase",type:"billboard",blocks:[{imgLink:"",img:{src:images[0],srcMobile:images[0],alt:copy.title,position:"width_full",positionMobile:"width_full",widthMobile:1024,heightMobile:1536},title:{items:[{type:"text",content:copy.title}],size:"size4",align:"left",color:"color1"},text:{items:[{type:"text",content:copy.description}],size:"size2",align:"left",color:"color1"}}]}],version:0.3});
+    const richContent=partial&&!images.length?composeWorkflowRichContent(copy.title,copy.description,[]):JSON.stringify({content:[{widgetName:"raShowcase",type:"billboard",blocks:[{imgLink:"",img:{src:images[0],srcMobile:images[0],alt:copy.title,position:"width_full",positionMobile:"width_full",widthMobile:1024,heightMobile:1536},title:{items:[{type:"text",content:copy.title}],size:"size4",align:"left",color:"color1"},text:{items:[{type:"text",content:copy.description}],size:"size2",align:"left",color:"color1"}}]}],version:0.3});
     for(const node of definition.nodes.filter(n=>n.type==='attribute')) {
       const generated={...copy,tags:copy.tags.join(" "),richContent};
       const values=attributeSelectedValues(node,node.valueSource==='generated'?generated[node.generatedTarget]:variant.values[node.id]);
@@ -185,5 +191,14 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
   }
   // Never inherit image sets or variant identity from the category template.
   const payload={...cleanBase,...(definition.bindings?{currency_code:rows[0].currency_code||'CNY'}:{}),title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,images:rows[0].images,editable_payload:{...editable,...(definition.bindings?{...(rows[0].price!==undefined||rows[0].old_price!==undefined?{price:{value:Number(rows[0].price||0),old_price:Number(rows[0].old_price||0),currency_code:rows[0].currency_code||'CNY'}}:{}),currency_code:rows[0].currency_code||'CNY'}:{}),title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,rich_content_json:rows[0].rich_content_json||"",rich_content:rows[0].rich_content||"",tags:rows[0].tags,workflow_target_shop_ids:clone(definition.shopIds||[]),images:rows[0].images,variants:rows}};
-  return {template_id:Number(listNode.templateId),product_name:rows[0].title,internal_code:`WF-${runId}`,template_payload:payload,source_images:rows[0].images.map(x=>x.url),sale_price:Number(rows[0].price||price?.value||0),...(definition.bindings?{weight_g:Number(rows[0].weight_g||0),length_cm:Number(rows[0].length_mm||0)/10,width_cm:Number(rows[0].width_mm||0)/10,height_cm:Number(rows[0].height_mm||0)/10}:{}),...(pack?{weight_g:Number(pack.weight),length_cm:Number(pack.length),width_cm:Number(pack.width),height_cm:Number(pack.height)}:{}),development_type:"new",ai_payload:{source:"product_workflow",workflow_run_id:runId,definition:clone(definition)},manual_facts:{workflow_run_id:runId,variants:clone(variants)}};
+  if(rows.some((row,i)=>definition.nodes.some(node=>workflowResultIgnored(outputs[variants[i].id]?.[node.id])))){
+    for(const target of [payload,payload.editable_payload]){
+      target.primary_image=rows[0].primary_image||'';target.name=rows[0].title||'';
+      target.tags=clone(rows[0].tags);target.hashtags=clone(rows[0].tags);target.main_tags=clone(rows[0].tags);
+      target.rich_content_json=rows[0].rich_content_json||'';target.rich_content=rows[0].rich_content||'';
+      target.attributes=Object.values(rows[0].dynamic_attributes);
+      for(const key of ['source_raw','sourceRaw','category_attributes','required_attributes'])delete target[key];
+    }
+  }
+  return {template_id:Number(listNode.templateId),product_name:rows[0].title||variants[0].label||definition.name,internal_code:`WF-${runId}`,template_payload:payload,source_images:rows[0].images.map(x=>x.url),sale_price:Number(rows[0].price||price?.value||0),...(definition.bindings?{weight_g:Number(rows[0].weight_g||0),length_cm:Number(rows[0].length_mm||0)/10,width_cm:Number(rows[0].width_mm||0)/10,height_cm:Number(rows[0].height_mm||0)/10}:{}),...(pack?{weight_g:Number(pack.weight),length_cm:Number(pack.length),width_cm:Number(pack.width),height_cm:Number(pack.height)}:{}),development_type:"new",ai_payload:{source:"product_workflow",workflow_run_id:runId,definition:clone(definition)},manual_facts:{workflow_run_id:runId,variants:clone(variants)}};
 }

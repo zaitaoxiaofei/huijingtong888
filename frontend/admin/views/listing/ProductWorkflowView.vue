@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
+import { computed, h, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
@@ -25,6 +25,7 @@ import WorkflowRunReview from '../../components/listing/WorkflowRunReview.vue';
 import { createWorkflowNode, keyCaseWorkflow, validateWorkflow, validateWorkflowVariants } from '../../../../src/shared/product-workflow.js';
 import { isWorkflowInput, workflowDefault, expandWorkflowVariants, refreshWorkflowCategory } from '../../../../src/shared/product-workflow-inputs.js';
 import { planWorkflowProductImport } from '../../utils/workflow-product-import.js';
+import { workflowIncompleteNodes } from '../../../../src/shared/workflow-completion.js';
 
 const productionName=ref('');
 const wbSettingsOpen=ref(false),wbShops=ref([]);
@@ -56,6 +57,24 @@ const stateFor=id=>jobs.value.find(j=>j.run_id===id)||{};
 const statusLabels={queued:'排队中',running:'后台生成中',awaiting_review:'待人工检查',ready:'检查完成',failed:'失败待处理',imported:'生产完成'};
 const runLists=reactive(Object.fromEntries(['tasks','results'].map(key=>[key,{items:[],page:1,pageSize:20,total:0,keyword:'',loading:false}])));
 const runOpen=ref(false);
+let retryRefreshSequence=0,retryRefreshTimer=null,retryRefreshResolve=null;
+function stopRetryRefresh(){retryRefreshSequence++;clearTimeout(retryRefreshTimer);retryRefreshTimer=null;retryRefreshResolve?.();retryRefreshResolve=null;}
+watch(runOpen,open=>{if(!open)stopRetryRefresh();});
+watch(reviewEditing,editing=>{if(editing)stopRetryRefresh();});
+watch(()=>runDocument.value?.id,()=>stopRetryRefresh());
+async function refreshRetriedNode(id,variantId,nodeId){
+  stopRetryRefresh();const sequence=retryRefreshSequence;
+  const current=()=>sequence===retryRefreshSequence&&runOpen.value&&!busy.value&&!reviewEditing.value&&runDocument.value?.id===id;
+  for(const delay of [0,1000,2000,2500]){
+    if(delay)await new Promise(resolve=>{retryRefreshResolve=resolve;retryRefreshTimer=setTimeout(()=>{retryRefreshTimer=null;retryRefreshResolve=null;resolve();},delay);});
+    if(!current())return;
+    let record,states;
+    try{[record,states]=await Promise.all([apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true}),apiClient.get('/api/product-workflows/job-states?ids='+encodeURIComponent(id),{noCache:true})]);}catch{return;}
+    if(!current())return;
+    runDocument.value=record;jobs.value=[...jobs.value.filter(job=>job.run_id!==id),...states];
+    if(!['resubmit','submitting','running'].includes(record.payload.outputs[variantId]?.[nodeId]?.status))return;
+  }
+}
 const runSequences={tasks:0,results:0},runSearchTimers={};
 for(const section of ['tasks','results'])watch(()=>runLists[section].keyword,()=>{clearTimeout(runSearchTimers[section]);runSearchTimers[section]=setTimeout(()=>{runLists[section].page=1;loadRunList(section).catch(e=>ElMessage.error(e.message));},300);});
 function canDeleteRun(id){return !['queued','running'].includes(stateFor(id).status);}
@@ -67,12 +86,12 @@ const currentJob=computed(()=>runDocument.value?.payload.draftId?{status:'import
 function blankWorkflow(){return starterWorkflow();}
 const focusNode=ref('');
 function navigateNode({mode,nodeId}){focusNode.value=nodeId;engineerArea.value=mode;}
-async function action(work){if(busy.value)return;busy.value=true;try{await work();}catch(error){ElMessage.error(error.message||'操作失败');}finally{busy.value=false;busyLabel.value='';}}
+async function action(work){if(busy.value)return;stopRetryRefresh();busy.value=true;try{await work();}catch(error){ElMessage.error(error.message||'操作失败');}finally{busy.value=false;busyLabel.value='';}}
 async function loadTemplates(){const seq=++templateSequence;templateLoading.value=true;try{const params=new URLSearchParams({page:templatePage.value,pageSize:templatePageSize.value,keyword:templateSearch.value.trim()});const result=await apiClient.get(`/api/product-workflows/templates?${params}`,{noCache:true});if(seq!==templateSequence)return;templates.value=result.items||result;templateTotal.value=result.total??templates.value.length;templatePage.value=result.page||1;}finally{if(seq===templateSequence)templateLoading.value=false;}}
 async function refreshLists(includeTemplates=true){await Promise.all([...(includeTemplates?[loadTemplates()]:[]),loadRunList('tasks',{states:false}),loadRunList('results',{states:false})]);await loadJobStates();}
 
 onMounted(()=>{action(async()=>{await refreshLists();if(route.query.runId){runDocument.value=await apiClient.get('/api/product-workflows/runs?id='+encodeURIComponent(String(route.query.runId)),{noCache:true});tab.value=runDocument.value.payload.draftId?'results':'tasks';runOpen.value=true;await loadJobStates();}listingTemplates.value=await apiClient.get('/api/listing/templates');shops.value=(await apiClient.get('/api/shops')).filter(s=>s.status!=='deleted');});});
-onUnmounted(()=>{clearTimeout(searchTimer);for(const timer of Object.values(runSearchTimers))clearTimeout(timer);templateSequence++;});
+onUnmounted(()=>{stopRetryRefresh();clearTimeout(searchTimer);for(const timer of Object.values(runSearchTimers))clearTimeout(timer);templateSequence++;});
 
 function resetMaterials(){productionName.value=definition.value.name;productionMode.value='batch';fitmentMode.value='shared';sharedValues.value=Object.fromEntries(sharedInputs.value.map(n=>[n.id,workflowDefault(n)]));variants.value=[freshVariant(0)];}
 function freshVariant(index){return {requestId:crypto.randomUUID(),submittedId:null,id:`v_${crypto.randomUUID().replaceAll('-','')}`,label:`产品 ${index+1}`,values:Object.fromEntries(variantInputs.value.map(n=>[n.id,workflowDefault(n)])),promptOverrides:{}};}
@@ -167,8 +186,18 @@ async function submitProduction(){await action(async()=>{
   productionOpen.value=false;tab.value='tasks';await refreshLists();ElMessage.success(productionMode.value==='batch'?'已按每件产品创建独立任务，模板与共用材料已复用':'已提交后台生产，可以关闭页面');
 });}
 async function openRun(id,completed=false){await action(async()=>{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true});tab.value=completed?'results':'tasks';runOpen.value=true;await loadJobStates();});}
-async function runAction(body){await action(async()=>{const state=runDocument.value.payload.outputs[body.variantId]?.[body.nodeId],node=runDocument.value.payload.definition.nodes.find(n=>n.id===body.nodeId);body.recoverOnly=body.action==='retry'&&(state?.status==='unknown'||node?.type==='image'&&state?.taskId&&!state.url&&state.failureKind!=='provider_confirmed');if(body.action==='retry'&&!body.recoverOnly){try{await ElMessageBox.confirm('重生成会清除依赖本节点的后续结果，并重新调用 AI。是否继续？','重生成',{type:'warning',confirmButtonText:'确认重生成',cancelButtonText:'取消'});}catch{return;}}runDocument.value=await apiClient.post('/api/product-workflows/run-action',body);await refreshLists();});}
-async function finishProduction(){await action(async()=>{try{await ElMessageBox.confirm('我已检查全部变体的套图、文案和属性，确认完成生产并生成上架草稿。','整套人工检查',{confirmButtonText:'确认完成',type:'info'});}catch{return;}if(runDocument.value.payload.draftImportStatus!=='unknown')runDocument.value=await apiClient.post('/api/product-workflows/run-action',{id:runDocument.value.id,action:'approve-all'});try{await apiClient.post('/api/product-workflows/import-draft',{id:runDocument.value.id});}finally{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(runDocument.value.id)}`,{noCache:true});await refreshLists();}tab.value='results';ElMessage.success('生产完成，已生成草稿箱草稿；可预览编辑并选择店铺上架');});}
+async function runAction(body){let refresh=false;await action(async()=>{const state=runDocument.value.payload.outputs[body.variantId]?.[body.nodeId],node=runDocument.value.payload.definition.nodes.find(n=>n.id===body.nodeId);body.recoverOnly=body.action==='retry'&&(state?.status==='unknown'||node?.type==='image'&&state?.taskId&&!state.url&&state.failureKind!=='provider_confirmed');if(body.action==='retry'&&!body.recoverOnly){try{await ElMessageBox.confirm('重生成会清除依赖本节点的后续结果，并重新调用 AI。是否继续？','重生成',{type:'warning',confirmButtonText:'确认重生成',cancelButtonText:'取消'});}catch{return;}}runDocument.value=await apiClient.post('/api/product-workflows/run-action',body);await refreshLists();refresh=body.action==='retry';});if(refresh)void refreshRetriedNode(body.id,body.variantId,body.nodeId);}
+async function finishProduction(){await action(async()=>{
+  const id=runDocument.value.id;
+  runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true});
+  if(runDocument.value.payload.draftId){await refreshLists();tab.value='results';return;}
+  const incomplete=workflowIncompleteNodes(runDocument.value.payload);
+  const message=incomplete.length?h('div',[h('p','已完成的内容会保留。以下节点未完成，忽略后将不写入本次草稿：'),h('ul',{style:{maxHeight:'45vh',overflowY:'auto'}},incomplete.map(item=>h('li',{key:`${item.variantId}:${item.nodeId}`},`${item.variantLabel} · ${item.nodeLabel}：${item.reason}`))) ]):'我已检查全部变体的套图、文案和属性，确认完成生产并生成上架草稿。';
+  try{await ElMessageBox.confirm(message,incomplete.length?'确认忽略未完成节点':'整套人工检查',{confirmButtonText:incomplete.length?'忽略这些节点并继续保存':'确认完成',cancelButtonText:'取消',type:incomplete.length?'warning':'info'});}catch{return;}
+  if(runDocument.value.payload.draftImportStatus!=='unknown')runDocument.value=await apiClient.post('/api/product-workflows/run-action',{id,action:'approve-all',...(incomplete.length?{ignoreIncomplete:true,incompleteNodes:incomplete.map(({variantId,nodeId,taskId})=>({variantId,nodeId,taskId}))}:{})});
+  try{await apiClient.post('/api/product-workflows/import-draft',{id});}finally{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true});await refreshLists();}
+  tab.value='results';ElMessage.success('生产完成，已生成草稿箱草稿；可预览编辑并选择店铺上架');
+});}
 function openDraft(id){router.push({path:'/listing-automation',query:{draftId:id}});}
 watch(tab,()=>{reviewEditing.value=false;});
 </script>
