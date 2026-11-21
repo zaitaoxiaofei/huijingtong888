@@ -1,5 +1,6 @@
 import { normalizeWorkflowTags,validateWorkflowCopy } from './workflow-copy-rules.js';
 import { workflowNodeSkipped } from './workflow-conditions.js';
+import { workflowResultIgnored } from './workflow-completion.js';
 import { attributeSelectedValues, isWorkflowInput, readableWorkflowValue } from './product-workflow-inputs.js';
 
 const fail=message=>{throw Object.assign(new Error(message),{status:400});};
@@ -43,6 +44,7 @@ function sourceValue(definition,variant,results,ref) {
   if(workflowNodeSkipped(node,variant))return '';
   if(isWorkflowInput(node))return node.type==='images'?(variant.values[node.id]||[]):readableWorkflowValue(node,variant.values[node.id]);
   const state=results[node.id];
+  if(workflowResultIgnored(state))return '';
   if(!state?.approved)fail(`${variant.label}的“${node.label}”尚未检查通过`);
   if(node.type==='image'?!state.url:state.text?.[ref.output]==null)fail(`${variant.label}的“${node.label}”尚未返回所绑定的输出`);
   return node.type==='image'?state.url:state.text?.[ref.output];

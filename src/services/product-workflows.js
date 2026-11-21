@@ -130,6 +130,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     const {tenant,actor}=await scope(session);
     if(['material','key_model'].includes(kind)&&loadCatalog){const brands=await catalogFor(actor),bindings=requireCatalogBindings(Object.hasOwn(body.payload||{},'bindings')?body.payload.bindings:materialBindings(body.payload),brands);body={...body,payload:{...body.payload,brand:bindings[0]?.brand||'',model:bindings[0]?.models[0]||'',bindings}};}
     const payload=kind==='key_model'?normalizeWorkflowKeyModel(body.payload):kind==='material'?normalizeWorkflowMaterial(body.payload):body.payload;
+    if(kind==='run'&&(Object.hasOwn(payload||{},'completionReview')||Object.values(payload?.outputs||{}).some(results=>Object.values(results||{}).some(state=>state?.completionIgnored===true))))throw workflowError('完成生产及忽略节点只能通过服务端确认操作记录，不能由客户端指定');
     if(kind==="template")validateWorkflow(payload);
     else if(['prompt','optimization'].includes(kind)) {
       if(!payload || typeof payload !== 'object' || Array.isArray(payload) || !String(payload.name||'').trim())throw workflowError('请填写记录名称');
@@ -146,6 +147,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     if(Buffer.byteLength(serialized)>4*1024*1024)throw workflowError("工作流记录超过 4 MB，请减少内容；图片必须上传，不能嵌入文件");
     if(body.id) {
       const previous=await get(kind,body.id,session);
+      if(kind==='run'&&previous.payload.completionReview?.mode==='partial')throw workflowError('该任务已按确认的现有结果完成，请进入操作箱编辑');
       if(kind==='run'&&previous.payload.executionMode==='background')throw workflowError('后台生产任务请使用确认、编辑文案或重试操作，不能覆盖整条任务记录');
       if(kind==="run" && JSON.stringify([previous.payload.definition,previous.payload.variants])!==JSON.stringify([payload.definition,payload.variants]))throw workflowError("任务已锁定模板和材料；请创建新任务使用修改后的内容");
       if(kind==="run" && (previous.payload.draftId!==payload.draftId || previous.payload.draftImportStatus!==payload.draftImportStatus))throw workflowError("草稿导入状态只能通过导入操作更新");
@@ -234,6 +236,7 @@ export async function importProductWorkflowDraft(id,session,services,{store=prod
     const template=run.listingSnapshot||currentTemplate;
     if(run.listingSnapshot)for(const key of ['description_category_id','type_id'])if(Number(template[key]||template.editable_payload?.[key])!==Number(currentTemplate[key]||currentTemplate.editable_payload?.[key]))throw workflowError('原类目模板的分类已变化，请重新绑定类目后创建生产任务');
     const body=buildWorkflowDraft(definition,run.variants,run.outputs,template,id);
+    if(run.completionReview?.mode==='partial')body.ai_payload.completion_review=JSON.parse(JSON.stringify(run.completionReview));
     run.draftImportStatus="unknown";
     await connection.execute("UPDATE product_workflow_documents SET payload_json = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND id = ?",[JSON.stringify(run),tenant,id]);
     return {body,run};
