@@ -104,9 +104,9 @@ test("three images with one definite failure cost 20 points; replay never resubm
 test("invalid media and an unknown provider acceptance do not charge or blindly retry", async t => {
   for (const behavior of ["invalid", "unknown"]) {
     const f = await fixture(t, () => behavior);
-    await assert.rejects(f.generate({ imageCount: 1 }), { code: "AI_CREDIT_RESULT_PENDING" });
+    await assert.rejects(f.generate({ imageCount: 1 }), { code: "AI_CREDIT_RECONCILIATION_REQUIRED" });
     assert.deepEqual(f.stats(), { available: 90, frozen: 10, submits: 1, settlements: 0 });
-    await assert.rejects(f.generate({ imageCount: 1 }), { code: "AI_CREDIT_RESULT_PENDING" });
+    await assert.rejects(f.generate({ imageCount: 1 }), { code: "AI_CREDIT_RECONCILIATION_REQUIRED" });
     assert.deepEqual(f.stats(), { available: 90, frozen: 10, submits: 1, settlements: 0 });
   }
 });

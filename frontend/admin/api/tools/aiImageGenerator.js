@@ -18,6 +18,13 @@ function aiTaskPollDelay(attempt) {
   return AI_TASK_POLL_DELAYS_MS[Math.min(Math.max(0, attempt), AI_TASK_POLL_DELAYS_MS.length - 1)];
 }
 
+function assertAiTaskCanProgress(task) {
+  if (task?.status !== "reconciliation_required") return;
+  throw Object.assign(new Error(task.error?.message || "原图片任务无法自动恢复，请联系平台管理员核对供应商结果与积分记录，处理后恢复原任务"), {
+    code: "AI_CREDIT_RECONCILIATION_REQUIRED", taskId: task.taskId || task.taskNo || "", task, recoverable: true
+  });
+}
+
 function waitForAiTaskUpdate(taskId, fallbackMs) {
   return new Promise((resolve) => {
     const timeout = globalThis.setTimeout(cleanup, fallbackMs);
@@ -51,6 +58,7 @@ export async function generateAiImages(payload, options = {}) {
     const tasks = await apiClient.get(`/api/ai-generation/tasks?taskIds=${encodeURIComponent(taskId)}&includePayload=1`, { noCache: true });
     const task = Array.isArray(tasks) ? tasks[0] : null;
     if (task?.status === "done") return task.output || {};
+    assertAiTaskCanProgress(task);
     if (task?.status === "provider_pending") {
       await apiClient.post(`/api/ai-generation/tasks/${encodeURIComponent(taskId)}/retry`, {});
       await waitForAiTaskUpdate(taskId, aiTaskPollDelay(pollAttempt++));
@@ -62,6 +70,7 @@ export async function generateAiImages(payload, options = {}) {
     await waitForAiTaskUpdate(taskId, aiTaskPollDelay(pollAttempt++));
   }
   const tasks = await apiClient.get(`/api/ai-generation/tasks?taskIds=${encodeURIComponent(taskId)}&includePayload=1`, { noCache: true }).catch(() => []);
+  assertAiTaskCanProgress(Array.isArray(tasks) ? tasks[0] : null);
   throw new AiTaskStillRunningError(Array.isArray(tasks) ? tasks[0] : { taskId });
 }
 
@@ -79,6 +88,7 @@ export async function pullAiImageTaskResult(taskId, options = {}) {
   const task = Array.isArray(tasks) ? tasks[0] : null;
   if (!task) throw new Error("AI 图片任务不存在或已清理");
   if (task.status === "done") return task.output || {};
+  assertAiTaskCanProgress(task);
   if (task.status === "provider_pending" && options.resume !== false) {
     await apiClient.post(`/api/ai-generation/tasks/${encodeURIComponent(taskId)}/retry`, {});
   }

@@ -38,6 +38,24 @@ test('job-level failure can resume without clearing completed outputs or invokin
  const result=await productWorkflowAction({id:'run',action:'start'},actor,f.deps);assert.equal(result.payload.outputs.v.main.url,'existing.png');assert.equal(f.starts,1);assert.match(f.writes[1].sql,/ON DUPLICATE KEY UPDATE/);
 });
 
+function recoveryFixture(){
+ const f=fixture({status:'awaiting_review'});
+ f.payload.definition.nodes=[{id:'main',type:'image',inputs:[]},{id:'detail',type:'image',inputs:['main']}];f.payload.variants=[{id:'v',values:{}}];
+ f.payload.outputs.v={main:{url:'approved.png',approved:true},detail:{taskId:'original',submissionKey:'saved',status:'unknown',phase:null}};
+ return f;
+}
+test('manual reconciliation keeps the original task and all approved image outputs',async()=>{
+ const f=recoveryFixture();f.deps.tasks=async()=>({status:'reconciliation_required',error:{code:'AI_CREDIT_RECONCILIATION_REQUIRED'}});
+ await productWorkflowAction({id:'run',action:'retry',variantId:'v',nodeId:'detail'},actor,f.deps);
+ assert.equal(f.payload.outputs.v.detail.status,'resubmit');assert.equal(f.payload.outputs.v.detail.taskId,'original');assert.equal(f.payload.outputs.v.detail.submissionKey,'saved');
+ assert.deepEqual(f.payload.outputs.v.main,{url:'approved.png',approved:true});assert.equal(f.starts,1);
+});
+test('a reconciled failed task can regenerate only its node even when its workflow was previously unknown',async()=>{
+ const f=recoveryFixture();f.deps.tasks=async()=>({status:'failed',error:{code:'AI_CREDIT_TASK_FAILED'}});
+ await productWorkflowAction({id:'run',action:'retry',variantId:'v',nodeId:'detail'},actor,f.deps);
+ assert.equal(f.payload.outputs.v.detail,undefined);assert.deepEqual(f.payload.outputs.v.main,{url:'approved.png',approved:true});
+});
+
 test('record deletion route is available only to tenant operators',()=>{
  assert.equal(authorizeApiRequest({method:'POST',_session:actor},['api','product-workflows','archive']).allowed,true);
  assert.equal(tenantIsolationDecision(actor,['api','product-workflows','archive'],'POST').allowed,true);

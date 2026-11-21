@@ -69,7 +69,7 @@ for(const receipt of [false,true])test(`durable result survives a lost settlemen
 test("local recovery requires an explicit media verifier and cannot refund or submit again",async()=>{
   const fixture=await interruptedResultFixture({receipt:false,verify:false});
   try{
-    await assert.rejects(fixture.execute(),{code:"AI_CREDIT_RESULT_PENDING"});
+    await assert.rejects(fixture.execute(),{code:"AI_CREDIT_RECONCILIATION_REQUIRED"});
     assert.equal(fixture.task.status,"running");
     assert.equal(fixture.counters.submits,1);assert.equal(fixture.counters.settlements,0);
   }finally{await fixture.cleanup();}

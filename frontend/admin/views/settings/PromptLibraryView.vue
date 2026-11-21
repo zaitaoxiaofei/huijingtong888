@@ -3159,7 +3159,7 @@ async function generateOne(job) {
         mode: sourceImageForRequest ? "image_to_image" : "text_to_image"
       });
     } catch (error) {
-      if (error?.code === "AI_TASK_STILL_RUNNING") throw error;
+      if (["AI_TASK_STILL_RUNNING", "AI_CREDIT_RECONCILIATION_REQUIRED"].includes(error?.code)) throw error;
       if (!sourceImageForRequest) throw error;
       logs.value.unshift({
         time: new Date().toLocaleString(),
@@ -3252,7 +3252,7 @@ async function generateOne(job) {
       model: "CCTQ-image2"
     });
   } catch (error) {
-    job.status = error?.code === "AI_TASK_STILL_RUNNING" ? "等待服务商" : "失败";
+    job.status = error?.code === "AI_CREDIT_RECONCILIATION_REQUIRED" ? "待人工核对" : error?.code === "AI_TASK_STILL_RUNNING" ? "等待服务商" : "失败";
     job.pendingTaskId = error?.taskId || job.pendingTaskId || "";
     job.errorMessage = error.message || "生成失败";
     logs.value.unshift({
@@ -3782,7 +3782,7 @@ async function pullPendingResult(item) {
     item.pendingTaskId = "";
     ElMessage.success("已从后台任务拉回图片");
   } catch (error) {
-    item.status = error?.code === "AI_TASK_STILL_RUNNING" ? "等待服务商" : "失败";
+    item.status = error?.code === "AI_CREDIT_RECONCILIATION_REQUIRED" ? "待人工核对" : error?.code === "AI_TASK_STILL_RUNNING" ? "等待服务商" : "失败";
     item.errorMessage = error.message || "拉回图片失败";
     if (error?.code === "AI_TASK_STILL_RUNNING") ElMessage.info("服务商仍在生成，任务会继续保留，可稍后再次拉回");
     else ElMessage.error(item.errorMessage);

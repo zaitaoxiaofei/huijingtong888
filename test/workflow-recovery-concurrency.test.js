@@ -49,3 +49,25 @@ test('missing local task is pending review and retains its original submit inten
  const r=run();r.payload.outputs.one={main:{taskId:'same-id',submissionKey:'original',status:'submitting'}};
  const result=await advanceProductWorkflow(r,{...ai(),findTask:async()=>null});assert.equal(result.status,'awaiting_review');assert.equal(r.payload.outputs.one.main.submissionKey,'original');
 });
+
+test('a receiptless credit task pauses for reconciliation without losing completed images or resubmitting',async()=>{
+ const r=run();r.payload.outputs.one={earlier:{url:'https://example.test/approved.png',approved:true},main:{taskId:'same-id',submissionKey:'original',status:'running',phase:'provider_pending',progressMessage:'正在查询原任务结果，不重复提交'}};
+ const original=structuredClone(r.payload.outputs.one.earlier);
+ const deps={...ai(),findTask:async()=>({status:'reconciliation_required',error:{code:'AI_CREDIT_RECONCILIATION_REQUIRED',message:'原任务缺少供应商回执，请联系平台管理员核对，核对后恢复原任务'}}),createTask:async()=>{throw Error('must not submit another image');},retryTask:async()=>{throw Error('automatic polling must not requeue');}};
+ for(let i=0;i<3;i++){
+  const result=await advanceProductWorkflow(r,deps);
+  assert.equal(result.status,'awaiting_review');assert.match(result.error,/核对/);
+  assert.equal(r.payload.outputs.one.main.status,'unknown');assert.equal(r.payload.outputs.one.main.phase,null);assert.equal(r.payload.outputs.one.main.progressMessage,null);
+  assert.equal(r.payload.outputs.one.main.taskId,'same-id');assert.equal(r.payload.outputs.one.main.submissionKey,'original');assert.deepEqual(r.payload.outputs.one.earlier,original);
+ }
+});
+
+test('manual reconciliation recovery requeues the original task once and accepts its saved result',async()=>{
+ const r=run();r.payload.outputs.one={main:{taskId:'same-id',submissionKey:'original',status:'resubmit'}};
+ let status='reconciliation_required',retries=0;
+ const deps={...ai(),findTask:async()=>({status,error:{code:'AI_CREDIT_RECONCILIATION_REQUIRED'},output:{generatedImages:[{url:'https://example.test/recovered.png'}]}}),retryTask:async id=>{assert.equal(id,'same-id');retries++;status='queued';},createTask:async()=>{throw Error('must recover the original task');}};
+ assert.equal((await advanceProductWorkflow(r,deps)).status,'running');assert.equal(retries,1);
+ await advanceProductWorkflow(r,deps);assert.equal(retries,1);
+ status='done';await advanceProductWorkflow(r,deps);
+ assert.equal(r.payload.outputs.one.main.url,'https://example.test/recovered.png');assert.equal(r.payload.outputs.one.main.taskId,'same-id');
+});

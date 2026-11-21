@@ -133,7 +133,7 @@ export async function productWorkflowAction(body,session,{store=productWorkflowS
         if(['running','submitting'].includes(state?.status))throw workflowError('该节点仍在生成，请等待后台更新');
         const original=node.type==='image'&&state?.taskId&&!state.url?await tasks(state.taskId,body.id,actor):null;
         if(body.recoverOnly&&isConfirmedImageTaskFailure(original)){state.status='failed';state.failureKind='provider_confirmed';state.error=original.error?.message||'供应商已确认失败，请确认后重新生成';}
-        else if(state?.status==='unknown'||node.type==='image'&&state?.taskId&&!state.url&&!isConfirmedImageTaskFailure(original))state.status='resubmit';
+        else if(!isConfirmedImageTaskFailure(original)&&(state?.status==='unknown'||node.type==='image'&&state?.taskId&&!state.url))state.status='resubmit';
         else invalidateWorkflowResults(payload,variant.id,node.id);
       }else throw workflowError('不支持此任务操作');
     }else if(body.action==='approve-all') {

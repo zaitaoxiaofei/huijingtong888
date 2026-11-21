@@ -9,7 +9,7 @@ import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
 const route=useRoute(),router=useRouter(),source=ref(String(route.query.source||'all')),keyword=ref(''),rows=ref([]),loading=ref(false),errors=ref([]),detail=ref(null),drawer=ref(false),detailLoading=ref(false),legacyVisible=ref(Boolean(route.query.batchNo)),page=ref(1),pageSize=20;let sequence=0,detailSequence=0,disposed=false;
 const sources=[{value:'all',label:'全部来源'},{value:'workflow',label:'AI模板工作流'},{value:'variant',label:'AI裂变'},{value:'optimization',label:'AI优化'},{value:'suite',label:'AI电商套图'},{value:'other',label:'其他生成'}];
 const fieldNames={mainImage:'主图',detailImages:'详情图',commerceCopy:'商品文案',title:'标题',tags:'标签',description:'描述',video:'视频'};
-const labels={queued:'排队中',running:'生成中',done:'已完成',completed:'已完成',success:'已完成',failed:'失败',cancelled:'已取消',awaiting_review:'待检查',ready:'可查看',partial:'部分完成'};
+const labels={queued:'排队中',running:'生成中',done:'已完成',completed:'已完成',success:'已完成',failed:'失败',cancelled:'已取消',reconciliation_required:'待人工核对',awaiting_review:'待检查',ready:'可查看',partial:'部分完成'};
 function classify(module=''){return /optimiz/.test(module)?'optimization':/variant_lab|fission/.test(module)?'variant':/ecommerce|suite/.test(module)?'suite':/workflow/.test(module)?'workflow':'other';}
 const filtered=computed(()=>rows.value.filter(r=>(source.value==='all'||r.source===source.value)&&`${r.name} ${r.id}`.toLowerCase().includes(keyword.value.trim().toLowerCase())));
 const paged=computed(()=>filtered.value.slice((page.value-1)*pageSize,page.value*pageSize));
