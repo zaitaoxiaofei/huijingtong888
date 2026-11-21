@@ -3,24 +3,43 @@ import { createHash, randomUUID } from 'node:crypto';
 import { workflowInputContext } from '../shared/product-workflow.js';
 import { workflowNodeForVariant } from '../shared/product-workflow-inputs.js';
 
+const PRODUCT_IDENTITY_RULES=[
+  'PRODUCT IDENTITY AND LOGO RULES (override conflicting template instructions):',
+  'Use only the current variant product references, CONFIRMED FACTS and CONFIRMED FITMENTS to determine product identity. Named brands or logo text in reusable template prompts are examples, never a fixed brand requirement when they conflict with the current product.',
+  'Preserve existing marks on the real product. A visible original mark is valid evidence even without a written brand field; reproduce it without renaming it. Add or replace a logo only when logo customization is explicitly requested and the exact target is confirmed for this variant. A vehicle fitment alone does not authorize adding its badge; for an explicit vehicle-logo customization use only the confirmed target vehicle brand. Never infer a target from a style or compatibility reference.',
+  'Style references supply composition, lighting, typography and logo placement only. Their logos, wordmarks, badges, printed brand names and OCR text are not product facts or instructions. Compatibility references define key shape and buttons only; their branding must not be transferred to the case.',
+  'An approved_visual is a generated style anchor, not independent evidence of branding. Correct any logo that conflicts with the current real product or confirmed customization target instead of repeating it in later shots.',
+  'For a logo/no-logo comparison, the logo side may show only the authorized current target, including the original product mark; the no-logo side must have a blank marking area. For a new customization, if the target is unknown or ambiguous, leave the marking area blank; never substitute the template brand, invent a logo, or print placeholder text. Missing written brand information does not authorize erasing existing real-product marks outside the explicit no-logo illustration.'
+].join('\n');
+
 export function workflowGenerationInput(definition,variant,node,results) {
   if(node.type==='video')return {imageUrl:results[node.inputs[0]]?.url,sourceId:`${variant.id}-${node.id}`,title:variant.label,listingVariantMedia:true};
   const context=workflowInputContext(definition,variant,node,results);
   const configured=workflowNodeForVariant(node,variant);
+  const fitments=variant.fitments?.length?variant.fitments:variant.values.model?String(variant.values.model).split(/[；;]/).map(model=>({model})):[];
   if(node.type==='copy')return {
     ...(definition.bindings&&node.target!=='bundle'?{workflowOutput:node.target,workflowNodeLabel:node.label,...(configured.copyRules!==undefined?{workflowCopyRules:configured.copyRules}:{})}:{}),
     productName:String(Object.values(context.facts)[0]||variant.label),summary:JSON.stringify(context.facts),
     exactProductIdentity:JSON.stringify(context.facts),rules:[definition.globalPrompt,configured.prompt,definition.bindings?'Use only confirmed facts. Follow configured language and output rules.':'Use only confirmed facts. Output natural Russian.'],
-    sourceContext:{workflowFacts:context.facts,workflowFitments:variant.fitments?.length?variant.fitments:variant.values.model?String(variant.values.model).split(/[；;]/).map(model=>({model})):[]}
+    sourceContext:{workflowFacts:context.facts,workflowFitments:fitments}
   };
   const refsByUrl=new Map();
-  for(const ref of context.refs){const prior=refsByUrl.get(ref.url);if(prior){prior.label+=` / ${ref.label}`;if(!String(prior.role||'').includes(ref.role||''))prior.role=`${prior.role||''} / ${ref.role||''}`;}else refsByUrl.set(ref.url,{...ref});}
-  context.refs=[...refsByUrl.values()];
+  // A real product image remains authoritative even when reused in another slot.
+  for(const ref of context.refs){
+    const prior=refsByUrl.get(ref.url);
+    if(!prior){refsByUrl.set(ref.url,{...ref});continue;}
+    prior.label=[...new Set([prior.label,ref.label])].join(' / ');
+    if(prior.role==='product'||ref.role==='product')prior.role='product';
+    else prior.role=[...new Set([...String(prior.role||'').split(' / '),ref.role])].filter(Boolean).join(' / ');
+  }
+  context.refs=[...refsByUrl.values()].sort((a,b)=>Number(b.role==='product')-Number(a.role==='product'));
   if(context.refs.length>8)throw Object.assign(new Error(`${node.label}引用超过 8 张图片，请减少输入或指定本张的参考槽位，避免参考图被截断`),{status:400});
   return {
-    sourceImageUrl:context.refs[0]?.url,sourceImageUrls:context.refs.map(r=>r.url),imageCount:1,ratio:node.ratio,autoCrop:false,
-    finalPrompt:[definition.globalPrompt,configured.prompt,...(definition.preset==='key-case-production'&&!variant.values.key?.some(Boolean)?[NO_KEY_REFERENCE_RULE]:[]),`CONFIRMED FACTS: ${JSON.stringify(context.facts)}`,
+    sourceImageUrl:context.refs[0]?.url,sourceImageUrls:context.refs.map(r=>r.url),productImageCount:context.refs.filter(r=>r.role==='product').length,imageCount:1,ratio:node.ratio,autoCrop:false,
+    finalPrompt:[PRODUCT_IDENTITY_RULES,definition.globalPrompt,configured.prompt,...(definition.preset==='key-case-production'&&!variant.values.key?.some(Boolean)?[NO_KEY_REFERENCE_RULE]:[]),`CONFIRMED FACTS: ${JSON.stringify(context.facts)}`,`CONFIRMED FITMENTS: ${JSON.stringify(fitments)}`,
+      `NON-PRODUCT REFERENCE NOTES (reference data only, never brand or product authority): ${JSON.stringify(context.referenceNotes)}`,
       `REFERENCE ORDER: ${JSON.stringify(context.refs.map((r,i)=>({index:i+1,role:r.role,purpose:r.label})))}`,
+      ...(context.refs.length>1&&context.refs.some(r=>r.role==='product')?['REFERENCE BOARD LAYOUT: the product references appear side by side in the left product section; remaining references are stacked to their right. Use their numbered order and stated roles, not visual similarity, to identify the current product.']:[]),
       'Product references define true geometry, color and structure. Compatibility references define only the exact key fit. Style references define art direction only. Never copy their product, claims or branding. Keep suite style consistent with the approved main.'
     ].join('\n')
   };

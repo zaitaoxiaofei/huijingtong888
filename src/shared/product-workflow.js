@@ -108,12 +108,12 @@ export function validateWorkflowVariants(definition, variants) {
 
 export function workflowInputContext(definition, variant, node, results) {
   const byId = new Map(definition.nodes.map(n => [n.id,n]));
-  const refs = [], facts = {}, visited=new Set();
+  const refs = [], facts = {}, referenceNotes = [], visited=new Set();
   function visit(id) {
     if(visited.has(id)) return; visited.add(id);
     const source=byId.get(id);
     if(["field","attribute"].includes(source.type)) {if(source.valueSource!=="generated")facts[source.label]=readableWorkflowValue(source,variant.values[id]);}
-    else if(source.type==="images") (variant.values[id]||[]).forEach((url,i)=>{if(url&&(!node.referenceSlots?.[source.id]||node.referenceSlots[source.id].includes(i)))refs.push({url,role:source.referenceRole,label:source.slots[i]});});
+    else if(source.type==="images") (variant.values[id]||[]).forEach((url,i)=>{if(url&&(!node.referenceSlots?.[source.id]||node.referenceSlots[source.id].includes(i)))refs.push({url,role:source.referenceRole||'product',label:source.slots[i]});});
     else if(source.type==="image") {
       if(!results[id]?.url) throw workflowError(`请先完成“${source.label}”`);
       refs.push({url:results[id].url,role:"approved_visual",label:source.label});
@@ -129,10 +129,11 @@ export function workflowInputContext(definition, variant, node, results) {
   for(const ref of [...(definition.sharedMaterialRefs||[]),...(node.materialRefs||[]),...(variant.materialRefs||[])]) {
     const record=definition.materialSnapshots?.[ref.id];
     if(!record)throw workflowError('生产资料未加载，请重新提交任务');
-    facts[`参考资料：${record.name}`]=[record.brand,record.model,record.material,record.category,record.notes].filter(Boolean).join('；');
-    if(node.type!=='copy')record.images.forEach((url,i)=>refs.push({url,role:record.role,label:`${record.name} · ${i+1}`}));
+    if(record.role==='product')facts[`参考资料：${record.name}`]=[record.brand,record.model,record.material,record.category,record.notes].filter(Boolean).join('；');
+    else referenceNotes.push({role:record.role||'style',purpose:record.name,notes:record.notes||''});
+    if(node.type!=='copy')record.images.forEach((url,i)=>refs.push({url,role:record.role||'style',label:`${record.name} · ${i+1}`}));
   }
-  return {facts,refs};
+  return {facts,refs,referenceNotes};
 }
 
 export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, runId) {
