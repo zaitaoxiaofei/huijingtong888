@@ -33,10 +33,14 @@ async function configureWb(){wbSettingsOpen.value=!wbSettingsOpen.value;if(wbSet
 function selectWbCategory(value){definition.value.wbOutput={...definition.value.wbOutput,subjectId:Number(value.subjectID),categoryName:value.subjectName};}
 function openWbOutput(id){router.push({path:'/listing-automation',query:{platform:'wb',workflowRunId:id}});}
 const shops=ref([]),productionMode=ref('batch'),fitmentMode=ref('shared');
+let listingTemplatesPromise=null,shopsPromise=null;
+function ensureListingTemplates(){return listingTemplatesPromise||=apiClient.get('/api/listing/templates').then(rows=>{listingTemplates.value=rows;return rows;}).catch(error=>{listingTemplatesPromise=null;throw error;});}
+function ensureShops(){return shopsPromise||=apiClient.get('/api/shops').then(rows=>{shops.value=rows.filter(shop=>shop.status!=='deleted');return shops.value;}).catch(error=>{shopsPromise=null;throw error;});}
 const route=useRoute(),router=useRouter(),tab=ref(['materials','results','tasks'].includes(route.query.tab)?route.query.tab:'library'),templates=ref([]),jobs=ref([]),listingTemplates=ref([]);
 const templateDocument=ref(null),definition=ref(blankWorkflow()),categoryId=ref(null),selectedCategoryKey=ref(''),selectedCategory=ref(null);
 const keyModelChoices=ref([]),editorOpen=ref(false),templateSearch=ref('');
 const templatePage=ref(1),templatePageSize=ref(12),templateTotal=ref(0),templateLoading=ref(false);let templateSequence=0,searchTimer;
+let templatesLoaded=false,mounted=false;const tabLoads=new Map(),regenerationRequests=new Map();
 const filteredTemplates=computed(()=>templates.value);
 watch(templateSearch,()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{templatePage.value=1;loadTemplates().catch(e=>ElMessage.error(e.message));},300);});
 const videoEnabled=computed(()=>definition.value.nodes.some(n=>n.type==='video'));
@@ -46,7 +50,7 @@ const sharedValues=ref({}),variants=ref([]),runDocument=ref(null),reviewEditing=
 const pendingProductCount=computed(()=>variants.value.filter(row=>!row.submittedId).length);
 const templatePreview=ref(null);
 async function viewTemplate(id){await action(async()=>{templatePreview.value=await apiClient.get(`/api/product-workflows/templates?id=${encodeURIComponent(id)}`,{noCache:true});});}
-async function refreshRun(){if(!runDocument.value)return;await action(async()=>{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(runDocument.value.id)}`,{noCache:true});await loadJobStates();});}
+async function refreshRun(){if(!runDocument.value)return;await action(()=>readRun(runDocument.value.id));}
 const clone=value=>JSON.parse(JSON.stringify(value));
 const inputs=computed(()=>definition.value.nodes.filter(n=>isWorkflowInput(n)&&n.inputGroup!=='listing-final').map(n=>n.inputGroup==='fitment'?{...n,scope:fitmentMode.value==='individual'?'variant':'shared'}:n));
 watch(fitmentMode,(mode)=>{for(const node of definition.value.nodes.filter(n=>n.inputGroup==='fitment')){if(mode==='individual'){for(const row of variants.value){for(const key of ['__fitments','__fitmentBindings','__keyModelId','__keyModelKind','__keyModelRevision'])if(sharedValues.value[key]!==undefined)row.values[key]??=clone(sharedValues.value[key]);}for(const row of variants.value)row.values[node.id]??=clone(sharedValues.value[node.id]??workflowDefault(node));}else sharedValues.value[node.id]??=clone(variants.value[0]?.values[node.id]??workflowDefault(node));}});
@@ -55,11 +59,11 @@ const variantInputs=computed(()=>inputs.value.filter(n=>n.valueSource!=='enginee
 const category=computed(()=>definition.value.category||{});
 const stateFor=id=>jobs.value.find(j=>j.run_id===id)||{};
 const statusLabels={queued:'排队中',running:'后台生成中',awaiting_review:'待人工检查',ready:'检查完成',failed:'失败待处理',imported:'生产完成'};
-const runLists=reactive(Object.fromEntries(['tasks','results'].map(key=>[key,{items:[],page:1,pageSize:20,total:0,keyword:'',loading:false}])));
+const runLists=reactive(Object.fromEntries(['tasks','results'].map(key=>[key,{items:[],page:1,pageSize:20,total:0,keyword:'',loading:false,loaded:false}])));
 const runOpen=ref(false);
 let retryRefreshSequence=0,retryRefreshTimer=null,retryRefreshResolve=null;
 function stopRetryRefresh(){retryRefreshSequence++;clearTimeout(retryRefreshTimer);retryRefreshTimer=null;retryRefreshResolve?.();retryRefreshResolve=null;}
-watch(runOpen,open=>{if(!open)stopRetryRefresh();});
+watch(runOpen,open=>{if(!open){stopRetryRefresh();if(mounted)loadTab(tab.value).catch(error=>ElMessage.error(error.message));}});
 watch(reviewEditing,editing=>{if(editing)stopRetryRefresh();});
 watch(()=>runDocument.value?.id,()=>stopRetryRefresh());
 async function refreshRetriedNode(id,variantId,nodeId){
@@ -78,8 +82,10 @@ async function refreshRetriedNode(id,variantId,nodeId){
 const runSequences={tasks:0,results:0},runSearchTimers={};
 for(const section of ['tasks','results'])watch(()=>runLists[section].keyword,()=>{clearTimeout(runSearchTimers[section]);runSearchTimers[section]=setTimeout(()=>{runLists[section].page=1;loadRunList(section).catch(e=>ElMessage.error(e.message));},300);});
 function canDeleteRun(id){return !['queued','running'].includes(stateFor(id).status);}
-async function loadRunList(section,{states=true}={}){const list=runLists[section],seq=++runSequences[section];list.loading=true;try{const params=new URLSearchParams({section,page:list.page,pageSize:list.pageSize,keyword:list.keyword.trim()});const result=await apiClient.get(`/api/product-workflows/runs?${params}`,{noCache:true});if(seq!==runSequences[section])return;list.items=result.items;list.total=result.total;list.page=result.page;if(states)await loadJobStates();}finally{if(seq===runSequences[section])list.loading=false;}}
-async function loadJobStates(){const ids=[...new Set([...runLists.tasks.items,...runLists.results.items,runDocument.value].filter(Boolean).map(r=>r.id))];jobs.value=ids.length?await apiClient.get('/api/product-workflows/job-states?ids='+encodeURIComponent(ids.join(',')),{noCache:true}):[];}
+async function loadRunList(section,{states=true}={}){const list=runLists[section],seq=++runSequences[section];list.loading=true;try{const params=new URLSearchParams({section,page:list.page,pageSize:list.pageSize,keyword:list.keyword.trim()});const result=await apiClient.get(`/api/product-workflows/runs?${params}`,{noCache:true});if(seq!==runSequences[section])return;list.items=result.items;list.total=result.total;list.page=result.page;if(states)await loadJobStates(list.items.map(row=>row.id));list.loaded=true;}finally{if(seq===runSequences[section])list.loading=false;}}
+async function loadJobStates(requested){const ids=[...new Set(requested||[...runLists.tasks.items,...runLists.results.items,runDocument.value].filter(Boolean).map(row=>row.id))];if(!ids.length)return;const states=await apiClient.get('/api/product-workflows/job-states?ids='+encodeURIComponent(ids.join(',')),{noCache:true});jobs.value=[...jobs.value.filter(job=>!ids.includes(job.run_id)),...states];}
+async function readRun(id){const [record]=await Promise.all([apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true}),loadJobStates([id])]);runDocument.value=record;}
+function loadTab(section){if((section==='library'||section==='engineer')&&templatesLoaded||runLists[section]?.loaded)return Promise.resolve();if(tabLoads.has(section))return tabLoads.get(section);const operation=section==='library'||section==='engineer'?loadTemplates():runLists[section]?loadRunList(section):Promise.resolve();const pending=operation.finally(()=>tabLoads.delete(section));tabLoads.set(section,pending);return pending;}
 async function changeRunPage(section,key,value){runLists[section][key]=value;if(key==='pageSize')runLists[section].page=1;await action(()=>loadRunList(section));}
 async function deleteRecord(kind,row){try{await ElMessageBox.confirm(kind==='template'?'删除此流程后，已有生产任务和商品草稿仍会保留。':'只删除这条生产记录，已生成的草稿、图片和视频仍会保留。','删除'+(kind==='template'?'流程':'生产记录'),{type:'warning',confirmButtonText:'确认删除',cancelButtonText:'取消'});}catch{return;}await action(async()=>{await apiClient.post('/api/product-workflows/archive',{kind,id:row.id,revision:row.revision});if(runDocument.value?.id===row.id){runOpen.value=false;runDocument.value=null;}if(kind==='template'&&templateDocument.value?.id===row.id){editorOpen.value=false;templateDocument.value=null;}await refreshLists();ElMessage.success('已删除');});}
 const currentJob=computed(()=>runDocument.value?.payload.draftId?{status:'imported'}:stateFor(runDocument.value?.id));
@@ -87,11 +93,11 @@ function blankWorkflow(){return starterWorkflow();}
 const focusNode=ref('');
 function navigateNode({mode,nodeId}){focusNode.value=nodeId;engineerArea.value=mode;}
 async function action(work){if(busy.value)return;stopRetryRefresh();busy.value=true;try{await work();}catch(error){ElMessage.error(error.message||'操作失败');}finally{busy.value=false;busyLabel.value='';}}
-async function loadTemplates(){const seq=++templateSequence;templateLoading.value=true;try{const params=new URLSearchParams({page:templatePage.value,pageSize:templatePageSize.value,keyword:templateSearch.value.trim()});const result=await apiClient.get(`/api/product-workflows/templates?${params}`,{noCache:true});if(seq!==templateSequence)return;templates.value=result.items||result;templateTotal.value=result.total??templates.value.length;templatePage.value=result.page||1;}finally{if(seq===templateSequence)templateLoading.value=false;}}
-async function refreshLists(includeTemplates=true){await Promise.all([...(includeTemplates?[loadTemplates()]:[]),loadRunList('tasks',{states:false}),loadRunList('results',{states:false})]);await loadJobStates();}
+async function loadTemplates(){const seq=++templateSequence;templateLoading.value=true;try{const params=new URLSearchParams({page:templatePage.value,pageSize:templatePageSize.value,keyword:templateSearch.value.trim()});const result=await apiClient.get(`/api/product-workflows/templates?${params}`,{noCache:true});if(seq!==templateSequence)return;templates.value=result.items||result;templateTotal.value=result.total??templates.value.length;templatePage.value=result.page||1;templatesLoaded=true;}finally{if(seq===templateSequence)templateLoading.value=false;}}
+async function refreshLists(includeTemplates=true){if(includeTemplates)templatesLoaded=false;for(const list of Object.values(runLists))list.loaded=false;if(runOpen.value&&runDocument.value){await loadJobStates([runDocument.value.id]);return;}await loadTab(tab.value);}
 
-onMounted(()=>{action(async()=>{await refreshLists();if(route.query.runId){runDocument.value=await apiClient.get('/api/product-workflows/runs?id='+encodeURIComponent(String(route.query.runId)),{noCache:true});tab.value=runDocument.value.payload.draftId?'results':'tasks';runOpen.value=true;await loadJobStates();}listingTemplates.value=await apiClient.get('/api/listing/templates');shops.value=(await apiClient.get('/api/shops')).filter(s=>s.status!=='deleted');});});
-onUnmounted(()=>{stopRetryRefresh();clearTimeout(searchTimer);for(const timer of Object.values(runSearchTimers))clearTimeout(timer);templateSequence++;});
+onMounted(()=>{let initialTab;action(async()=>{await router.isReady();tab.value=['materials','results','tasks'].includes(route.query.tab)?route.query.tab:tab.value;initialTab=tab.value;if(route.query.runId){await readRun(String(route.query.runId));if(tab.value===initialTab)tab.value=runDocument.value.payload.draftId?'results':'tasks';runOpen.value=true;}else await loadTab(tab.value);}).finally(()=>{mounted=true;if(!runOpen.value&&tab.value!==initialTab)loadTab(tab.value).catch(error=>ElMessage.error(error.message));});});
+onUnmounted(()=>{mounted=false;stopRetryRefresh();regenerationRequests.clear();clearTimeout(searchTimer);for(const timer of Object.values(runSearchTimers))clearTimeout(timer);templateSequence++;});
 
 function resetMaterials(){productionName.value=definition.value.name;productionMode.value='batch';fitmentMode.value='shared';sharedValues.value=Object.fromEntries(sharedInputs.value.map(n=>[n.id,workflowDefault(n)]));variants.value=[freshVariant(0)];}
 function freshVariant(index){return {requestId:crypto.randomUUID(),submittedId:null,id:`v_${crypto.randomUUID().replaceAll('-','')}`,label:`产品 ${index+1}`,values:Object.fromEntries(variantInputs.value.map(n=>[n.id,workflowDefault(n)])),promptOverrides:{}};}
@@ -135,9 +141,10 @@ async function useTemplate(id){await action(async()=>{await loadTemplate(id);if(
 async function loadDefaultKey(){if(!definition.value.defaultKeyModelId)return;try{const record=await apiClient.get(`/api/product-workflows/key-models?id=${encodeURIComponent(definition.value.defaultKeyModelId)}`,{noCache:true});if(record.payload.archived)throw new Error('默认适配资料已停用');if(!isReviewedMold(record))throw new Error('默认钥匙模具尚未核对');sharedValues.value.__fitments=(record.payload.bindings?.length?record.payload.bindings:[{brand:record.payload.brand,models:[record.payload.model]}]).flatMap(b=>(b.models||[]).filter(Boolean).map(model=>({brand:b.brand,model})));sharedValues.value.model=sharedValues.value.__fitments.map(f=>`${f.brand} ${f.model}`).join('；');applyKeyModel(sharedValues.value,record,definition.value.nodes.find(n=>n.id==='key')?.count||8);}catch(error){ElMessage.warning(`${error.message}，请重新选择适配资料或上传钥匙图`);}}
 async function trialTemplate(){await action(async()=>{resetMaterials();await loadDefaultKey();productionOpen.value=true;});}
 async function loadKeyChoices(){try{keyModelChoices.value=(await apiClient.get('/api/product-workflows/key-models',{noCache:true})).filter(isReviewedMold);}catch(error){ElMessage.error(error.message);}}
-watch(engineerArea,area=>{if(area==='general'&&definition.value.preset==='key-case-production')loadKeyChoices();});
+watch([engineerArea,editorOpen,tab],([area,open,section])=>{if(open&&section==='engineer'&&area==='general'){ensureShops().catch(error=>ElMessage.error(error.message));if(definition.value.preset==='key-case-production')loadKeyChoices();}});
 async function refreshCategoryFields(){const imported=await apiClient.get(`/api/product-workflows/category?id=${category.value.templateId}`,{noCache:true});refreshWorkflowCategory(definition.value,imported);}
 async function attachCategory(){
+  await ensureListingTemplates();
   if(selectedCategory.value){
     const chosen=selectedCategory.value,key=chosen.ozon_category_id;
     const existing=listingTemplates.value.find(t=>t.ozon_category_id===key);
@@ -185,8 +192,22 @@ async function submitProduction(){await action(async()=>{
   }
   productionOpen.value=false;tab.value='tasks';await refreshLists();ElMessage.success(productionMode.value==='batch'?'已按每件产品创建独立任务，模板与共用材料已复用':'已提交后台生产，可以关闭页面');
 });}
-async function openRun(id,completed=false){await action(async()=>{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true});tab.value=completed?'results':'tasks';runOpen.value=true;await loadJobStates();});}
-async function runAction(body){let refresh=false;await action(async()=>{const state=runDocument.value.payload.outputs[body.variantId]?.[body.nodeId],node=runDocument.value.payload.definition.nodes.find(n=>n.id===body.nodeId);body.recoverOnly=body.action==='retry'&&(state?.status==='unknown'||node?.type==='image'&&state?.taskId&&!state.url&&state.failureKind!=='provider_confirmed');if(body.action==='retry'&&!body.recoverOnly){try{await ElMessageBox.confirm('重生成会清除依赖本节点的后续结果，并重新调用 AI。是否继续？','重生成',{type:'warning',confirmButtonText:'确认重生成',cancelButtonText:'取消'});}catch{return;}}runDocument.value=await apiClient.post('/api/product-workflows/run-action',body);await refreshLists();refresh=body.action==='retry';});if(refresh)void refreshRetriedNode(body.id,body.variantId,body.nodeId);}
+async function openRun(id,completed=false){await action(async()=>{await readRun(id);tab.value=completed?'results':'tasks';runOpen.value=true;});}
+async function regenerateNode(body){
+  const state=runDocument.value.payload.outputs[body.variantId]?.[body.nodeId];
+  const expectedTaskId=state?.taskId||'',expectedSubmissionKey=state?.submissionKey||'';
+  const key=JSON.stringify([body.id,body.variantId,body.nodeId,expectedTaskId,expectedSubmissionKey]);
+  const request=regenerationRequests.get(key)||{id:body.id,action:'regenerate',variantId:body.variantId,nodeId:body.nodeId,requestId:crypto.randomUUID(),expectedTaskId,expectedSubmissionKey,confirmNewGeneration:true};
+  try{await ElMessageBox.confirm('重新生成会重新调用 AI，并可能产生新的费用。原任务仍可能返回结果并按原规则结算。依赖本节点的后续结果将清除并重新生成。是否继续？','重新生成此节点',{type:'warning',confirmButtonText:'确认重新生成',cancelButtonText:'取消'});}catch{return null;}
+  regenerationRequests.set(key,request);
+  try{return await apiClient.post('/api/product-workflows/run-action',request);}
+  catch(error){if(error.status===409)await readRun(body.id).catch(()=>{});throw error;}
+}
+async function runAction(body){let refresh=false;await action(async()=>{
+  if(body.action==='regenerate'){const record=await regenerateNode(body);if(!record)return;runDocument.value=record;refresh=true;}
+  else{const state=runDocument.value.payload.outputs[body.variantId]?.[body.nodeId],node=runDocument.value.payload.definition.nodes.find(n=>n.id===body.nodeId);body.recoverOnly=body.action==='retry'&&(state?.status==='unknown'||node?.type==='image'&&state?.taskId&&!state.url&&state.failureKind!=='provider_confirmed');if(body.action==='retry'&&!body.recoverOnly){try{await ElMessageBox.confirm('重生成会清除依赖本节点的后续结果，并重新调用 AI。是否继续？','重生成',{type:'warning',confirmButtonText:'确认重生成',cancelButtonText:'取消'});}catch{return;}}runDocument.value=await apiClient.post('/api/product-workflows/run-action',body);refresh=body.action==='retry';}
+  await refreshLists();
+});if(refresh)void refreshRetriedNode(body.id,body.variantId,body.nodeId);}
 async function finishProduction(){await action(async()=>{
   const id=runDocument.value.id;
   runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true});
@@ -199,7 +220,7 @@ async function finishProduction(){await action(async()=>{
   tab.value='results';ElMessage.success('生产完成，已生成草稿箱草稿；可预览编辑并选择店铺上架');
 });}
 function openDraft(id){router.push({path:'/listing-automation',query:{draftId:id}});}
-watch(tab,()=>{reviewEditing.value=false;});
+watch(tab,section=>{reviewEditing.value=false;if(mounted)loadTab(section).catch(error=>ElMessage.error(error.message));});
 </script>
 
 <template>
