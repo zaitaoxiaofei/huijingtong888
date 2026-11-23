@@ -23,3 +23,9 @@ export function wbOrderCapabilities(row = {}) {
     splitPrepare: false
   };
 }
+
+export function wbOrderAmountCny(row) {
+  if (Number(row?.convertedCurrencyCode) !== 156 || row.convertedPrice == null || row.convertedPrice === '') return null;
+  const amount = Number(row.convertedPrice);
+  return Number.isSafeInteger(amount) && amount >= 0 ? amount / 100 : null;
+}
