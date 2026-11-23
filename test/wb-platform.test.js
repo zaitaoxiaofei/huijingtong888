@@ -38,6 +38,25 @@ test('ambiguous WB writes are not automatically retried and do not echo tokens',
   await assert.rejects(client({tenant_id:91,shop_id:911,token:'private-token'},'marketplace','/api/v3/supplies',{method:'POST',body:{name:'batch'}}),error=>error.code==='WB_RESULT_UNKNOWN'&&!error.message.includes('private-token'));
   assert.equal(calls,1);
 });
+test('WB order pagination sends the exact cursor even above Number.MAX_SAFE_INTEGER', async () => {
+  const cursor = '1795369077821535001';
+  const sent = [];
+  const client = createWbClient({
+    fetchImpl: async url => {
+      sent.push(url.searchParams.get('next'));
+      return new Response(sent.length === 1
+        ? `{"next":${cursor},"orders":[{"id":101}]}`
+        : '{"next":0,"orders":[]}');
+    },
+    sleep: async () => {}
+  });
+  const account = { tenant_id: 93, shop_id: 931, token: 'test-only' };
+  const first = await client(account, 'marketplace', '/api/v3/orders', { query: { next: 0 } });
+  const last = await client(account, 'marketplace', '/api/v3/orders', { query: { next: first.next } });
+  assert.deepEqual(sent, ['0', cursor]);
+  assert.deepEqual(first.orders, [{ id: 101 }]);
+  assert.equal(last.next, 0);
+});
 test('WB rate-limit responses are surfaced rather than retried as writes',async()=>{
   let calls=0;const client=createWbClient({fetchImpl:async()=>{calls++;return new Response('{}',{status:429,headers:{'X-Ratelimit-Retry':'2'}});}});
   await assert.rejects(client({tenant_id:92,shop_id:921,token:'token'},'marketplace','/api/v3/supplies',{method:'POST'}),error=>error.statusCode===429);
