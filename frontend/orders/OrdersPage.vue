@@ -1780,6 +1780,8 @@ function printBulkOrders(orderIds = []) {
   const records=new Map([...selectedRows.value,...tableRows.value].map(row=>[Number(row.id),row]));
   const plan=orderPrintPlan(ids.map(id=>({...records.get(id),id})),tableRows.value.map(row=>Number(row.id)));
   if(!plan.ids.length)return ElMessage.warning("所选订单暂不可打印，请同步订单后核对面单状态");
+  const platforms = new Set(plan.orders.filter(row => row.included).map(row => row.platform === 'wb' ? 'wb' : 'ozon'));
+  if (platforms.size > 1) return ElMessage.warning("WB 和 Ozon 面单请分开选择、分批打印");
   if(plan.excluded)ElMessage.warning(`${plan.excluded} 单暂不可打印，已跳过；其余订单直接进入打印页面`);
   return executeLabelPrint(plan.ids,currentApiCacheScope());
 }
