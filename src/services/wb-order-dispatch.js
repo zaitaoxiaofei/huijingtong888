@@ -61,22 +61,26 @@ export async function dispatchLabels(body, userId, tenantId, options, ozonLabels
   if(body.order_ids.length>80)throw Object.assign(new Error('每批最多打印 80 张面单。'),{statusCode:400});
   const groups = await partitionWbOrders(body.order_ids, options.session);
   if (!groups.wb.length) return ozonLabels(body, userId, tenantId, options);
+  if (groups.ozon.length) throw Object.assign(new Error('WB 和 Ozon 面单请分开选择、分批打印。'), { statusCode: 400 });
+  const wb = await wbPlatform(options.session, 'packing');
+  const { rows } = await wb.stickers(options.session.tenant.id, { order_ids: groups.wb });
   const { PDFDocument } = await import('pdf-lib');
   const document = await PDFDocument.create();
-  const wb = await wbPlatform(options.session, 'packing');
-  const stickers = await wb.stickers(options.session.tenant.id, { order_ids: groups.wb });
-  const images = new Map(stickers.rows.map(row=>[Number(row.order_id),row.file]));
-  // Fetch each Ozon page through the original path; output remains in selection order.
-  for (const id of body.order_ids.map(Number)) {
-    if (images.has(id)) {
-      const image = await document.embedPng(Buffer.from(images.get(id), 'base64'));
-      const page = document.addPage([58 / 25.4 * 72, 40 / 25.4 * 72]);
-      page.drawImage(image, { x:0,y:0,width:page.getWidth(),height:page.getHeight() });
+  let originalPdf;
+  for (const row of rows) {
+    const data = Buffer.from(row.file, 'base64');
+    if (row.format === 'pdf') {
+      const pdf = await PDFDocument.load(data);
+      if (rows.length === 1) {
+        originalPdf = data;
+      } else {
+        for (const page of await document.copyPages(pdf, pdf.getPageIndices())) document.addPage(page);
+      }
     } else {
-      const label = await ozonLabels({ ...body, order_ids:[id] }, userId, tenantId, options);
-      const pdf = await PDFDocument.load(label.buffer);
-      for (const page of await document.copyPages(pdf, pdf.getPageIndices())) document.addPage(page);
+      const image = await document.embedPng(data);
+      const page = document.addPage([58 / 25.4 * 72, 40 / 25.4 * 72]);
+      page.drawImage(image, { x: 0, y: 0, width: page.getWidth(), height: page.getHeight() });
     }
   }
-  return { buffer: Buffer.from(await document.save()), filename:'order-labels.pdf', count:body.order_ids.length, printed_ids:body.order_ids.map(Number), failures:[], stats:{} };
+  return { buffer: originalPdf || Buffer.from(await document.save()), filename:'wb-order-labels.pdf', platform:'wb', count:rows.length, printed_ids:groups.wb, failures:[], stats:{} };
 }

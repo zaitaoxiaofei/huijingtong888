@@ -91,3 +91,31 @@ test('WB official option directory has an operations read gate and no write alia
  assert.equal(wbRoutePermission(['api','wb','catalog','options'],'GET'),'operations');assert.equal(wbRoutePermission(['api','wb','catalog','brands'],'GET'),'operations');assert.equal(wbRoutePermission(['api','wb','catalog','brands'],'POST'),null);
  assert.equal(wbRoutePermission(['api','wb','catalog','options'],'POST'),null);
 });
+
+test('WB cross-border labels use the official PDF endpoint and match orders by ID', async () => {
+  const account = { tenant_id: 1, shop_id: 13, environment: 'production', checked_at: 'yes', seller_id: 'seller' };
+  const orders = [101, 102].map((id, index) => ({
+    id, shop_id: 13, wb_order_id: id + 10, supplier_status: 'confirm',
+    raw_json: index ? '{"crossBorderType":1}' : { crossBorderType: 1 }
+  }));
+  let pending = false;
+  const platform = createWbPlatform({
+    query: async sql => sql.includes('FROM wb_shop_credentials') ? [account] : orders,
+    request: async (_account, host, path, options) => {
+      assert.equal(host, 'marketplace');
+      assert.equal(path, '/api/v3/orders/stickers/cross-border');
+      assert.deepEqual(options.body, { orders: [112, 111] });
+      assert.equal(options.query, undefined);
+      return { stickers: [
+        { orderId: 111, status: 'ready', file: 'pdf-111' },
+        { orderId: 112, status: pending ? 'awaitingTrackNumber' : 'ready', file: 'pdf-112' }
+      ] };
+    }
+  });
+  assert.deepEqual((await platform.stickers(1, { order_ids: [102, 101] })).rows, [
+    { order_id: 102, format: 'pdf', file: 'pdf-112' },
+    { order_id: 101, format: 'pdf', file: 'pdf-111' }
+  ]);
+  pending = true;
+  await assert.rejects(platform.stickers(1, { order_ids: [102, 101] }), /等待承运商运单号/);
+});
