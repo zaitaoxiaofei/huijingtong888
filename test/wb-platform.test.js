@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createWbClient } from '../src/services/wb-client.js';
-import { wbOrderState, wbOrderCapabilities } from '../src/shared/wb-order-state.js';
+import { wbOrderState, wbOrderCapabilities, wbOrderAmountCny } from '../src/shared/wb-order-state.js';
 import { createWbPlatform } from '../src/services/wb-platform.js';
 import { createWbRoutes } from '../src/server/routes/wb.js';
 import { wbRoutePermission } from '../src/server/wb-paths.js';
@@ -118,4 +118,11 @@ test('WB cross-border labels use the official PDF endpoint and match orders by I
   ]);
   pending = true;
   await assert.rejects(platform.stickers(1, { order_ids: [102, 101] }), /等待承运商运单号/);
+});
+
+test('WB order amount uses the official converted CNY value and preserves real zero', () => {
+  assert.equal(wbOrderAmountCny({ price: 72900, currencyCode: 643, convertedPrice: 5655, convertedCurrencyCode: 156 }), 56.55);
+  assert.equal(wbOrderAmountCny({ convertedPrice: 0, convertedCurrencyCode: 156 }), 0);
+  assert.equal(wbOrderAmountCny({ convertedPrice: 72900, convertedCurrencyCode: 643 }), null);
+  assert.equal(wbOrderAmountCny({ convertedPrice: null, convertedCurrencyCode: 156 }), null);
 });
