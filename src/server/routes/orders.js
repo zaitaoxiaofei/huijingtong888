@@ -94,7 +94,7 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
     const label = await services.orderPackageLabel(body, req._session?.personId, tenantIdFromRequest(req), { session: req._session });
     // Browser preview should preserve the ordered PDF pages returned by
     // orderPackageLabel and must not depend on a server-side rasterizer.
-    const buffer = body.browser_preview === true
+    const buffer = body.browser_preview === true || label.platform === "wb"
       ? label.buffer
       : await serverTransformPdfForPaper(label.buffer, body);
     writeHead(res, 200, {
