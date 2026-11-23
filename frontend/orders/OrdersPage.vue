@@ -714,7 +714,7 @@ function rowRegistrationHint(row) {
 function rowAvailableActions(row) {
   if (row.platform === 'wb') {
     const caps = wbOrderCapabilities(row);
-    if(!WB_REMOTE_WRITES_ENABLED)return {...caps,prepare:false,print:false,handover:false,showPrepare:false,showPrint:false,showSplitPrepare:false,showPurchase:false,profit:false};
+    if(!WB_REMOTE_WRITES_ENABLED)return {...caps,prepare:false,handover:false,showPrepare:false,showPrint:caps.print,showSplitPrepare:false,showPurchase:false,profit:false};
     return { ...caps, showPrepare: caps.prepare && !row.inventory_refresh_pending, showPrint: caps.print,
       showSplitPrepare: false, showPurchase: ['awaiting_packaging','awaiting_deliver'].includes(row.status), profit: false };
   }
