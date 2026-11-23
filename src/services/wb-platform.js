@@ -369,17 +369,38 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     return { ok: true, count: rows.length, order_ids: rows.map(row=>row.id), supply_id: supplyId };
   }
   async function stickers(tenantId, body) {
-    const rows = await ownedOrders(tenantId, body.order_ids), result = [];
+    const rows = await ownedOrders(tenantId, body.order_ids);
+    const groups = new Map();
     for (const row of rows) {
       if (!['confirm', 'complete'].includes(row.supplier_status)) throw fail('WB 面单需要先完成备货；如缺少报关单号或必填商品标识，请先在 WB 后台补全。', 409);
-      const a = await account(tenantId, row.shop_id);
-      const response = await request(a, 'marketplace', '/api/v3/orders/stickers', { method: 'POST', query: { type: 'png', width: 58, height: 40 }, body: { orders: [Number(row.wb_order_id)] } });
-      const sticker = response.stickers?.find(item => Number(item.orderId) === Number(row.wb_order_id));
-      if (!sticker?.file) throw fail('WB 尚未返回该订单面单，请核对报关和必填标识后重试。', 409);
-      result.push({ order_id: row.id, file: sticker.file });
+      const crossBorder = Number(parse(row.raw_json)?.crossBorderType) === 1;
+      const key = `${row.shop_id}:${crossBorder}`;
+      if (!groups.has(key)) groups.set(key, { crossBorder, rows: [] });
+      groups.get(key).rows.push(row);
     }
-    return { rows: result };
+    const result = new Map();
+    for (const { crossBorder, rows: batch } of groups.values()) {
+      const a = await account(tenantId, batch[0].shop_id);
+      const response = await request(a, 'marketplace', crossBorder ? '/api/v3/orders/stickers/cross-border' : '/api/v3/orders/stickers', {
+        method: 'POST',
+        query: crossBorder ? undefined : { type: 'png', width: 58, height: 40 },
+        body: { orders: batch.map(row => positiveId(row.wb_order_id)) }
+      });
+      const stickers = new Map((response.stickers || []).map(sticker => [Number(sticker.orderId), sticker]));
+      for (const row of batch) {
+        const sticker = stickers.get(Number(row.wb_order_id));
+        if (crossBorder && sticker?.status === 'awaitingTrackNumber') {
+          throw fail('WB 跨境面单正在等待承运商运单号，请稍后重新打印。', 409);
+        }
+        if (!sticker?.file || (crossBorder && sticker.status !== 'ready')) {
+          throw fail('WB 尚未返回该订单面单，请核对报关和必填标识后重试。', 409);
+        }
+        result.set(row.id, { order_id: row.id, file: sticker.file, format: crossBorder ? 'pdf' : 'png' });
+      }
+    }
+    return { rows: rows.map(row => result.get(row.id)) };
   }
+
   async function supply(tenantId, body) {
     const rows = await ownedOrders(tenantId, [body.order_id]);
     const row = rows[0], a = await account(tenantId, row.shop_id);
