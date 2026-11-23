@@ -12,7 +12,7 @@ import { resolveInventoryTenantScope, inventoryTenantSql } from "./inventory-ten
 import { WB_REMOTE_WRITES_ENABLED, WB_REMOTE_WRITE_ACTIONS } from '../shared/wb-capabilities.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { wbRequest } from './wb-client.js';
-import { wbOrderState } from '../shared/wb-order-state.js';
+import { wbOrderState, wbOrderAmountCny } from '../shared/wb-order-state.js';
 import { assertTenantQuotaAvailable } from './tenant-quotas.js';
 
 const pricingCommissionCache = new Map();
@@ -305,14 +305,34 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
         const normalized = wbOrderState(state.supplierStatus, state.wbStatus);
         const orderedAt = new Date(row.createdAt);
         if (!Number.isFinite(orderedAt.getTime())) throw fail('WB 订单缺少有效下单时间，未写入。', 502);
-        await connection.execute(`INSERT INTO orders (shop_id,posting_number,order_number,status,logistics_status,tracking_stage,ordered_at,last_synced_at)
-          VALUES (?,?,?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE last_synced_at=UTC_TIMESTAMP()`,
-        [a.shop_id, `WB-${row.id}`, String(row.id), normalized.status, normalized.stage, normalized.status, orderedAt]);
+        const trackNumber = String(row.trackNumber ?? '').trim() || null;
+        const amountCny = wbOrderAmountCny(row);
+        const [cards] = await connection.execute(
+          'SELECT title, raw_json FROM wb_product_cards WHERE tenant_id=? AND shop_id=? AND nm_id=?',
+          [a.tenant_id, a.shop_id, row.nmId ?? null]
+        );
+        const card = cards[0];
+        const title = String(card?.title || '').trim() || null;
+        const photos = parse(card?.raw_json)?.photos;
+        const image = Array.isArray(photos)
+          ? photos.map(photo => photo?.big || photo?.c516x688).find(url => typeof url === 'string' && url.startsWith('https://')) || null
+          : null;
+        await connection.execute(`INSERT INTO orders (shop_id,posting_number,order_number,status,logistics_status,tracking_stage,ordered_at,tracking_number,last_synced_at)
+          VALUES (?,?,?,?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE
+          tracking_number=COALESCE(VALUES(tracking_number),tracking_number),last_synced_at=UTC_TIMESTAMP()`,
+        [a.shop_id, `WB-${row.id}`, String(row.id), normalized.status, normalized.stage, normalized.status, orderedAt, trackNumber]);
         const [orders] = await connection.execute('SELECT id FROM orders WHERE shop_id=? AND posting_number=? FOR UPDATE', [a.shop_id, `WB-${row.id}`]);
         const id = orders[0].id;
+        const sku = `WB-${positiveId(row.chrtId)}`;
         const [items] = await connection.execute('SELECT id FROM order_items WHERE order_id=? LIMIT 1', [id]);
-        if (!items.length) await connection.execute(`INSERT INTO order_items (order_id,ozon_sku,ozon_name,quantity,sale_price) VALUES (?,?,?,1,?)`,
-        [id, `WB-${positiveId(row.chrtId)}`, String(row.article || ''), 0]);
+        if (items.length) {
+          await connection.execute(`UPDATE order_items SET ozon_name=COALESCE(?,ozon_name),
+            ozon_image_url=COALESCE(?,ozon_image_url),sale_price=COALESCE(?,sale_price) WHERE id=?`,
+          [title, image, amountCny, items[0].id]);
+        } else {
+          await connection.execute(`INSERT INTO order_items (order_id,ozon_sku,ozon_name,ozon_image_url,quantity,sale_price)
+            VALUES (?,?,?,?,1,?)`, [id, sku, title || String(row.article || ''), image, amountCny ?? 0]);
+        }
         await connection.execute(`INSERT INTO wb_order_details (order_id,tenant_id,shop_id,wb_order_id,supplier_status,wb_status,supply_id,raw_json,synced_at)
           VALUES (?,?,?,?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE raw_json=VALUES(raw_json),synced_at=VALUES(synced_at)`,
         [id, a.tenant_id, a.shop_id, row.id, state.supplierStatus || '', state.wbStatus || '', row.supplyId || null, JSON.stringify(row)]);

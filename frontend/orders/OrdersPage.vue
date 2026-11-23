@@ -1338,7 +1338,9 @@ function buildTableRow(row) {
     cancelReasonMeta,
     cancelCategoryText: terminalOutcome ? row?.aftersale_bucket_label || "原因待归类" : "--",
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
-    amountText: row.platform === 'wb' ? `${row.sale_currency || '币种待核对'} ${formatMoney(row.wb_amount)}` : `CNY ${formatMoney(profitSummary.revenue)}`,
+    amountText: row.platform === 'wb'
+      ? (row.wb_amount_cny == null ? '人民币金额待同步' : `CNY ${formatMoney(row.wb_amount_cny)}`)
+      : `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
     statusHint: row.aftersale ? row.aftersale.next_action : orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : row?.ogl_dispatch?.stage === "bound" ? "已打印并绑定发运单，尚未实际交运；订单继续保留在等待发运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),

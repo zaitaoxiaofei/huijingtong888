@@ -732,7 +732,7 @@ function canEditCollaborationNote(row) {
               >
                 追踪: {{ row.logisticsSummary.trackingNumber }}
               </a>
-              <span v-else>追踪: {{ row.logisticsSummary.trackingNumber }}</span>
+              <span v-else>{{ row.platform === 'wb' ? "运单号" : "追踪" }}: {{ row.logisticsSummary.trackingNumber }}</span>
               <el-tooltip content="复制追踪号" placement="top">
                 <button type="button" class="orders-icon-button" aria-label="复制追踪号" @click="copyText(row.logisticsSummary.trackingNumber)">
                   <el-icon><CopyDocument /></el-icon>
