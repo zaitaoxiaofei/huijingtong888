@@ -1,7 +1,7 @@
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
 import { WB_REMOTE_WRITES_ENABLED } from '../shared/wb-capabilities.js';
 import { wbPlatform } from './wb-platform.js';
-import { wbOrderCapabilities } from '../shared/wb-order-state.js';
+import { wbOrderCapabilities, wbOrderAmountCny } from '../shared/wb-order-state.js';
 
 export async function enrichWbOrders(result) {
   const rows = Array.isArray(result) ? result : result?.rows;
@@ -21,7 +21,7 @@ export async function enrichWbOrders(result) {
     Object.assign(row, { wb_supplier_status: detail.wb_supplier_status, wb_status: detail.wb_status, wb_supply_id: detail.wb_supply_id,
       availableActions: { ...wbOrderCapabilities(detail), ...(!WB_REMOTE_WRITES_ENABLED ? {prepare:false,handover:false}:{}), profit: false }, fulfillment_type_key: 'fbs', fulfillment_type_label: 'FBS',
       warehouse_name: raw?.warehouseId ? `WB 卖家仓 ${raw.warehouseId}` : '', sale_currency: raw?.currencyCode === 643 ? 'RUB' : '',
-      wb_amount: Number(raw?.price || 0) / 100 });
+      wb_amount: Number(raw?.price || 0) / 100, wb_amount_cny: wbOrderAmountCny(raw) });
   }
   return result;
 }
