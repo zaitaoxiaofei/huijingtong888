@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "../../stores/auth.js";
+import { canAccessPage } from "../../../../src/shared/permissions.js";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Edit, MagicStick, Plus, Refresh, Search, VideoCamera, View } from "@element-plus/icons-vue";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
@@ -90,6 +91,19 @@ function setBoundedListCache(cache, key, result) {
 
 function createListingWorkbenchId() {
   return `liwb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function useDraftForWb(row) {
+  router.push({
+    name: "listing-automation",
+    query: {
+      platform: "wb",
+      wbSourceDraftId: String(row.id),
+      workbenchId: createListingWorkbenchId(),
+      tabTitle: "WB 商品上架",
+      returnTo: route.fullPath
+    }
+  });
 }
 
 function quickCreateDraft() {
@@ -2342,6 +2356,7 @@ watch(() => route.query.taskId, () => {
         <template #default="{ row }">
           <div class="row-actions">
             <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id || (isPublishMode && row.payload_compacted)" @click="editInListingAutomation(row)">编辑</el-button>
+            <el-button v-if="isDraftMode && canAccessPage(authStore.user, '/wb/listing')" class="erp-btn-link" link type="primary" @click="useDraftForWb(row)">复用到 WB</el-button>
             <el-button v-if="isDraftMode" class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
             <el-button v-if="isDraftMode" class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
             <el-button v-if="isPublishMode && ['failed', 'ozon_status_error'].includes(row.status)" class="erp-btn-link" link type="primary" :icon="Refresh" :loading="retryingRecordId === row.id" :disabled="Boolean(retryingRecordId)" @click="retryFailedRecord(row)">重新上架</el-button>
