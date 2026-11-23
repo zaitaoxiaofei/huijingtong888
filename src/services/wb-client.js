@@ -47,7 +47,21 @@ export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now
       if (response.status === 204) return {};
       const text = await response.text();
       if (!text) return {};
-      try { const value=JSON.parse(text); if(value?.error===true)throw Object.assign(new Error('WB 未接受该请求，请检查平台返回的业务状态。'),{statusCode:409}); return value; } catch(error) { if(error.statusCode)throw error; throw Object.assign(new Error('WB 返回格式异常，请稍后同步核对。'), { statusCode: 502 }); }
+      try {
+        // WB order cursors can exceed the precision of a JavaScript number.
+        const value = service === 'marketplace' && path === '/api/v3/orders'
+          ? JSON.parse(text, (key, value, context) => {
+            if (key !== 'next' || typeof value !== 'number' || Number.isSafeInteger(value)) return value;
+            if (!/^\d+$/.test(context?.source || '')) throw new Error('Invalid WB order cursor');
+            return context.source;
+          })
+          : JSON.parse(text);
+        if (value?.error === true) throw Object.assign(new Error('WB 未接受该请求，请检查平台返回的业务状态。'), { statusCode: 409 });
+        return value;
+      } catch (error) {
+        if (error.statusCode) throw error;
+        throw Object.assign(new Error('WB 返回格式异常，请稍后同步核对。'), { statusCode: 502 });
+      }
     });
     queues.set(key, run);
     try { return await run; } finally { if (queues.get(key) === run) queues.delete(key); }

@@ -18,5 +18,6 @@ test('WB routes resolve under the existing desktop layout, while Ozon routes ret
 test('remote WB writes remain gated while local inventory binding has its own permission',()=>{
   assert.equal(WB_REMOTE_WRITES_ENABLED,false);
   assert.equal(WB_REMOTE_WRITE_ACTIONS.has('bindProduct'),false);
-  for(const action of ['publish','setPrice','setStocks','prepare','stickers','supplyAction','enrollPromotion'])assert.ok(WB_REMOTE_WRITE_ACTIONS.has(action));
+  assert.equal(WB_REMOTE_WRITE_ACTIONS.has('stickers'),false);
+  for(const action of ['publish','setPrice','setStocks','prepare','supplyAction','enrollPromotion'])assert.ok(WB_REMOTE_WRITE_ACTIONS.has(action));
 });
