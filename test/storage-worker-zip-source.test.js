@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync, rmSync } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 const release = readFileSync(new URL('../deploy/linux/remote-release.sh', import.meta.url), 'utf8');
@@ -9,13 +12,15 @@ assert.ok(worker, 'The actual immutable-worker installer must be present');
 const start = worker.indexOf('names=['), end = worker.indexOf('\nidentity=');
 assert.ok(start >= 0 && end > start, 'Only archive selection and byte loading run in this fixture');
 const extraction = worker.slice(start, end);
+const identityStatement = worker.slice(end + 1, worker.indexOf('\nroot=', end));
+assert.match(identityStatement, /^identity=hashlib\.sha256/);
 const names = JSON.parse(extraction.match(/^names=(\[[^\n]+\])/)[1].replaceAll("'", '"'));
 
 // Execute the production Python extraction against real in-memory ZIPs. Never
 // run its root/dependency checks or installation at /usr/local/libexec.
-function readSources(entries) {
-  const script = `import io,json,stat,sys,warnings,zipfile
-entries=json.loads(sys.argv[1])
+function readSources(entries, { includeIdentity = false } = {}) {
+  const script = `import io,json,stat,sys,warnings,zipfile,hashlib,pathlib
+entries=json.loads(sys.stdin.read())
 archive=io.BytesIO()
 with warnings.catch_warnings():
  warnings.simplefilter('ignore',UserWarning)
@@ -27,10 +32,12 @@ with warnings.catch_warnings():
    package.writestr(info,body,compress_type=zipfile.ZIP_DEFLATED)
 archive.seek(0)
 ${extraction}
-print(json.dumps({name:body.decode() for name,body in contents.items()},sort_keys=True))
+dependencies=pathlib.Path('/fixture/dependencies/node_modules')
+${identityStatement}
+print(json.dumps(${includeIdentity ? "{'contents':{name:body.decode() for name,body in contents.items()},'identity':identity}" : '{name:body.decode() for name,body in contents.items()}'},sort_keys=True))
 `;
-  return spawnSync(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'), ['-', JSON.stringify(entries)], {
-    input: script, encoding: 'utf8', timeout: 10000,
+  return spawnSync(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'), ['-c', script], {
+    input: JSON.stringify(entries), encoding: 'utf8', timeout: 10000,
   });
 }
 
@@ -67,4 +74,33 @@ test('missing, linked, oversized or noncanonical worker entries remain rejected'
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Invalid immutable worker source/);
   }
+});
+
+test('extracted real worker imports its OSS factory without archiving or connecting to a database', () => {
+  const entries=names.map(name=>({name:'./'+name,body:readFileSync(new URL('../'+name,import.meta.url),'utf8')}));
+  const extracted=readSources(entries);
+  assert.equal(extracted.status,0,extracted.error?.message||extracted.stderr);
+  const root=mkdtempSync(path.join(os.tmpdir(),'immutable-worker-load-'));
+  try {
+    for(const [name,body] of Object.entries(JSON.parse(extracted.stdout))){const file=path.join(root,name);mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,body,'utf8');}
+    writeFileSync(path.join(root,'package.json'),'{"type":"module","private":true}\n','utf8');
+    const dependencies=realpathSync(fileURLToPath(new URL('../node_modules',import.meta.url)));
+    symlinkSync(dependencies,path.join(root,'node_modules'),process.platform==='win32'?'junction':'dir');
+    const entry=pathToFileURL(path.join(root,'scripts/archive-mysql-binlogs.mjs')).href;
+    const result=spawnSync(process.execPath,['--input-type=module','-e',`const {runBinlogArchive}=await import(${JSON.stringify(entry)});const result=await runBinlogArchive([],{BINLOG_ARCHIVE_ENABLED:'0'});if(result.status!=='disabled'||result.purged_files!==0)throw Error('Archive execution must remain disabled');console.log('isolated worker loaded; archive disabled');`],{cwd:root,encoding:'utf8',timeout:10000,env:{...process.env,BINLOG_ARCHIVE_ENABLED:'0',DB_HOST:'127.0.0.1',DB_NAME:'unused_worker_fixture',DB_USER:'unused',DB_PASSWORD:'',OSS_ENABLED:'false'}});
+    assert.equal(result.status,0,result.error?.message||result.stderr);
+    assert.match(result.stdout,/isolated worker loaded; archive disabled/);
+  } finally {
+    assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));
+    assert.ok(path.basename(root).startsWith('immutable-worker-load-'));
+    rmSync(root,{recursive:true,force:true});
+  }
+});
+
+test('OSS factory bytes are included in the immutable worker identity', () => {
+  const entries=names.map(name=>({name,body:readFileSync(new URL('../'+name,import.meta.url),'utf8')}));
+  const original=readSources(entries,{includeIdentity:true});
+  const changed=readSources(entries.map(entry=>entry.name==='src/services/oss-client.js'?{...entry,body:entry.body+'\n// Changed factory fixture\n'}:entry),{includeIdentity:true});
+  for(const result of [original,changed])assert.equal(result.status,0,result.error?.message||result.stderr);
+  assert.notEqual(JSON.parse(original.stdout).identity,JSON.parse(changed.stdout).identity);
 });
