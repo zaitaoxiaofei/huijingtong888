@@ -338,7 +338,7 @@ if not __import__('re').fullmatch(r'/opt/ozon-erp/artifacts/dependencies/[a-f0-9
 for p in (dependencies,dependencies.parent):
  s=p.lstat()
  if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or s.st_mode&0o222:raise RuntimeError('Root-owned read-only dependencies required')
-names=['scripts/archive-mysql-binlogs.mjs','scripts/lib/verify-mysql-binlog.mjs','src/services/binlog-archive.js','src/services/binlog-baseline.js','src/services/verified-private-object.js','src/services/object-storage.js']
+names=['scripts/archive-mysql-binlogs.mjs','scripts/lib/verify-mysql-binlog.mjs','src/services/binlog-archive.js','src/services/binlog-baseline.js','src/services/verified-private-object.js','src/services/object-storage.js','src/services/oss-client.js']
 with zipfile.ZipFile(archive) as package:
  contents={}
  for name in names:
