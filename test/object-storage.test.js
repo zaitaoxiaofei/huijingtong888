@@ -204,10 +204,9 @@ test("an existing content-addressed object is reused without creating a new vers
 });
 
 test("OSS clients receive a bounded request timeout", async () => {
-  const source = await import("node:fs/promises").then(({ readFile }) => readFile(
-    new URL("../src/services/object-storage.js", import.meta.url),
-    "utf8"
-  ));
-  assert.match(source, /timeout: Math\.max\(1000, Number\(timeoutMs\)/);
-  assert.match(source, /timeoutMs = DEFAULT_OSS_REQUEST_TIMEOUT_MS/);
+  const { createServerOssClient } = await import("../src/services/oss-client.js");
+  const storage = { region: "oss-cn-heyuan", bucket: "fixture-bucket", accessKeyId: "fixture-id", accessKeySecret: "fixture-secret" };
+  assert.equal(createServerOssClient(storage, { env: {}, timeoutMs: 5 }).options.timeout, 1000);
+  assert.equal(createServerOssClient(storage, { env: {} }).options.timeout, 60000);
+  assert.equal(createServerOssClient(storage, { env: {}, timeoutMs: 15000 }).options.timeout, 15000);
 });

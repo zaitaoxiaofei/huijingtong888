@@ -5,11 +5,30 @@ import os from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import OSS from "ali-oss";
+import { createServerOssClient } from "./oss-client.js";
 
 const DEFAULT_REMOTE_MEDIA_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_REMOTE_MEDIA_TIMEOUT_MS = 30000;
 const DEFAULT_OSS_REQUEST_TIMEOUT_MS = 60000;
+const verifiedBodies = new WeakMap();
+const VERIFIED_HANDOFF_TTL_MS = 60000;
+
+function rememberVerifiedBody(result, client) {
+  verifiedBodies.set(result, { client, bucket: result.bucket, objectKey: result.objectKey,
+    hashSha256: result.hashSha256, size: result.size, expiresAt: Date.now() + VERIFIED_HANDOFF_TTL_MS });
+  return result;
+}
+
+// Only the original in-process result of a successful full readback can hand
+// its verification to the next persistence layer, once and for a short time.
+export function consumeVerifiedContentAddressedBody(result, { client } = {}) {
+  const verified = verifiedBodies.get(result);
+  if (!verified) return false;
+  verifiedBodies.delete(result);
+  return verified.client === client && verified.expiresAt >= Date.now()
+    && verified.bucket === result.bucket && verified.objectKey === result.objectKey
+    && verified.hashSha256 === result.hashSha256 && verified.size === result.size;
+}
 
 // Some least-privilege upload accounts can read/write objects but cannot read
 // ACL metadata. In that case verify the actual security property directly:
@@ -54,17 +73,8 @@ function managedOssObjectKeyFromUrl(url, storage) {
   }
 }
 
-function createOssClient(storage, timeoutMs, client = null, { internal = false } = {}) {
-  return client || new OSS({
-    region: storage.region,
-    bucket: storage.bucket,
-    accessKeyId: storage.accessKeyId,
-    accessKeySecret: storage.accessKeySecret,
-    stsToken: storage.stsToken || undefined,
-    secure: true,
-    internal,
-    timeout: Math.max(1000, Number(timeoutMs) || DEFAULT_OSS_REQUEST_TIMEOUT_MS)
-  });
+function createOssClient(storage, timeoutMs, client = null, { env = process.env, internal } = {}) {
+  return client || createServerOssClient(storage, { env, timeoutMs, internal });
 }
 
 function ossStatus(error) {
@@ -125,7 +135,7 @@ export function isManagedOssObjectUrl(url, {
 export async function readManagedOssObject(url, {
   maxBytes = 20 * 1024 * 1024,
   timeoutMs = 10000,
-  internal = false,
+  internal,
   env = process.env,
   client = null
 } = {}) {
@@ -134,7 +144,7 @@ export async function readManagedOssObject(url, {
   const objectKey = managedOssObjectKeyFromUrl(url, storage);
   if (!objectKey) return null;
   const byteLimit = Math.max(1, Number(maxBytes) || 20 * 1024 * 1024);
-  const ossClient = createOssClient(storage, timeoutMs, client, { internal });
+  const ossClient = createOssClient(storage, timeoutMs, client, { env, internal });
   const head = await ossClient.head(objectKey);
   const headHeaders = head?.res?.headers || {};
   const declaredBytes = Number(headHeaders["content-length"] || 0);
@@ -167,7 +177,7 @@ export async function headManagedOssRetentionObject(objectKey, { env = process.e
   if (!storage.enabled) throw new Error("OSS retention requires configured storage");
   const key = retentionObjectKey(objectKey);
   try {
-    const result = await createOssClient(storage, 15000, client).head(key);
+    const result = await createOssClient(storage, 15000, client, { env }).head(key);
     const headers = result?.res?.headers || {};
     const head = { object_key: key, bucket: storage.bucket, size: Number(headers["content-length"]),
       etag: String(headers.etag || ""), last_modified: String(headers["last-modified"] || ""),
@@ -191,7 +201,7 @@ export async function deleteManagedOssRetentionObject(objectKey, expectedFingerp
   // DeleteObject has no reviewed atomic ETag precondition contract here.
   // The caller must hold the separately verified, offline writer freeze.
   try {
-    await createOssClient(storage, 15000, client).delete(key, ...(current.version_id ? [{ versionId: reviewedVersionId }] : []));
+    await createOssClient(storage, 15000, client, { env }).delete(key, ...(current.version_id ? [{ versionId: reviewedVersionId }] : []));
   } catch (error) {
     if (current.version_id && (Number(error.status || error.statusCode) === 403 || error.code === "AccessDenied")) return {
       object_key: key, retained: true, error_code: String(error.code || "AccessDenied"), error_status: 403,
@@ -207,7 +217,7 @@ export async function listManagedOssRetentionObjects({ prefix = "ai-unused", lim
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100000) throw new Error("Invalid OSS inventory limit");
   const storage = ossStorageConfig(env);
   if (!storage.enabled) throw new Error("OSS inventory requires configured storage");
-  const oss = createOssClient(storage, 15000, client), objects = [], seen = new Set();
+  const oss = createOssClient(storage, 15000, client, { env }), objects = [], seen = new Set();
   let continuationToken;
   for (;;) {
     const result = await oss.listV2({ prefix: `${prefix}/`, "max-keys": 1000, ...(continuationToken ? { "continuation-token": continuationToken } : {}) });
@@ -277,7 +287,7 @@ export async function putContentAddressedObject(buffer, {
   if (!storage.enabled) return null;
   const source = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
   const { hashSha256, objectKey } = buildContentAddressedObjectKey(source, { prefix, extension });
-  const ossClient = createOssClient(storage, timeoutMs, client);
+  const ossClient = createOssClient(storage, timeoutMs, client, { env });
   let exists = false;
   try {
     await ossClient.head(objectKey);
@@ -293,14 +303,15 @@ export async function putContentAddressedObject(buffer, {
       }
     });
   }
-  if(env.STORAGE_VERIFIED_WRITES_ENABLED==='1')await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size:source.length});
+  const bodyVerified = env.STORAGE_VERIFIED_WRITES_ENABLED === '1';
+  if(bodyVerified)await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size:source.length});
   const url = publicOssObjectUrl({
     region: storage.region,
     bucket: storage.bucket,
     objectKey,
     publicBaseUrl: storage.publicBaseUrl
   });
-  return {
+  const stored = {
     driver: "oss",
     bucket: storage.bucket,
     objectKey,
@@ -310,6 +321,7 @@ export async function putContentAddressedObject(buffer, {
     reused: exists,
     url
   };
+  return bodyVerified ? rememberVerifiedBody(stored, ossClient) : stored;
 }
 
 export async function putContentAddressedFile(filePath, {
@@ -338,7 +350,7 @@ export async function putContentAddressedFile(filePath, {
   const cleanPrefix = trimSlashes(prefix);
   const objectName = `${hashSha256}${normalizeExtension(extension)}`;
   const objectKey = [cleanPrefix, hashSha256.slice(0, 2), objectName].filter(Boolean).join("/");
-  const ossClient = createOssClient(storage, timeoutMs, client);
+  const ossClient = createOssClient(storage, timeoutMs, client, { env });
   let exists = false;
   await assertMediaStorageAccess(beforeRequest, signal);
   try { await ossClient.head(objectKey); exists = true; } catch (error) {
@@ -353,13 +365,15 @@ export async function putContentAddressedFile(filePath, {
     });
   }
   if (privateObject) await verifyPrivateOssObject(ossClient, objectKey, { storage });
-  if(env.STORAGE_VERIFIED_WRITES_ENABLED==='1')await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size,signal});
+  const bodyVerified = env.STORAGE_VERIFIED_WRITES_ENABLED === '1';
+  if(bodyVerified)await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size,signal});
   await assertMediaStorageAccess(beforeRequest, signal);
-  return {
+  const stored = {
     driver: "oss", bucket: storage.bucket, objectKey, storageName: objectKey,
     hashSha256, size, reused: exists,
     url: publicOssObjectUrl({ region: storage.region, bucket: storage.bucket, objectKey, publicBaseUrl: storage.publicBaseUrl })
   };
+  return bodyVerified ? rememberVerifiedBody(stored, ossClient) : stored;
 }
 
 // All content-addressed writers share the same acknowledgement rule: both a
@@ -393,7 +407,7 @@ export async function promoteManagedOssObjectUrl(url, {
   const cleanFromPrefix = trimSlashes(fromPrefix);
   if (!sourceKey || !sourceKey.startsWith(`${cleanFromPrefix}/`)) return null;
   const objectKey = [trimSlashes(toPrefix), sourceKey.slice(cleanFromPrefix.length + 1)].filter(Boolean).join("/");
-  const ossClient = createOssClient(storage, timeoutMs, client);
+  const ossClient = createOssClient(storage, timeoutMs, client, { env });
   let reused = false;
   let sourceHead = null;
   let targetHead = null;
@@ -415,8 +429,9 @@ export async function promoteManagedOssObjectUrl(url, {
   }
   const filename = path.basename(objectKey);
   const hashSha256 = filename.match(/^([a-f0-9]{64})(?:\.|$)/i)?.[1]?.toLowerCase() || "";
-  if(env.STORAGE_VERIFIED_WRITES_ENABLED==='1')await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size:Number((targetHead||sourceHead)?.res?.headers?.['content-length']||0)});
-  return {
+  const bodyVerified = env.STORAGE_VERIFIED_WRITES_ENABLED === '1';
+  if(bodyVerified)await verifyContentAddressedBody(ossClient,objectKey,{hashSha256,size:Number((targetHead||sourceHead)?.res?.headers?.['content-length']||0)});
+  const stored = {
     driver: "oss",
     bucket: storage.bucket,
     sourceKey,
@@ -428,6 +443,7 @@ export async function promoteManagedOssObjectUrl(url, {
     copied: !reused,
     url: publicOssObjectUrl({ region: storage.region, bucket: storage.bucket, objectKey, publicBaseUrl: storage.publicBaseUrl })
   };
+  return bodyVerified ? rememberVerifiedBody(stored, ossClient) : stored;
 }
 
 function extensionForRemoteMedia(url = "", contentType = "") {

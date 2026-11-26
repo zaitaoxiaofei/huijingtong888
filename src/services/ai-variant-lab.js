@@ -4,7 +4,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import { config } from "../config.js";
-import { requestPublicImage, resolvePublicImageTarget } from "../http/public-image-request.js";
+import { resolvePublicImageTarget } from "../http/public-image-request.js";
+import { requestServerImage } from "./server-image-request.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { chatWithAiProvider, visionWithAiProvider } from "./ai-provider-settings.js";
 import { generateImages, getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
@@ -2716,7 +2717,7 @@ async function resolveOptimizerImageInputs(body = {}) {
 async function fetchImageAsDataUrl(url) {
   let image;
   try {
-    image = await requestPublicImage(url, { maxBytes: 20 * 1024 * 1024, signal: AbortSignal.timeout(20000) });
+    image = await requestServerImage(url, { maxBytes: 20 * 1024 * 1024, timeoutMs: 20000, signal: AbortSignal.timeout(20000) });
   } catch (error) {
     throw statusError(`商品图片读取失败：${new URL(url).hostname} 无法访问，请检查图片是否已保存到本地素材库`, 400);
   }

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import OSS from "ali-oss";
+import { createServerOssClient } from "../src/services/oss-client.js";
 import { ossStorageConfig, publicOssObjectUrl } from "../src/services/object-storage.js";
 
 const DEFAULT_RETENTION_DAYS = 7;
@@ -126,15 +126,7 @@ export async function cleanupVerifiedLocalMedia({
   if (write) throw new Error("旧清理入口已停用：请使用 scripts/manage-media-cache.mjs 审阅引用和内容校验清单，再执行离线缓存清理");
   const storage = ossStorageConfig(env);
   if (!storage.enabled) throw new Error("OSS is not enabled; local media cleanup is blocked");
-  const ossClient = client || new OSS({
-    region: storage.region,
-    bucket: storage.bucket,
-    accessKeyId: storage.accessKeyId,
-    accessKeySecret: storage.accessKeySecret,
-    stsToken: storage.stsToken || undefined,
-    secure: true,
-    timeout: 15000
-  });
+  const ossClient = client || createServerOssClient(storage, { env, timeoutMs: 15000 });
   const cutoffMs = now - retentionDays * 86400000;
   const report = {
     safeForDeletion: false,

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { createGunzip } from "node:zlib";
-import OSS from "ali-oss";
+import { createServerOssClient } from "../src/services/oss-client.js";
 import { closeMysqlPool, mysqlExecute, mysqlQuery } from "../src/mysql-pool.js";
 import { ossStorageConfig } from "../src/services/object-storage.js";
 
@@ -23,11 +23,7 @@ async function downloadArchive(filePath) {
   if (!/^[a-f0-9]{64}$/.test(ARCHIVE_SHA256)) throw new Error("A valid --archive-sha256 is required");
   const storage = ossStorageConfig();
   if (!storage.enabled) throw new Error("OSS is not enabled");
-  const client = new OSS({
-    region: storage.region, bucket: storage.bucket, accessKeyId: storage.accessKeyId,
-    accessKeySecret: storage.accessKeySecret, stsToken: storage.stsToken || undefined,
-    secure: true, timeout: 60000
-  });
+  const client = createServerOssClient(storage);
   const objectKey = `${PREFIX}/${ARCHIVE_SHA256}.ndjson.gz`;
   await client.get(objectKey, filePath);
   return { bucket: storage.bucket, objectKey };

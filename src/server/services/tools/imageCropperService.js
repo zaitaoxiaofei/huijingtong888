@@ -1,7 +1,7 @@
 import {withMediaCacheLease} from "../../../services/media-cache-coordination.js";
 import {readCacheAwareFile,statCacheAwareFile,readCacheAwareDirectory} from "../../../services/media-cache-io.js";
 import crypto from "node:crypto";
-import {archiveMediaCacheFile,restoreMediaCacheFile,restoreMediaCacheDirectory} from "../../../services/media-cache-files.js";
+import {archiveMediaCacheFile,restoreMediaCacheFile,restoreMediaCacheDirectory,listMediaCacheDirectorySources} from "../../../services/media-cache-files.js";
 import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
@@ -341,7 +341,6 @@ export async function getTaskFile(taskId, filename, session = null) {
 export async function createTaskZip(taskId, batch = "", session = null) {
   return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
-  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   const taskDir = resolveTaskDir(taskId);
   const cropsDir = resolveScopedOutputDir(taskDir, "crops", batch);
   const imageEntries = await listImageFiles(cropsDir);
@@ -374,7 +373,6 @@ export async function createTaskZip(taskId, batch = "", session = null) {
 export async function createEnhancedTaskZip(taskId, batch = "", session = null) {
   return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
-  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   if (batch) {
     return createScopedTaskZip({
       taskId,
@@ -386,7 +384,8 @@ export async function createEnhancedTaskZip(taskId, batch = "", session = null) 
   }
   const taskDir = resolveTaskDir(taskId);
   const enhancedDir = path.join(taskDir, "enhanced");
-  const entries = await readCacheAwareDirectory(enhancedDir).catch(() => []);
+  if(process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1')await restoreMediaCacheDirectory(enhancedDir,{directOnly:true});
+  const entries = await fs.readdir(enhancedDir).catch(error=>{if(error.code==="ENOENT")return [];throw error;});
   const imageEntries = entries
     .filter((entry) => ALLOWED_EXTENSIONS.has(path.extname(entry).toLowerCase()))
     .sort((a, b) => a.localeCompare(b, "zh-CN", { numeric: true }));
@@ -419,7 +418,6 @@ export async function createEnhancedTaskZip(taskId, batch = "", session = null) 
 export async function createRatioTaskZip(taskId, batch = "", session = null) {
   return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
-  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   return createScopedTaskZip({
     taskId,
     scope: "ratio-3x4",
@@ -434,7 +432,6 @@ export async function createRatioTaskZip(taskId, batch = "", session = null) {
 export async function createWatermarkedTaskZip(taskId, batch = "", session = null) {
   return withMediaCacheLease(async () => {
   await assertImageCropperTaskOwner(taskId, session);
-  await restoreMediaCacheDirectory(resolveTaskDir(taskId));
   return createScopedTaskZip({
     taskId,
     scope: "watermarked",
@@ -604,8 +601,8 @@ export function runPythonWatermarker(inputDir, outputDir, watermarkPath, taskId,
 
 async function chooseInputDir(taskDir, filenames) {
   return withMediaCacheLease(async () => {
-  await restoreMediaCacheDirectory(taskDir);
   const names = normalizeCropFilenames(filenames);
+  if(new Set(names.map(name=>path.dirname(name))).size>1)throw Object.assign(new Error("所选图片属于不同批次，请按批次分别处理"),{status:400});
   const candidates = ["watermarked", "enhanced", "ratio-3x4", "crops"];
 
   for (const scope of candidates) {
@@ -614,7 +611,7 @@ async function chooseInputDir(taskDir, filenames) {
       const groups = new Map();
       for (const name of names) {
         const filePath = path.join(root, name);
-        const stat = await statCacheAwareFile(filePath).catch(() => null);
+        const stat = await statCacheAwareFile(filePath).catch(error=>{if(error.code==="ENOENT")return null;throw error;});
         if (!stat?.isFile()) continue;
         const groupDir = path.dirname(name).replace(/\\/g, "/");
         const basename = path.basename(name);
@@ -624,6 +621,7 @@ async function chooseInputDir(taskDir, filenames) {
       }
       if (groups.size) {
         const [groupDir, groupNames] = [...groups.entries()][0];
+        if(names.some(name=>path.dirname(name).replace(/\\/g,"/")===groupDir&&!groupNames.includes(path.basename(name))))throw Object.assign(new Error("所选图片不存在，请刷新裁切结果后重试"),{status:404});
         return {
           dir: path.join(root, groupDir),
           filenames: groupNames
@@ -631,10 +629,13 @@ async function chooseInputDir(taskDir, filenames) {
       }
     }
 
-    const latestDir = await latestImageDirectory(root);
-    if (latestDir) return { dir: latestDir, filenames: [] };
+    if(!names.length){
+      const latestDir = await latestImageDirectory(root);
+      if (latestDir) return { dir: latestDir, filenames: [] };
+    }
   }
 
+  if(names.length)throw Object.assign(new Error("所选图片不存在，请刷新裁切结果后重试"),{status:404});
   return { dir: path.join(taskDir, "crops"), filenames: [] };
 
   });
@@ -913,7 +914,7 @@ function resolveScopedOutputDir(taskDir, scope, batch = "") {
 
 async function listImageFiles(dir) {
   return withMediaCacheLease(async () => {
-  const entries = await readCacheAwareDirectory(dir, { withFileTypes: true }).catch(() => []);
+  const entries = await readCacheAwareDirectory(dir, { withFileTypes: true }).catch(error=>{if(error.code==="ENOENT")return [];throw error;});
   const files = [];
   for (const entry of entries) {
     if (entry.isFile() && ALLOWED_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
@@ -930,24 +931,42 @@ async function listImageFiles(dir) {
 
 async function latestImageDirectory(root) {
   return withMediaCacheLease(async () => {
-  const entries = await readCacheAwareDirectory(root, { withFileTypes: true }).catch(() => []);
-  const directFiles = entries.filter((entry) => entry.isFile() && ALLOWED_EXTENSIONS.has(path.extname(entry.name).toLowerCase()));
-  if (directFiles.length) return root;
-
-  const dirs = await Promise.all(entries
-    .filter((entry) => entry.isDirectory())
-    .map(async (entry) => {
-  return withMediaCacheLease(async () => {
-      const dir = path.join(root, entry.name);
-      const files = await listImageFiles(dir);
-      const stat = files.length ? await statCacheAwareFile(dir).catch(() => null) : null;
-      return files.length ? { dir, time: stat?.mtimeMs || 0 } : null;
+  const lifecycleEnabled=process.env.MEDIA_CACHE_LIFECYCLE_ENABLED==='1';
+  const sources=lifecycleEnabled?await listMediaCacheDirectorySources(root):[];
+  const files=new Map(sources.filter(item=>ALLOWED_EXTENSIONS.has(path.extname(item.filePath).toLowerCase())).map(item=>[item.filePath,item.createdMs]));
+  const localFiles=await listLocalImageFiles(root);
+  for(const file of localFiles)if(!files.has(file))files.set(file,0);
+  if([...files.keys()].some(file=>path.dirname(file)===root)){
+    if(lifecycleEnabled)await restoreMediaCacheDirectory(root,{directOnly:true});return root;
+  }
+  const dirs=new Map();
+  const localDirs=new Set(localFiles.map(file=>path.join(root,path.relative(root,file).split(path.sep)[0])));
+  for(const [file,time] of files){
+    const name=path.relative(root,file).split(path.sep)[0],dir=path.join(root,name);
+    dirs.set(dir,Math.max(dirs.get(dir)||0,time));
+  }
+  const candidates=await Promise.all([...dirs].map(async([dir,time])=>{
+    const stat=await fs.lstat(dir).catch(error=>{if(error.code==="ENOENT")return null;throw error;});
+    if(stat?.isSymbolicLink())throw new Error("Media cache parent escapes its root");
+    return {dir,time:stat&&localDirs.has(dir)?stat.mtimeMs:time};
+  }));
+  const selected=candidates.sort((a,b)=>b.time-a.time||b.dir.localeCompare(a.dir))[0]?.dir||"";
+  if(selected&&lifecycleEnabled)await restoreMediaCacheDirectory(selected,{directOnly:true});
+  return selected;
 
   });
-}));
-  return dirs.filter(Boolean).sort((a, b) => b.time - a.time)[0]?.dir || "";
+}
 
-  });
+async function listLocalImageFiles(root) {
+  const entries=await fs.readdir(root,{withFileTypes:true}).catch(error=>{if(error.code==="ENOENT")return [];throw error;});
+  const files=[];
+  for(const entry of entries){
+    if(entry.isSymbolicLink())continue;
+    const file=path.join(root,entry.name);
+    if(entry.isFile()&&ALLOWED_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))files.push(file);
+    else if(entry.isDirectory())files.push(...await listLocalImageFiles(file));
+  }
+  return files;
 }
 
 function resolveTaskDir(taskId) {

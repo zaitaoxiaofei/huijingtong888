@@ -21,7 +21,7 @@ export async function verifyPrivateObject(client,key,expected){
  if(got.bytes!==expected.bytes||got.sha256!==expected.sha256)throw Error('Private OSS object readback checksum differs from original');
  return got;
 }
-export async function persistPrivateObject(client,key,source,{expected,contentType='application/octet-stream'}={}){
+export async function persistPrivateObject(client,key,source,{expected,contentType='application/octet-stream',verify=verifyPrivateObject}={}){
  if(!expected||!Number.isSafeInteger(expected.bytes)||expected.bytes<0||expected.bytes>2*1024**3||!/^[a-f0-9]{64}$/.test(expected.sha256||''))throw Error('Invalid private object fingerprint');
  if(!/^database-archives\/[a-z0-9][a-z0-9/_.,-]*$/.test(key)||key.split('/').some(p=>p==='..'))throw Error('Invalid private archive namespace');
  let exists=false;try{await client.head(key);exists=true;}catch(e){if(Number(e.status||e.statusCode)!==404&&e.code!=='NoSuchKey')throw e;}
@@ -29,7 +29,7 @@ export async function persistPrivateObject(client,key,source,{expected,contentTy
   if(Buffer.isBuffer(source))await client.put(key,source,{headers});
   else await client.putStream(key,createReadStream(source),{headers,contentLength:expected.bytes});
  }
- await verifyPrivateObject(client,key,expected);return {object_key:key,...expected};
+ await verify(client,key,expected);return {object_key:key,...expected};
 }
 export async function immutableFileFingerprint(file){
  const before=await fs.lstat(file);if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1)throw Error('Archive source must be an ordinary single-link file');

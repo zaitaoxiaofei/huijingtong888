@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
-import OSS from "ali-oss";
+import {createServerOssClient} from "../src/services/oss-client.js";
 import {ossStorageConfig} from "../src/services/object-storage.js";
 import {auditMediaCache,applyMediaCacheManifest} from "../src/services/media-cache-maintenance.js";
 import {verifyAiMediaRetentionMaintenance} from "./cleanup-ai-media-retention.mjs";
@@ -19,7 +19,7 @@ export async function runMediaCacheMaintenance(args){
   try{
     const storage={...ossStorageConfig(),env:process.env};
     if(!storage.enabled)throw new Error("OSS is required for cache maintenance");
-    const client=new OSS({region:storage.region,bucket:storage.bucket,accessKeyId:storage.accessKeyId,accessKeySecret:storage.accessKeySecret,stsToken:storage.stsToken||undefined,secure:true,timeout:60000});
+    const client=createServerOssClient(storage,{env:storage.env});
     await query("SET SESSION max_execution_time=20000");
     if(mode==="audit")await query("SET SESSION TRANSACTION READ ONLY");
     const common={cwd:process.cwd(),query,storage,client};

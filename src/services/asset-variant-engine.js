@@ -12,7 +12,7 @@ import { AsyncResource } from "node:async_hooks";
 import sharp from "sharp";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { config } from "../config.js";
-import { requestPublicImage } from "../http/public-image-request.js";
+import { requestServerImage } from "./server-image-request.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { assetVariantExecutionScope, assetVariantTenantPredicate, assetVariantTenantScope } from "./asset-variant-tenant-scope.js";
@@ -4794,7 +4794,7 @@ async function assertAssetLocalSourceTenant(filePath, source = "") {
 
 async function fetchImageBuffer(url) {
   return withMediaCacheLease(async () => {
-  const image = await requestPublicImage(url, { maxBytes: 20 * 1024 * 1024,
+  const image = await requestServerImage(url, { maxBytes: 20 * 1024 * 1024, timeoutMs: 20000,
     signal: AbortSignal.timeout(20000), beforeRequest: () => assertAssetExecutionAccess() });
   await assertAssetExecutionAccess();
   if (!image?.buffer?.length) throw Object.assign(new Error("远程图片必须是可访问的公网图片且不超过 20MB"), {

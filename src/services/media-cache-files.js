@@ -5,8 +5,8 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import {assertMediaCacheDiskSpace} from './media-cache-space.js';
-import OSS from "ali-oss";
-import { ossStorageConfig, putContentAddressedFile } from "./object-storage.js";
+import { ossStorageConfig, putContentAddressedFile, consumeVerifiedContentAddressedBody } from "./object-storage.js";
+import { createServerOssClient } from "./oss-client.js";
 
 const queryDatabase = async (...args) => (await import("../mysql-pool.js")).mysqlQuery(...args);
 const registerSource = async (...args) => (await import("./media-migration-map.js")).registerMediaMigrationSource(...args);
@@ -32,26 +32,36 @@ export function mediaCacheSource(filePath, cwd = process.cwd()) {
   return `/uploads/${relative}`;
 }
 
-export async function restoreMediaCacheDirectory(root, { cwd=process.cwd(),query=queryDatabase,...options }={}) {
+// Enumerate bounded recovery metadata without downloading any media bodies.
+export async function listMediaCacheDirectorySources(root, { cwd=process.cwd(),query=queryDatabase }={}) {
+  root=path.resolve(root);
+  await assertCacheLocation(path.join(root,"index.png"),cwd);
   const prefix=mediaCacheSource(path.join(root,"index.png"),cwd).replace(/index\.png$/,"");
   const pattern=`${prefix.replace(/[!_%]/g,match=>`!${match}`)}%`;
-  const rows=await query("SELECT source_url FROM media_migration_map WHERE status='verified' AND source_url LIKE ? ESCAPE '!' LIMIT 1001",[pattern])
+  const rows=await query("SELECT source_url, UNIX_TIMESTAMP(created_at)*1000 AS created_ms FROM media_migration_map WHERE status='verified' AND source_url LIKE ? ESCAPE '!' LIMIT 1001",[pattern])
     .catch(error=>{if(error.code==="ER_NO_SUCH_TABLE")return [];throw error;});
   if(rows.length>1000)throw new Error("Media cache task exceeds directory recovery bound");
-  for(const row of rows){
-    if(!row.source_url.startsWith(prefix))throw new Error("Media cache source differs from recovery directory");
+  return rows.map(row=>{
+    if(typeof row.source_url!=="string"||!row.source_url.startsWith(prefix))throw new Error("Media cache source differs from recovery directory");
     const file=path.resolve(root,row.source_url.slice(prefix.length));
-    if(!file.startsWith(`${path.resolve(root)}${path.sep}`))throw new Error("Media cache directory traversal");
-    await restoreMediaCacheFile(file,{cwd,query,...options});
+    if(!file.startsWith(`${root}${path.sep}`))throw new Error("Media cache directory traversal");
+    return {filePath:file,createdMs:Number(row.created_ms)||0};
+  });
+}
+
+export async function restoreMediaCacheDirectory(root, { cwd=process.cwd(),query=queryDatabase,directOnly=false,...options }={}) {
+  const sources=await listMediaCacheDirectorySources(root,{cwd,query});
+  for(const {filePath:file} of sources){
+    if(directOnly&&path.dirname(file)!==path.resolve(root))continue;
+    if(!await restoreMediaCacheFile(file,{cwd,query,...options}))throw new Error("Media cache recovery mapping disappeared");
   }
-  return rows.length;
+  return sources.length;
 }
 
 function clientFromEnv(env) {
   const storage = ossStorageConfig(env);
   if (!storage.enabled) throw Object.assign(new Error("OSS 未启用，不能将图片或视频仅保存为本地文件"), { statusCode: 503 });
-  return new OSS({ region: storage.region, bucket: storage.bucket, accessKeyId: storage.accessKeyId,
-    accessKeySecret: storage.accessKeySecret, stsToken: storage.stsToken || undefined, secure: true, timeout: 60000 });
+  return createServerOssClient(storage, { env });
 }
 
 async function assertCacheLocation(filePath, cwd) {
@@ -69,11 +79,15 @@ async function assertCacheLocation(filePath, cwd) {
   }
 }
 
-// Verify the actual remote body. A matching object name/size alone is not proof.
-export async function verifyMediaObject(client, object, { destination = null } = {}) {
+function assertMediaObjectFingerprint(object) {
   if (!/^[a-f0-9]{64}$/.test(object.hashSha256 || "") || !Number.isSafeInteger(object.size) || object.size <= 0 || object.size > MAX_BYTES
     || !/^(?:listing-media|ai-task-media)\/[a-zA-Z0-9_./-]+$/.test(object.objectKey || "")
     || object.objectKey.split("/").some(part => !part || part === ".." || part === ".")) throw new Error("Invalid media object fingerprint");
+}
+
+// Verify the actual remote body. A matching object name/size alone is not proof.
+export async function verifyMediaObject(client, object, { destination = null } = {}) {
+  assertMediaObjectFingerprint(object);
   const response = await client.getStream(object.objectKey);
   const hash = crypto.createHash("sha256"); let bytes = 0;
   const verifier = new Transform({ transform(chunk, encoding, done) {
@@ -100,7 +114,8 @@ export async function archiveMediaCacheFile(filePath, { cwd = process.cwd(), sou
   const localHash = crypto.createHash("sha256");
   for await (const chunk of fs.createReadStream(filePath)) localHash.update(chunk);
   if (stored.size !== stat.size || stored.hashSha256 !== localHash.digest("hex")) throw new Error("Local media differs from OSS fingerprint");
-  await verifyMediaObject(oss, stored);
+  assertMediaObjectFingerprint(stored);
+  if (!consumeVerifiedContentAddressedBody(stored, { client: oss })) await verifyMediaObject(oss, stored);
   const after = await fsp.lstat(filePath);
   if (after.ino !== stat.ino || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error("Media cache changed while archiving");
   for (const url of new Set([source, sourceUrl].filter(Boolean))) {
@@ -112,26 +127,29 @@ export async function archiveMediaCacheFile(filePath, { cwd = process.cwd(), sou
 }
 
 export async function restoreMediaCacheFile(filePath, { cwd = process.cwd(), env = process.env, client = null, query = queryDatabase } = {}) {
+  filePath = path.resolve(filePath);
   const source = mediaCacheSource(filePath, cwd);
-  await assertCacheLocation(filePath, cwd);
-  const existing = await fsp.lstat(filePath).catch(error => { if (error.code === "ENOENT") return null; throw error; });
-  if (existing) { if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("Unsafe media cache file"); return true; }
   if (recovering.has(filePath)) return recovering.get(filePath);
-  const work = boundedRecovery(async () => {
-    const [row] = await query("SELECT content_hash_sha256, byte_size, oss_object_key, oss_bucket FROM media_migration_map WHERE source_fingerprint=? AND status='verified' LIMIT 1", [cacheSourceFingerprint(source)]).catch(error => { if (error.code === "ER_NO_SUCH_TABLE") return []; throw error; });
-    if (!row) return false;
-    const storage = ossStorageConfig(env);
-    if (row.oss_bucket !== storage.bucket) throw new Error("Media cache OSS bucket differs from configured storage");
-    const object = { hashSha256: row.content_hash_sha256, size: Number(row.byte_size), objectKey: row.oss_object_key };
-    await assertMediaCacheDiskSpace({directory:path.resolve(cwd,'uploads'),additionalBytes:object.size,env});
-    await fsp.mkdir(path.dirname(filePath), { recursive: true });
-    const temporary = `${filePath}.${crypto.randomUUID()}.partial`;
-    try {
-      await verifyMediaObject(client || clientFromEnv(env), object, { destination: temporary });
-      await fsp.rename(temporary, filePath);
-      return true;
-    } finally { await fsp.rm(temporary, { force: true }); }
-  });
+  const work = (async () => {
+    await assertCacheLocation(filePath, cwd);
+    const existing = await fsp.lstat(filePath).catch(error => { if (error.code === "ENOENT") return null; throw error; });
+    if (existing) { if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("Unsafe media cache file"); return true; }
+    return boundedRecovery(async () => {
+      const [row] = await query("SELECT content_hash_sha256, byte_size, oss_object_key, oss_bucket FROM media_migration_map WHERE source_fingerprint=? AND status='verified' LIMIT 1", [cacheSourceFingerprint(source)]).catch(error => { if (error.code === "ER_NO_SUCH_TABLE") return []; throw error; });
+      if (!row) return false;
+      const storage = ossStorageConfig(env);
+      if (row.oss_bucket !== storage.bucket) throw new Error("Media cache OSS bucket differs from configured storage");
+      const object = { hashSha256: row.content_hash_sha256, size: Number(row.byte_size), objectKey: row.oss_object_key };
+      await assertMediaCacheDiskSpace({directory:path.resolve(cwd,'uploads'),additionalBytes:object.size,env});
+      await fsp.mkdir(path.dirname(filePath), { recursive: true });
+      const temporary = `${filePath}.${crypto.randomUUID()}.partial`;
+      try {
+        await verifyMediaObject(client || clientFromEnv(env), object, { destination: temporary });
+        await fsp.rename(temporary, filePath);
+        return true;
+      } finally { await fsp.rm(temporary, { force: true }); }
+    });
+  })();
   recovering.set(filePath, work);
   try { return await work; } finally { recovering.delete(filePath); }
 }

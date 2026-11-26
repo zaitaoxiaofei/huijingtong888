@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import { createGzip } from "node:zlib";
-import OSS from "ali-oss";
+import { createServerOssClient } from "../src/services/oss-client.js";
 import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
 import { ossStorageConfig } from "../src/services/object-storage.js";
 
@@ -70,11 +70,7 @@ async function uploadArchive(filePath, manifest) {
   const storage = ossStorageConfig();
   if (!storage.enabled) throw new Error("OSS is not enabled");
   const objectKey = `${PREFIX}/${manifest.contentSha256}.ndjson.gz`;
-  const client = new OSS({
-    region: storage.region, bucket: storage.bucket, accessKeyId: storage.accessKeyId,
-    accessKeySecret: storage.accessKeySecret, stsToken: storage.stsToken || undefined,
-    secure: true, timeout: 60000
-  });
+  const client = createServerOssClient(storage);
   await client.multipartUpload(objectKey, filePath, {
     partSize: 1024 * 1024,
     parallel: 2,

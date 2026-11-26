@@ -127,7 +127,7 @@ test("matrix execution preserves enterprise, original actor, resources and publi
         await stage("retry", { record: id, shop: row.shop_id });
         return { id, task_id: retryStatus === "resubmitting" ? "" : "receipt", status: retryStatus };
       },
-      requestPublicImage: async (url, options) => {
+      requestServerImage: async (url, options) => {
         assert.equal(options.maxBytes, 20 * 1024 * 1024);
         await options.beforeRequest(); await stage("media", { url }); return { buffer: pixel };
       }
