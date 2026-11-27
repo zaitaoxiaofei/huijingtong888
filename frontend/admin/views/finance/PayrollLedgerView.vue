@@ -124,7 +124,7 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
 <template>
   <div v-if="allowed" class="payroll-ledger">
     <header class="ledger-header"><div><h1>工资管理</h1><p>按公司查看全年1—12月工资汇总，点击明细查看或编辑记录。</p></div><div class="detail-actions"><el-button type="primary" @click="openEditor()">新增工资明细</el-button><el-button type="primary" @click="importOpen=true">导入工资表</el-button></div></header>
-    <div class="detail-actions"><el-button :disabled="companyId==='all'" title="先选择归属公司，再查看公司账单" @click="openFinance('/finance/company-statements')">公司账单与凭证</el-button><el-button @click="openFinance('/profit/monthly-billing')">月度账单</el-button><el-button @click="router.push({path:'/finance-center',query:{companyId,year}})">经营总览</el-button></div>
+    <div class="detail-actions"><el-button :disabled="companyId==='all'" title="先选择归属公司，再查看公司账单" @click="openFinance('/finance/company-statements')">公司账单</el-button><el-button @click="openFinance('/profit/monthly-billing')">月度账单</el-button><el-button @click="router.push({path:'/finance-center',query:{companyId,year}})">经营总览</el-button></div>
     <el-alert type="info" :closable="false" title="可直接新增工资明细，也可导入工资表。点击月份查看明细、批量登记发放或逐条编辑；点击明细中的“核对并入账”确认成本；发放登记单独保留，不重复扣费。" />
     <div class="ledger-filters"><el-date-picker v-model="year" type="year" value-format="YYYY" format="YYYY年" aria-label="工资年份" :clearable="false" @change="load" /><el-select v-model="companyId" aria-label="工资归属公司" @change="load"><el-option label="全部公司" value="all" /><el-option v-for="company in companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select><el-button :loading="loading" @click="load">刷新</el-button></div>
     <el-alert v-if="errorText" :title="errorText" type="error" :closable="false" />
