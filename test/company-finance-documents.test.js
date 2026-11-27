@@ -16,7 +16,8 @@ function database(options={}){
  const docs=[],files=new Map(),closed=new Set();let next=1;
  const query=async(sql,p=[])=>{
   if(sql.includes('FROM finance_submission_items'))return [];
-  if(sql.includes('FROM finance_expenses'))return [];
+  if(sql.includes('FROM finance_expenses'))return (options.expenses||[]).filter(e=>e.company_id===p[0]&&e.tenant_id===p[1]);
+  if(sql.includes('FROM finance_vouchers')){assert.match(sql,/e.company_id=\?/);assert.match(sql,/v.tenant_id=\?/);assert.match(sql,/pf.tenant_id=\?/);return options.vouchers||[];}
   if(sql.includes('FROM finance_companies'))return p[0]===p[1]?[{id:p[0],name:`Company ${p[0]}`,tax_number:''}]:[];
   if(sql.includes('FROM finance_shop_company_assignments'))return p[0]===p[1]?[{id:p[0]*10,name:'Example Z'}]:[];
   if(sql.includes('FROM finance_reconciliation_adjustments'))return [];
@@ -213,4 +214,15 @@ test('collected amounts exclude parse errors, support, other currency and out-of
  const docs=['preview','confirmed','error'].map((parse_status,i)=>({id:i+1,shop_key:10,month_key:'2026-10',parse_status,payload_json:{facts:[{metric:'佣金',amount:10,currency:'CNY'}],cash:[{type:'platform-payment',amount:10,currency:'CNY',date:'2026-10-01',reference:String(i)}]}}));
  docs.push({parse_status:'preview',month_key:'2026-11',payload_json:{facts:[{metric:'佣金',amount:99,currency:'CNY'}]}},{parse_status:'preview',month_key:'2026-10',payload_json:{kind:'support',facts:[]}},{parse_status:'preview',month_key:'2026-10',payload_json:{facts:[{metric:'佣金',amount:99,currency:'RUB'}]}});
  const summary=summarizeImportedDocuments(docs,{from:'2026-10',to:'2026-10'},{includePreview:true});assert.equal(summary.metrics['佣金'],20);assert.equal(summary.lines.length,2);assert.equal(summary.cash.length,1);
+});
+
+
+test('existing salaries and software registrations enter collected summary once with original month and company scope',async()=>{
+ const expense=(id,category,amount,extra={})=>({id,company_id:1,tenant_id:1,month_key:'2026-10',category,amount_cny:amount,description:category,source_type:'user_cost_default',...extra});
+ const db=database({expenses:[expense(1,'salary',1000),expense(2,'ai_subscription',700),expense(3,'internet',100),expense(4,'rent',1000),expense(5,'utilities',300),expense(6,'ai_tokens',0),expense(7,'物流',100,{source_type:'finance_submission'}),expense(8,'software',999,{company_id:2,tenant_id:2})],vouchers:[{id:20,expense_id:2,voucher_number:'Software invoice',attachment_url:'/uploads/team-attachments/software.pdf',review_status:'approved'}]});
+ const r=await db.service.report({company_id:1,month:'2026-10'},session());
+ assert.equal(r.collected_summary.metrics['软件订阅费'],700);assert.equal(r.collected_summary.metrics['网络费用'],100);assert.equal(r.collected_summary.metrics['场地租金'],1000);assert.equal(r.collected_summary.metrics['水电物业费'],300);assert.equal(r.collected_summary.metrics['AI使用费'],0);assert.equal(r.collected_summary.metrics['国内物流费'],100);assert.equal(r.collected_summary.metrics['工资'],1000);
+ const salary=r.collected_summary.lines.filter(l=>l.metric==='工资');assert.equal(salary.length,1);
+ const software=r.collected_summary.lines.find(l=>l.metric==='软件订阅费');assert.equal(software.expense_id,2);assert.equal(software.month,'2026-10');assert.equal(software.shop_id,0);assert.equal(software.amount_status,'estimated');assert.equal(software.linked_evidence[0].attachment_url,'/uploads/team-attachments/software.pdf');
+ assert.equal(r.collected_summary.lines.some(l=>l.expense_id===8),false);assert.equal(r.metrics['软件订阅费'],undefined);
 });

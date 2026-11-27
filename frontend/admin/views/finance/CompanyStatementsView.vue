@@ -1,7 +1,7 @@
 <script setup>
 import { FINANCE_FILE_CATEGORIES, financeDocumentCategories } from '../../../../src/shared/finance-document-categories.js';
 import { FINANCE_GROUPS, MANUAL_EXPENSE_METRICS, UPLOAD_TYPES, financeMatrix, financeSourceShops, financeLineSign } from '../../../../src/shared/company-finance-report.js';
-import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { apiClient, currentApiCacheScope, getAuthToken } from '../../utils/api';
@@ -19,10 +19,10 @@ const fileCategory=ref('all'),guideOpen=ref(false),documentMonth=ref(route.query
 const shopName=id=>Number(id)?allShops.value.find(s=>Number(s.id)===Number(id))?.name||`店铺 #${id}`:'公司共用';
 const uploadMonth=ref(initialMonth),uploadType=ref('auto'),displayName=ref(''),relatedDocumentId=ref(''),manual=ref({metric:'AI使用费',amount:undefined,currency:'CNY',note:''}),selection=ref(null);
 const year=computed({get:()=>month.value.slice(0,4),set:value=>{if(/^20\d{2}$/.test(String(value)))month.value=`${value}-${month.value.slice(5)}`;}});
-const expandedGroups=['income','platform'];
+const expandedGroups=[],sourceDetail=ref(null);
 const selectedType=computed(()=>UPLOAD_TYPES.find(t=>t.value===uploadType.value));
 let generation=0,controller;
-const money=n=>n==null?'待补':Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const money=n=>n==null?'—':Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const shops=computed(()=>allShops.value.filter(s=>assignments.value.some(a=>Number(a.company_id)===Number(companyId.value)&&Number(a.shop_id)===Number(s.id)&&a.effective_from<=`${uploadMonth.value}-31`&&(!a.effective_to||a.effective_to>=`${uploadMonth.value}-01`))));
 const windowRange=computed(()=>({from:`${year.value}-01`,to:`${year.value}-12`}));
 const query=computed(()=>new URLSearchParams({company_id:companyId.value,...windowRange.value}).toString());
@@ -35,10 +35,11 @@ const collected=computed(()=>report.value?.collected_summary||report.value);
 const matrix=computed(()=>financeMatrix(collected.value?.lines||[],year.value,period.value));
 const netSales=computed(()=>collected.value?.metrics?.['已确认商品销售额']==null?null:collected.value.metrics['已确认商品销售额']-(collected.value.metrics['销售退回冲减额']||0));
 const platformFees=computed(()=>{const names=FINANCE_GROUPS.find(g=>g.id==='platform').metrics,lines=(collected.value?.lines||[]).filter(l=>names.includes(l.metric));return lines.length?lines.reduce((s,l)=>s+l.amount,0):null;});
+const registeredCosts=computed(()=>{const lines=(collected.value?.lines||[]).filter(l=>['payroll','recorded-expense'].includes(l.source_type));return lines.length?lines.reduce((n,l)=>n+l.amount,0):null;});
 const sourceLines=computed(()=>selection.value?(collected.value?.lines||[]).filter(l=>l.month>=selection.value.period.from&&l.month<=selection.value.period.to&&selection.value.row.metrics.includes(l.metric)):[]);
-const sourceShops=computed(()=>financeSourceShops(sourceLines.value,report.value?.shops||[]).map(s=>({...s,amount:s.lines.length?s.lines.reduce((n,l)=>n+l.amount*(selection.value?.row.id==='income'||selection.value?.row.refund?financeLineSign(l.metric):1),0):null})));
+const sourceShops=computed(()=>financeSourceShops(sourceLines.value,sourceLines.value.some(l=>Number(l.shop_id)>0&&!['payroll','recorded-expense'].includes(l.source_type))?(report.value?.shops||[]):[]).map(s=>({...s,amount:s.lines.length?s.lines.reduce((n,l)=>n+l.amount*(selection.value?.row.id==='income'||selection.value?.row.refund?financeLineSign(l.metric):1),0):null})));
 const linkableDocuments=computed(()=>(report.value?.documents||[]).filter(d=>d.parse_status==='confirmed'&&Number(d.shop_key)===Number(shopId.value)&&d.month_key===uploadMonth.value));
-function selectCell(row,p){selection.value={row,period:p};}
+async function selectCell(row,p){selection.value={row,period:p};await nextTick();sourceDetail.value?.scrollIntoView({behavior:'smooth',block:'start'});}
 const statuses={preview:'待确认',confirmed:'已确认归档',error:'解析/归属待处理'};
 const reviews={pending:'待会计审核',accepted:'会计认可',needs_info:'需补资料',adjustment:'需纳税调整'};
 function current(token,scope){return token===generation&&scope===currentApiCacheScope()&&allowed.value;}
@@ -126,21 +127,21 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
    <el-alert v-if="tab!=='reconciliation'" type="warning" :closable="false" :title="`本年度已收到部分销售资料的店铺 ${report.coverage.shops_with_sales}/${report.coverage.shops_expected}。公司账尚未齐全，未提供金额不作零。采购、工资社保和银行到账仍需核对。`" />
    <el-tabs v-model="tab">
     <el-tab-pane label="公司汇总与店铺明细" name="summary" lazy>
-     <div class="totals"><div><span>{{year}}年 · 已解析商品净销售 CNY</span><strong>{{money(netSales)}}</strong></div><div><span>{{year}}年 · 已解析平台费用 CNY</span><strong>{{money(platformFees)}}</strong></div><div><span>公司完整利润 / 税前扣除额</span><strong>待会计核对</strong></div></div>
-     <p><el-tag v-if="collected.pending_documents" type="warning" size="small">待核对</el-tag> 已解析金额包含待核对资料与已确认金额，点击金额查看各店铺原件。<el-button v-if="collected.error_documents" link type="warning" @click="tab='documents'">{{collected.error_documents}}份解析异常</el-button></p>
+     <div class="totals"><div><span>{{year}}年 · 已解析商品净销售 CNY</span><strong>{{money(netSales)}}</strong></div><div><span>{{year}}年 · 已解析平台费用 CNY</span><strong>{{money(platformFees)}}</strong></div><div><span>{{year}}年 · 已登记工资及经营费用 CNY</span><strong>{{money(registeredCosts)}}</strong></div></div>
+     <p><el-tag v-if="collected.pending_documents" type="warning" size="small">参考汇总</el-tag> 已解析原件与已登记费用按月份汇总，点击金额查看来源。<el-button v-if="collected.error_documents" link type="warning" @click="tab='documents'">{{collected.error_documents}}份解析异常</el-button></p>
      <el-table class="period-matrix" :data="matrix.rows" row-key="id" :expand-row-keys="expandedGroups" :row-class-name="({row})=>row.children?'finance-group-row':''" :tree-props="{children:'children'}" border v-loading="loading" :max-height="650">
       <el-table-column prop="name" label="项目 / CNY" fixed min-width="285"/>
-      <el-table-column v-for="p in matrix.periods" :key="p.id" :label="p.label" :min-width="period==='month'?130:180" align="right"><template #header><span>{{p.label}}</span> <el-button link type="primary" :disabled="busy" :aria-label="`导出${p.label}交接包`" @click="download(p)">导出</el-button></template><template #default="{row}"><el-button v-if="row.cells[p.id]!=null" link type="primary" :aria-label="`${row.name} ${p.label} 查看明细`" @click="selectCell(row,p)">{{row.refund?'− ':''}}{{money(row.cells[p.id])}}<small v-if="row.pending_cells[p.id]" class="pending-amount">待核对</small></el-button><span v-else class="missing">待补</span></template></el-table-column>
+      <el-table-column v-for="p in matrix.periods" :key="p.id" :label="p.label" :min-width="period==='month'?130:180" align="right"><template #header><span>{{p.label}}</span> <el-button link type="primary" :disabled="busy" :aria-label="`导出${p.label}交接包`" @click="download(p)">导出</el-button></template><template #default="{row}"><el-button v-if="row.cells[p.id]!=null" link type="primary" :aria-label="`${row.name} ${p.label} 查看明细`" @click="selectCell(row,p)">{{row.refund?'− ':''}}{{money(row.cells[p.id])}}</el-button><span v-else class="missing">—</span></template></el-table-column>
      </el-table>
-     <p>“待补”表示没有可汇总的解析金额，不等于零；参考汇总不代表已入账或已获会计认可，不推算完整利润。</p>
-     <section v-if="selection" class="source-detail"><h2>{{selection.row.name}} · {{selection.period.label}} · 店铺及原始凭证</h2>
+     <p>“—”表示没有金额记录，不等于零。未审核原件及估算费用仅供参考。</p>
+     <section v-if="selection" ref="sourceDetail" class="source-detail"><h2>{{selection.row.name}} · {{selection.period.label}} · 店铺及原始凭证</h2>
       <el-table :data="sourceShops" row-key="id" :default-expand-all="true">
-       <el-table-column type="expand"><template #default="{row:shop}"><el-table v-if="shop.lines.length" :data="shop.lines" class="source-lines"><el-table-column prop="month" label="业务月份" width="110"/><el-table-column prop="metric" label="项目" min-width="170"/><el-table-column label="金额 CNY" width="130"><template #default="{row}">{{row.metric==='销售退回冲减额'?'− ':''}}{{money(row.amount)}}</template></el-table-column><el-table-column prop="source" label="提取位置 / 录入依据" min-width="220"/><el-table-column label="原件（原始名称保留）" min-width="260"><template #default="{row}"><el-button v-if="row.source_type==='payroll'" link type="primary" @click="router.push({path:'/finance/payroll',query:{companyId:companyId,month:row.month}})">查看工资明细</el-button><el-button v-else link type="primary" @click="openFile(row.attachment_url)">{{row.display_name||row.original_name}}</el-button><small v-if="row.display_name!==row.original_name">{{row.original_name}}</small><div v-for="e in row.linked_evidence" :key="e.document_id"><el-button link type="primary" @click="openFile(e.attachment_url)">配套：{{e.display_name}}</el-button><small>{{reviews[e.review_status]}}</small></div></template></el-table-column><el-table-column label="金额状态" width="100"><template #default="{row}"><el-tag v-if="row.parse_status==='preview'" type="warning" size="small">待核对</el-tag><span v-else>已确认</span></template></el-table-column><el-table-column label="凭证审核" width="130"><template #default="{row}">{{reviews[row.review_status]||'待会计审核'}}</template></el-table-column></el-table><p v-else class="source-lines">该店铺在此期间尚无已解析来源，请补齐资料。</p></template></el-table-column>
+       <el-table-column type="expand"><template #default="{row:shop}"><el-table v-if="shop.lines.length" :data="shop.lines" class="source-lines"><el-table-column prop="month" label="业务月份" width="110"/><el-table-column prop="metric" label="项目" min-width="170"/><el-table-column label="金额 CNY" width="130"><template #default="{row}">{{row.metric==='销售退回冲减额'?'− ':''}}{{money(row.amount)}}</template></el-table-column><el-table-column prop="source" label="提取位置 / 录入依据" min-width="220"/><el-table-column label="原件（原始名称保留）" min-width="260"><template #default="{row}"><el-button v-if="row.source_type==='payroll'" link type="primary" @click="router.push({path:'/finance/payroll',query:{companyId:companyId,month:row.month}})">查看工资明细</el-button><el-button v-else-if="row.source_type==='recorded-expense'" link type="primary" @click="router.push({path:'/profit/monthly-billing',query:{companyId:companyId,month:row.month}})">查看费用记录 #{{row.expense_id}}</el-button><el-button v-else link type="primary" @click="openFile(row.attachment_url)">{{row.display_name||row.original_name}}</el-button><small v-if="row.source_type==='recorded-expense'&&!row.linked_evidence?.length">暂无关联原件</small><small v-if="row.source_type!=='recorded-expense'&&row.display_name!==row.original_name">{{row.original_name}}</small><div v-for="e in row.linked_evidence" :key="e.document_id||`voucher-${e.voucher_id}`"><el-button link type="primary" @click="openFile(e.attachment_url)">配套：{{e.display_name}}</el-button><small>{{reviews[e.review_status]}}</small></div></template></el-table-column><el-table-column label="金额状态" width="100"><template #default="{row}"><span>{{row.amount_status==='estimated'?'已登记（估算）':row.source_type==='recorded-expense'?'已登记':row.parse_status==='preview'?'已解析':'已确认'}}</span></template></el-table-column><el-table-column label="凭证审核" width="130"><template #default="{row}">{{reviews[row.review_status]||'待会计审核'}}</template></el-table-column></el-table><p v-else class="source-lines">该店铺在此期间暂无对应金额来源。</p></template></el-table-column>
        <el-table-column prop="name" label="店铺 / 公司共用"/><el-table-column label="已采集金额 CNY" align="right"><template #default="{row}">{{money(row.amount)}}</template></el-table-column>
       </el-table>
       <el-empty v-if="!sourceShops.length" description="该期间没有已解析来源"/>
      </section>
-     <p>公司所属店铺：{{ report.shops.map(s=>s.name).join('、') || '尚未配置' }}。无对应资料的店铺继续列为缺件。</p>
+     <p>公司所属店铺：{{ report.shops.map(s=>s.name).join('、') || '尚未配置' }}。平台原件按店铺归档，公司共用费用不重复分摊。</p>
     </el-tab-pane>
     <el-tab-pane label="上传、解析与归档" name="documents" lazy>
      <div class="toolbar"><el-button @click="guideOpen=!guideOpen">{{guideOpen?'收起文件分类说明':'查看有哪些文件类别'}}</el-button><span>原件 {{monthDocuments.length}} 份；综合原件可对应多类，金额按明细只计一次。</span></div>
@@ -185,8 +186,4 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
 .company-statements,.company-statements>*{min-width:0;max-width:100%}
 .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:12px 0 20px}.totals>div{display:grid;gap:8px;padding:16px;border:1px solid var(--el-border-color);border-radius:8px}.totals span{color:var(--el-text-color-secondary)}.totals strong{font-size:22px;font-weight:500}
 .company-statements{display:grid;gap:18px}.company-statements header,.toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.company-statements header{justify-content:space-between}.company-statements h1{font-size:24px;margin:0}.company-statements h2{font-size:18px;margin:18px 0 10px}.company-statements p{color:var(--el-text-color-secondary);overflow-wrap:anywhere}.toolbar .el-select{width:290px}.company-statements :deep(.el-button span){white-space:normal;overflow-wrap:anywhere}.company-statements :deep(.el-dialog__body){display:grid;gap:14px}@media(max-width:700px){.toolbar{align-items:stretch}.toolbar .el-select{width:100%}.company-statements h1{font-size:21px}}
-</style>
-
-<style scoped>
-.pending-amount{font-size:11px;margin-left:4px;color:var(--el-color-warning);}
 </style>

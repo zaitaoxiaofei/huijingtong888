@@ -1,3 +1,4 @@
+import { recordedExpenseLines } from './finance-recorded-expenses.js';
 import { paidPayrollAccruals } from "./finance-payroll-accruals.js";
 import crypto from 'node:crypto';
 import { validateArchiveSource } from './finance-archive-source.js';
@@ -249,17 +250,17 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const ctx=await company(input,session),period=range(input);
    if(input.period_mode&&period.from.slice(0,4)!==period.to.slice(0,4))fail('期间分类报表请在同一年度内选择范围（from/to），跨年资料请分别导出');
    const documents=await getDocs(ctx,period),shops=await shopsFor(ctx,period),summary=summarizeImportedDocuments(documents,period);
-   // Read the same posted salary expense as monthly billing; vouchers never add a second cost.
-   const salaryExpenses=await (query===mysqlQuery?async operation=>(await import('../mysql-pool.js')).withMysqlReadSnapshot(operation,{interactive:true}):async operation=>operation(query))(async read=>{
-   const booked=await read(`SELECT e.id,e.amount_cny,e.description,DATE_FORMAT(e.expense_date,'%Y-%m') month_key,e.source_type,e.source_id,i.detail_json
+   // Reuse registered expenses and paid payroll; evidence never adds a second monetary row.
+   const registered=await (query===mysqlQuery?async operation=>(await import('../mysql-pool.js')).withMysqlReadSnapshot(operation,{interactive:true}):async operation=>operation(query))(async read=>{
+   const booked=await read(`SELECT e.id,e.shop_id,e.category,e.voucher_status,e.amount_cny,e.description,DATE_FORMAT(e.expense_date,'%Y-%m') month_key,e.source_type,e.source_id,i.detail_json
      FROM finance_expenses e LEFT JOIN finance_submission_items i ON e.source_type='finance_submission' AND i.id=e.source_id AND i.tenant_id=? AND i.company_id=e.company_id
-     WHERE e.company_id=? AND e.category='salary' AND (e.tenant_id=? OR (?=1 AND (e.tenant_id IS NULL OR e.tenant_id=0)))
+     WHERE e.company_id=? AND (e.tenant_id=? OR (?=1 AND (e.tenant_id IS NULL OR e.tenant_id=0)))
        AND e.expense_date>=? AND e.expense_date<=LAST_DAY(CONCAT(?,'-01')) ORDER BY e.expense_date,e.id`,[ctx.tenantId,ctx.companyId,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0,period.from+'-01',period.to]);
    const salaryTo=new Date(Date.UTC(Number(period.to.slice(0,4)),Number(period.to.slice(5)),0)).toISOString().slice(0,10);
    const paidWages=await paidPayrollAccruals({tenantId:ctx.tenantId,legacy:ctx.s.tenant.slug==='default',companyId:ctx.companyId,from:period.from+'-01',to:salaryTo},read);
-   return booked.concat(paidWages.map(row=>({...row,month_key:row.expense_date.slice(0,7)})));
+   return {salary:booked.filter(e=>e.category==='salary').concat(paidWages.map(row=>({...row,month_key:row.expense_date.slice(0,7)}))),operating:booked.filter(e=>e.category!=='salary')};
    });
-   for(const expense of salaryExpenses){
+   for(const expense of registered.salary){
      const detail=expense.detail_json?(typeof expense.detail_json==='string'?JSON.parse(expense.detail_json):expense.detail_json):null;
      const reconciled=detail&&Number.isFinite(Number(detail.base))&&Number.isFinite(Number(detail.employer))&&Math.abs(rounded(Number(detail.base)+Number(detail.employer))-Number(expense.amount_cny))<0.005;
      const contributions=detail?.employer_items,keys=['pension','medical','supplementary_medical','unemployment','injury','housing_fund'];
@@ -270,8 +271,15 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
        summary.lines.push(line);summary.metrics[metric]=rounded((summary.metrics[metric]||0)+amount);
      }
    }
+   const vouchers=registered.operating.length?await query(`SELECT v.id,v.expense_id,v.voucher_number,v.review_status,CASE WHEN pf.id IS NOT NULL THEN v.attachment_url ELSE NULL END attachment_url
+    FROM finance_vouchers v JOIN finance_expenses e ON e.id=v.expense_id AND e.company_id=v.company_id
+    LEFT JOIN tenant_private_files pf ON pf.storage_name=SUBSTRING_INDEX(v.attachment_url,'/',-1) AND pf.tenant_id=? AND pf.purpose='finance'
+    WHERE e.company_id=? AND e.category!='salary' AND (e.tenant_id=? OR (?=1 AND (e.tenant_id IS NULL OR e.tenant_id=0)))
+    AND (v.tenant_id=? OR (?=1 AND (v.tenant_id IS NULL OR v.tenant_id=0)))
+    AND e.expense_date>=? AND e.expense_date<=LAST_DAY(CONCAT(?,'-01'))`,[ctx.tenantId,ctx.companyId,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0,period.from+'-01',period.to]):[];
+   const registeredLines=recordedExpenseLines(registered.operating,vouchers);
    const collected=summarizeImportedDocuments(documents,period,{includePreview:true});
-   for(const line of summary.lines.filter(l=>l.source_type==='payroll')){collected.lines.push({...line,parse_status:'confirmed'});collected.metrics[line.metric]=rounded((collected.metrics[line.metric]||0)+line.amount);}
+   for(const line of [...summary.lines.filter(l=>l.source_type==='payroll'),...registeredLines]){collected.lines.push({...line,parse_status:line.parse_status||'confirmed'});collected.metrics[line.metric]=rounded((collected.metrics[line.metric]||0)+line.amount);}
    const parsedCovered=new Set(documents.filter(d=>['confirmed','preview'].includes(d.parse_status)&&payload(d).kind==='sales').map(d=>Number(d.shop_key)));
    const covered=new Set(documents.filter(d=>d.parse_status==='confirmed'&&payload(d).kind==='sales').map(d=>Number(d.shop_key)));
    const evidence=new Map();
@@ -282,7 +290,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    }
    for(const line of [...summary.lines,...collected.lines])line.linked_evidence=line.source_type==='payroll'
      ?documents.filter(d=>d.parse_status==='confirmed'&&d.month_key===line.month&&payload(d).kind==='payroll').map(d=>({document_id:d.id,original_name:d.original_name,display_name:'本月工资资料 · '+(payload(d).display_name||d.original_name),attachment_url:d.attachment_url,review_status:d.review_status}))
-     :evidence.get(Number(line.document_id))||[];
+     :line.source_type==='recorded-expense'?line.linked_evidence:evidence.get(Number(line.document_id))||[];
    const year=period.from.slice(0,4),mode=['month','quarter','year'].includes(input.period_mode)?input.period_mode:'month';
    return {collected_summary:{metrics:collected.metrics,lines:collected.lines,matrix:financeMatrix(collected.lines,year,mode),pending_documents:documents.filter(d=>d.parse_status==='preview'&&(payload(d).facts||[]).length).length,error_documents:documents.filter(d=>d.parse_status==='error').length},matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d),categories:financeDocumentCategories(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:parsedCovered.size,shops_with_confirmed_sales:covered.size,company_complete:false},gaps:['参考汇总含已解析待核对资料；已确认金额另列，不与订单利润或月度账单再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
   },
@@ -292,7 +300,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const zip=new JSZip(),base=`${safeName(ctx.c.name)}/${period.from}_${period.to}`,book=new ExcelJS.Workbook();let bytes=0;
    const addSheet=(name,headers,rows)=>{const s=book.addWorksheet(name);s.addRow(headers);for(const r of rows)s.addRow(r.map(neutral));s.columns.forEach(c=>c.width=28);s.getRow(1).font={bold:true};};
    addSheet('参考汇总（待核对）',['项目',...report.collected_summary.matrix.periods.map(p=>p.label)],report.collected_summary.matrix.rows.flatMap(g=>[[g.name,...report.collected_summary.matrix.periods.map(p=>g.cells[p.id])],...g.children.map(c=>[`  ${c.name}`,...report.collected_summary.matrix.periods.map(p=>c.cells[p.id])])]));
-   addSheet('参考金额原件依据',['月份','店铺ID','项目','金额CNY','金额状态','原件编号','原文件名','提取位置'],report.collected_summary.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.parse_status==='preview'?'待核对':'已确认',l.document_id,l.original_name,l.source]));
+   addSheet('参考金额原件依据',['月份','店铺ID','项目','金额CNY','金额状态','原件编号','原文件名','提取位置','费用记录编号'],report.collected_summary.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.amount_status==='estimated'?'已登记（估算）':l.source_type==='recorded-expense'?'已登记':l.parse_status==='preview'?'待核对':'已确认',l.document_id,l.original_name,l.source,l.expense_id]));
    addSheet('期间分类汇总',['项目',...report.matrix.periods.map(p=>p.label)],report.matrix.rows.flatMap(g=>[[g.name,...report.matrix.periods.map(p=>g.cells[p.id])],...g.children.map(c=>[`  ${c.name}`,...report.matrix.periods.map(p=>c.cells[p.id])])]));
    addSheet('公司已采集汇总',['项目','金额CNY','范围'],Object.entries(report.metrics).map(([k,v])=>[k,v,'已确认资料与已入账工资；公司未齐']));
    addSheet('店铺费用来源',['月份','店铺ID','项目','金额','币种','原件编号','原文件名','提取位置','费用编号','工资明细编号'],report.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.currency,l.document_id,l.original_name,l.source,l.expense_id,l.payroll_item_id]));
