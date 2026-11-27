@@ -167,7 +167,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     return { rows: rows.map(row => ({ ...wbProductView(row,a),
       mappings: mappings.filter(item=>(parse(row.raw_json).sizes||[]).some(size=>`WB-${size.chrtID}`===item.ozon_sku)) })) };
   }
-  async function bindProduct(tenantId, body) {
+  async function bindProduct(tenantId, body, attachOrder) {
     const a = await account(tenantId, body.shop_id), productId = positiveId(body.product_id), chrtId = positiveId(body.chrt_id);
     const cards = await query('SELECT raw_json FROM wb_product_cards WHERE tenant_id=? AND shop_id=? AND nm_id=?', [a.tenant_id,a.shop_id,positiveId(body.nm_id)]);
     if (!cards[0] || !(parse(cards[0].raw_json).sizes||[]).some(size=>Number(size.chrtID)===chrtId)) throw fail('WB 商品规格不属于所选店铺，请先同步商品。',404);
@@ -176,10 +176,12 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       const [products] = await connection.execute(`SELECT id FROM products WHERE id=? AND ${inventoryTenantSql(scope)} AND active=1 FOR UPDATE`,[productId]);
       if (!products.length) throw fail('基础商品不存在或不属于当前企业。',404);
       const sku = `WB-${chrtId}`;
-      const [existing] = await connection.execute('SELECT id,product_id FROM sku_mappings WHERE tenant_id=? AND shop_id=? AND ozon_sku=? FOR UPDATE',[a.tenant_id,a.shop_id,sku]);
-      if (existing[0] && Number(existing[0].product_id)!==productId) throw fail('此 WB 规格已绑定其他基础商品，请先核对历史订单与库存，不支持直接覆盖绑定。',409);
+      const [existing] = await connection.execute('SELECT id,product_id,active FROM sku_mappings WHERE tenant_id=? AND shop_id=? AND ozon_sku=? FOR UPDATE',[a.tenant_id,a.shop_id,sku]);
+      if (existing[0] && (!existing[0].active || Number(existing[0].product_id)!==productId)) throw fail('此 WB 规格已绑定其他基础商品，请先核对历史订单与库存，不支持直接覆盖绑定。',409);
       if (!existing.length) await connection.execute(`INSERT INTO sku_mappings (tenant_id,shop_id,product_id,ozon_sku,offer_id,commission_low,commission_high) VALUES (?,?,?,?,?,0,0)`,[a.tenant_id,a.shop_id,productId,sku,String(parse(cards[0].raw_json).vendorCode||'')]);
+      if (attachOrder) await attachOrder(connection);
     });
+    if (attachOrder) return {ok:true,product_id:productId};
     const orders = await query('SELECT order_id FROM wb_order_details WHERE tenant_id=? AND shop_id=?',[a.tenant_id,a.shop_id]);
     for (const order of orders) await reconcileInventory(order.order_id,a.tenant_id);
     invalidate();
@@ -499,10 +501,41 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   const workspace=createWbProductWorkspace({query,transaction,request,account,syncProducts,products,createInventoryProduct,prepareInventoryProduct,actorId});
   const records=createWbPublishRecords({query,request,account,refreshProductSnapshots:workspace.refreshProductSnapshots});
   async function createProductInventory(tenantId,body){const result=await workspace.createProductInventory(tenantId,body);await bindProduct(tenantId,{...body,product_id:result.product_id});return result;}
+  async function bindOrderInventory(tenantId, body, create = false) {
+    const [order] = await ownedOrders(tenantId, [body.order_id]);
+    const raw = parse(order.raw_json);
+    const sku = `WB-${positiveId(raw.chrtId)}`;
+    const target = {
+      shop_id: order.shop_id, nm_id: positiveId(raw.nmId), chrt_id: raw.chrtId,
+      product_id: body.product_id, name: body.name, length_cm: body.length_cm,
+      width_cm: body.width_cm, height_cm: body.height_cm, package_weight_g: body.package_weight_g
+    };
+    const attach = async connection => {
+      const [rows] = await connection.execute(`SELECT i.id,i.sku_mapping_id,m.id AS mapping_id,p.id AS product_id,b.product_id AS outbound_product_id
+        FROM orders o JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+        JOIN order_items i ON i.order_id=o.id AND i.ozon_sku=?
+        JOIN sku_mappings m ON m.tenant_id=w.tenant_id AND m.shop_id=w.shop_id AND m.ozon_sku=i.ozon_sku AND m.active=1
+        JOIN products p ON p.id=m.product_id AND p.active=1
+        LEFT JOIN outbound_records b ON b.shop_id=o.shop_id AND b.order_item_id=i.id
+        WHERE o.id=? AND w.tenant_id=? AND w.shop_id=? FOR UPDATE`, [sku, order.id, tenantId, order.shop_id]);
+      const link = rows[0];
+      if (rows.length !== 1 || (link.sku_mapping_id && Number(link.sku_mapping_id) !== Number(link.mapping_id))
+        || (link.outbound_product_id && Number(link.outbound_product_id) !== Number(link.product_id))) {
+        throw fail('订单已有不同库存关联或出库流水，请先核对，无法覆盖原绑定。',409);
+      }
+      await connection.execute('UPDATE order_items SET sku_mapping_id=? WHERE id=?', [link.mapping_id, link.id]);
+      await reconcileInventory(order.id, tenantId, connection);
+    };
+    const result = create
+      ? await workspace.createProductInventory(tenantId, target, attach)
+      : await bindProduct(tenantId, target, attach);
+    invalidate();
+    return result;
+  }
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
   const stockManagement=createWbStockManagement({account,query,request});
   return { ...stockManagement, cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
-    syncOrders, ownedOrders, prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
+    syncOrders, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
 export async function wbPlatform(session, permission = 'operations', signal) {

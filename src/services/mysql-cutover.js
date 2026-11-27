@@ -18229,7 +18229,7 @@ async function postProductInventoryWithComponentsMysql(connection, body = {}, te
   const productId = Number(body.product_id || 0);
   const quantityDelta = Number(body.quantity_delta || 0);
   if (!productId || !quantityDelta) return [];
-  if(body.related_order_item_id&&['order_outbound','order_outbound_adjustment'].includes(body.source_type)&&!['FBP','FBO','OGR'].includes(body.stock_location)&&(await loadBundleFinishedStocks((sql,args)=>mysqlConnectionQuery(connection,sql,args),scope)).length){
+  if(body.stock_location_source!=='wb_fbs'&&body.related_order_item_id&&['order_outbound','order_outbound_adjustment'].includes(body.source_type)&&!['FBP','FBO','OGR'].includes(body.stock_location)&&(await loadBundleFinishedStocks((sql,args)=>mysqlConnectionQuery(connection,sql,args),scope)).length){
     const [live]=await mysqlConnectionQuery(connection,`SELECT oi.id FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id WHERE oi.id=? AND oi.quantity>0 AND ${inventoryTenantSql(scope,'s')}
       AND NOT (${orderTransportEvidenceSql('o')}) AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage)) NOT REGEXP 'cancel|return|reject|delivered'`,[body.related_order_item_id]);
     if((live&&String(body.source_ref||'').includes(':removed:'))||String(body.source_ref||'').includes(':wb-cancel:')){
@@ -35902,34 +35902,45 @@ export function invalidateWbOrderCachesMysql() {
   invalidateShopCacheMysql();
 }
 
-export async function reconcileWbOrderInventoryMysql(orderId, tenantId) {
+export async function reconcileWbOrderInventoryMysql(orderId, tenantId, transactionConnection) {
   const scope = await orderOwnershipTenantScopeMysql(tenantId);
-  await withMysqlTransaction(async connection => {
-    const [orders] = await connection.execute(`SELECT o.id,o.status,o.shop_id,o.posting_number,w.handover_at
+  const reconcile = async connection => {
+    const [orders] = await connection.execute(`SELECT o.id,o.status,o.shop_id,o.posting_number,o.ordered_at,w.handover_at,w.supplier_status
       FROM orders o JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
       JOIN shops s ON s.id=o.shop_id AND s.platform='wb' WHERE o.id=? AND w.tenant_id=? AND s.tenant_id=? FOR UPDATE`,
     [Number(orderId), scope.id, scope.id]);
     const order = orders[0];
     if (!order) throw Object.assign(new Error('WB 订单不存在或不属于当前企业。'), { statusCode:404 });
-    const [items] = await connection.execute(`SELECT oi.id,oi.quantity,oi.ozon_sku,sm.id AS mapping_id,sm.product_id,sm.person_id,p.purchase_cost
+    const [items] = await connection.execute(`SELECT oi.id,oi.quantity,oi.ozon_sku,sm.id AS mapping_id,p.id AS product_id,sm.person_id,p.purchase_cost,
+      ((oi.sku_mapping_id=sm.id) OR (? > sm.created_at AND oi.sku_mapping_id IS NULL)) AS eligible
       FROM order_items oi LEFT JOIN sku_mappings sm ON sm.shop_id=? AND sm.ozon_sku=oi.ozon_sku AND sm.active=1 AND sm.tenant_id=?
-      LEFT JOIN products p ON p.id=sm.product_id AND ${orderTenantPredicateMysql('p', scope)}
-      WHERE oi.order_id=?`, [order.shop_id, scope.id, order.id]);
+      LEFT JOIN products p ON p.id=sm.product_id AND p.active=1 AND ${orderTenantPredicateMysql('p', scope)}
+      WHERE oi.order_id=?`, [order.ordered_at, order.shop_id, scope.id, order.id]);
     for (const item of items) {
-      if (!item.product_id) continue;
-      const [records] = await connection.execute(`SELECT id,status,quantity FROM outbound_records WHERE order_item_id=? AND shop_id=? FOR UPDATE`, [item.id,order.shop_id]);
+      const [records] = await connection.execute(`SELECT id,status FROM outbound_records WHERE order_item_id=? AND shop_id=? FOR UPDATE`, [item.id,order.shop_id]);
       const outbound = records[0];
       if (order.status === 'cancelled') {
         // After handover, a cancellation is not proof that goods came back.
         if (!outbound || outbound.status !== 'deducted' || order.handover_at) continue;
-        await postProductInventoryWithComponentsMysql(connection, { product_id:item.product_id,shop_id:order.shop_id,sku_mapping_id:item.mapping_id,
-          source_type:'order_outbound_adjustment',source_ref:`${order.posting_number}:wb-cancel:${item.id}`,quantity_delta:Number(outbound.quantity),
-          stock_location:'LOCAL',stock_location_source:'wb_fbs',related_posting_number:order.posting_number,related_order_item_id:item.id,
-          unit_cost:Number(item.purchase_cost||0),amount:0,note:'WB 交接前取消，释放本地订单占用' }, scope.id);
+        const [originals] = await connection.execute(`SELECT product_id, SUM(quantity_delta) AS quantity, MAX(unit_cost) AS unit_cost
+          FROM inventory_movements WHERE tenant_id=? AND shop_id=? AND related_order_item_id=?
+          AND stock_location='LOCAL' AND stock_location_source='wb_fbs' AND status='posted'
+          AND source_type IN ('order_outbound','order_outbound_adjustment')
+          GROUP BY product_id HAVING SUM(quantity_delta)<0`, [scope.id, order.shop_id, item.id]);
+        for (const original of originals) {
+          const quantity = -Number(original.quantity), unitCost = Number(original.unit_cost);
+          await postInventoryMysql(connection, { product_id:original.product_id,shop_id:order.shop_id,
+            source_type:'order_outbound_adjustment',source_ref:`${order.posting_number}:wb-cancel:${item.id}`,quantity_delta:quantity,
+            stock_location:'LOCAL',stock_location_source:'wb_fbs',related_posting_number:order.posting_number,
+            related_order_item_id:item.id,unit_cost:unitCost,amount:quantity*unitCost,note:'WB 交接前取消，释放本地订单占用' });
+        }
         await connection.execute("UPDATE outbound_records SET status='cancelled',note='WB 交接前取消，库存占用已释放' WHERE id=?", [outbound.id]);
         continue;
       }
-      if (order.status === 'wb_unknown' || outbound) continue;
+      // Only selected historical orders or orders placed after the binding can reserve stock.
+      if (!item.product_id || !item.eligible || outbound || order.handover_at
+        || !['new','confirm'].includes(order.supplier_status)
+        || !['awaiting_packaging','awaiting_deliver'].includes(order.status)) continue;
       await connection.execute('UPDATE order_items SET sku_mapping_id=? WHERE id=? AND order_id=?', [item.mapping_id,item.id,order.id]);
       await postProductInventoryWithComponentsMysql(connection, { product_id:item.product_id,shop_id:order.shop_id,sku_mapping_id:item.mapping_id,
         owner_person_id:item.person_id,source_type:'order_outbound',source_ref:order.posting_number,quantity_delta:-Number(item.quantity),
@@ -35939,6 +35950,8 @@ export async function reconcileWbOrderInventoryMysql(orderId, tenantId) {
         VALUES (?,?,?,?,?,?,?,'LOCAL','wb_fbs','order','deducted','WB FBS 订单库存登记')`,
       [item.product_id,order.shop_id,order.posting_number,item.id,item.ozon_sku,item.person_id,Number(item.quantity)]);
     }
-  });
+  };
+  if (transactionConnection) await reconcile(transactionConnection);
+  else await withMysqlTransaction(reconcile);
   invalidateOrderProcurementCoverage();
 }

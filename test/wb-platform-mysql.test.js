@@ -24,7 +24,7 @@ test('WB real SQL isolates shops, maps variants to shared products and imports o
       remote.push({tenant:a.tenant_id,shop:a.shop_id,service,path,options});
       if(path==='/api/v1/seller-info')return {sid:`seller-${a.shop_id}`};
       if(path==='/content/v2/get/cards/list')return {cards:[{nmID:100,vendorCode:'PAD',title:'Brake pad',subjectID:1,sizes:[{chrtID:200,skus:['barcode-200']}]}]};
-      if(path==='/api/v3/orders/new')return {orders:[{id:currentId,chrtId:200,nmId:100,article:'PAD',price:240000,currencyCode:643,createdAt:new Date().toISOString(),deliveryType:'fbs',cargoType:1}]};
+      if(path==='/api/v3/orders/new')return {orders:[{id:currentId,chrtId:200,nmId:100,article:'PAD',price:240000,currencyCode:643,createdAt:new Date(Date.now()+2000).toISOString(),deliveryType:'fbs',cargoType:1}]};
       if(path==='/api/v3/orders')return {orders:[],next:0};
       if(path==='/api/v3/orders/status')return {orders:options.body.orders.map(id=>({id,...(id===currentId?state:states.get(id))}))};
       return {};
@@ -78,6 +78,27 @@ test('WB real SQL isolates shops, maps variants to shared products and imports o
       assert.equal((await query("SELECT status FROM orders WHERE shop_id=? AND posting_number='WB-501'",[a.id]))[0].status,'cancelled');
       assert.ok((await query('SELECT handover_at FROM wb_order_details WHERE shop_id=? AND wb_order_id=501',[a.id]))[0].handover_at);
       assert.equal(Number((await query('SELECT SUM(quantity_delta) AS qty FROM inventory_movements WHERE product_id=20'))[0].qty),99);
+    });
+    await t.test('order-page binding is scoped to the selected order and repeated reconciliation posts once',async()=>{
+      const [mapping]=await query('SELECT id FROM sku_mappings WHERE shop_id=?',[a.id]);
+      const addOrder = async (id, complete = false) => {
+        await query("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES (?,?,?,'awaiting_deliver','2020-01-01')",[id,a.id,`WB-${id}`]);
+        await query('INSERT INTO order_items(order_id,ozon_sku,quantity) VALUES (?,?,1)',[id,'WB-200']);
+        await query("INSERT INTO wb_order_details(order_id,tenant_id,shop_id,wb_order_id,supplier_status,wb_status,raw_json,handover_at,synced_at) VALUES (?,2,?,?,?,'waiting',?,?,UTC_TIMESTAMP())",
+          [id,a.id,id,complete?'complete':'confirm',JSON.stringify({nmId:100,chrtId:200}),complete?new Date():null]);
+      };
+      await addOrder(701);
+      await addOrder(702,true);
+      await runtime.reconcileWbOrderInventoryMysql(701,2);
+      await assert.rejects(service.bindOrderInventory(3,{order_id:701,product_id:30}),error=>error.statusCode===404);
+      await service.bindOrderInventory(2,{order_id:701,product_id:20});
+      await service.bindOrderInventory(2,{order_id:701,product_id:20});
+      await runtime.reconcileWbOrderInventoryMysql(701,2);
+      await runtime.reconcileWbOrderInventoryMysql(702,2);
+      const links=await query('SELECT order_id,sku_mapping_id FROM order_items WHERE order_id IN (701,702) ORDER BY order_id');
+      assert.deepEqual(links.map(r=>r.sku_mapping_id),[mapping.id,null]);
+      const movements=await query("SELECT quantity_delta FROM inventory_movements WHERE related_posting_number IN ('WB-701','WB-702')");
+      assert.deepEqual(movements.map(r=>Number(r.quantity_delta)),[-1]);
     });
     await t.test('another tenant cannot prepare or inspect the imported shared order',async()=>{
       const order=(await query('SELECT id FROM orders WHERE shop_id=?',[a.id]))[0];const before=remote.length;
