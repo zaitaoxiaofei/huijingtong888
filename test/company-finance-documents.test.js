@@ -26,6 +26,7 @@ function database(options={}){
   if(sql.includes('FROM finance_reconciliation_adjustments'))return [];
   if(sql.includes('FROM finance_periods'))return closed.has(`${p[0]}:${p[1]}`)?[{id:1}]:[];
   if(sql.includes('FROM finance_import_documents')){
+   if(options.failJsonSort&&/ORDER BY month_key,id/.test(sql))throw Error('Out of sort memory');
    assert.match(sql,/tenant_id=\?/);assert.match(sql,/company_id=\?/);
    if(sql.includes('WHERE id=?'))return docs.filter(d=>d.id===p[0]&&d.tenant_id===p[1]&&d.company_id===p[2]);
    if(sql.includes('sha256=?'))return docs.filter(d=>d.tenant_id===p[0]&&d.company_id===p[1]&&d.shop_key===p[2]&&(d.sha256===p[3]||(d.business_key&&d.business_key===p[4])));
@@ -249,4 +250,11 @@ test('company purchase reference joins report postings and exports rows without 
  const r=await db.service.report({company_id:1,from:'2026-01',to:'2026-12'},session());assert.equal(r.collected_summary.metrics['已售商品采购成本'],12);assert.equal(r.metrics['已售商品采购成本'],undefined);assert.equal(r.purchase_cost.complete,true);assert.equal(r.purchase_cost.lines[0].cost_row_count,1);assert.equal(db.docs[0].parse_status,'preview');assert.equal(r.documents[0].payload_json.order_rows,undefined);assert.equal(r.documents[0].payload_json.order_row_count,1);
  const detail=await db.service.report({company_id:1,month:'2026-05',purchase_cost_details:'1',cost_shop_id:10},session());assert.equal(detail.purchase_cost.details.rows[0].amount,12);assert.equal(detail.purchase_cost.details.rows[0].posting_number,'1-2-3');assert.equal(detail.purchase_cost.details.total,1);
  const exported=await db.service.export({company_id:1,month:'2026-05'},session()),zip=await JSZip.loadAsync(exported.buffer),book=new ExcelJS.Workbook();await book.xlsx.load(await Object.values(zip.files).find(f=>f.name.endsWith('00_公司汇总与明细.xlsx')).async('nodebuffer'));assert.equal(book.getWorksheet('采购成本匹配').getRow(2).getCell(7).value,12);assert.equal(db.docs[0].parse_status,'preview');
+});
+
+
+test('large original JSON is not filesorted in MySQL and document order remains month then id',async()=>{
+ const db=database({failJsonSort:true});const padding='x'.repeat(1024*1024);
+ for(const [id,month]of[[3,'2026-05'],[2,'2026-04'],[1,'2026-04']])db.docs.push({id,tenant_id:1,company_id:1,shop_key:10,month_key:month,original_name:id+'.json',parse_status:'preview',payload_json:JSON.stringify({kind:'support',facts:[],padding})});
+ const r=await db.service.report({company_id:1,from:'2026-01',to:'2026-12'},session());assert.deepEqual(r.documents.map(d=>d.id),[1,2,3]);assert.equal(r.documents.every(d=>d.payload_json.padding.length===1024*1024),true);
 });

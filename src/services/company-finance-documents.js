@@ -95,7 +95,9 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
  async function getDocs(ctx,period,reader=query,lock=false){
   await ready();
   // Shared cash files can contain multiple months. Keep once and filter events by their own dates.
-  return reader(`SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND ((month_key>=? AND month_key<=?) OR (shop_key=0 AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='collection-cash') OR JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='platform-payments') ORDER BY month_key,id${lock?' FOR SHARE':''}`,[ctx.tenantId,ctx.companyId,period.from,period.to]);
+  const rows=await reader(`SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND ((month_key>=? AND month_key<=?) OR (shop_key=0 AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='collection-cash') OR JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='platform-payments')${lock?' FOR SHARE':''}`,[ctx.tenantId,ctx.companyId,period.from,period.to]);
+  // Sorting full JSON payloads in MySQL can exhaust sort_buffer_size after source archival.
+  return rows.sort((a,b)=>String(a.month_key).localeCompare(String(b.month_key))||Number(a.id)-Number(b.id));
  }
  async function locked(ctx,month){
   const closed=await query(`SELECT id FROM finance_periods WHERE company_id=? AND month_key=? AND status='closed' AND (tenant_id=? OR (?=1 AND tenant_id IS NULL))`,[ctx.companyId,month,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0]);
