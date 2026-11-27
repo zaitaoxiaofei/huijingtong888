@@ -50,3 +50,6 @@ export function financeMatrix(lines,year,mode) {
 export function financeSourceShops(lines,shops) {
  return [...new Set([...lines.map(l=>Number(l.shop_id||0)),...shops.map(s=>Number(s.id))])].map(id=>({id,name:id?(shops.find(s=>Number(s.id)===id)?.name||'店铺归属待核'):'公司共用',lines:lines.filter(l=>Number(l.shop_id||0)===id)}));
 }
+
+// Monthly billing accepts a separate year and month; an ISO month alone falls back to today.
+export const financeExpenseRecordQuery=(companyId,month)=>({companyId:String(companyId),year:month.slice(0,4),month:month.slice(5)});
