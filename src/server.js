@@ -15,6 +15,7 @@ import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
 import http from "node:http";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createImageReadCacheWriter } from "./services/image-read-cache.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -138,7 +139,8 @@ import { authorizeBusinessTaskSession, restoreBusinessTaskSession } from "./serv
 import { runTenantScheduledWork } from "./services/tenant-scheduled-work.js";
 import { withAiTenantSession } from "./services/ai-tenant-context.js";
 import { assertTenantPilotSchemaReady } from "./services/tenant-pilot-schema.js";
-import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
+import { readManagedOssObject } from "./services/object-storage.js";
+import { isManagedPublicImageSource } from "./services/server-image-request.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, saveTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
@@ -178,6 +180,8 @@ const serveStatic = createStaticHandler(publicDir, {
 const handleAuth = createAuthHandler(readJson);
 const imageProxyCacheDir = path.resolve("runtime", "image-proxy-cache");
 const productThumbnailCacheDir = path.resolve("runtime", "product-thumbnail-cache");
+const imageProxyCacheWriter = createImageReadCacheWriter(imageProxyCacheDir, { maxBytes: 128 * 1024 * 1024 });
+const productThumbnailCacheWriter = createImageReadCacheWriter(productThumbnailCacheDir, { maxBytes: 32 * 1024 * 1024 });
 const imageProxyInflight = new Map();
 const imageProxyFailureCache = new Map();
 const imageProxyFetchWaiters = [];
@@ -2055,6 +2059,9 @@ function productThumbnailCachePath(cacheSeed, width) {
 async function readProductThumbnailCache(cacheSeed, width) {
   const cachePath = productThumbnailCachePath(cacheSeed, width);
   try {
+    const stat = await fs.lstat(cachePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || !stat.size || stat.size > IMAGE_PROXY_MAX_CACHE_BYTES
+      || Date.now() - stat.mtimeMs > IMAGE_PROXY_CACHE_TTL_MS) return null;
     const cached = await fs.readFile(cachePath);
     return {
       buffer: cached,
@@ -2076,8 +2083,7 @@ async function productThumbnailBuffer(buffer, cacheSeed, width) {
     .resize({ width, height, fit: "cover", withoutEnlargement: true })
     .webp({ quality: 72 })
     .toBuffer();
-  await fs.mkdir(productThumbnailCacheDir, { recursive: true });
-  await fs.writeFile(cachePath, resized).catch(() => null);
+  await productThumbnailCacheWriter.write([{ name: path.basename(cachePath), buffer: resized }]);
   return {
     buffer: resized,
     contentType: "image/webp",
@@ -2126,16 +2132,20 @@ function imageProxyCachePaths(target) {
 async function readCachedRemoteImage(target, { allowStale = false } = {}) {
   const { dataPath, metaPath } = imageProxyCachePaths(target);
   try {
-    const [metaRaw, dataStat] = await Promise.all([
-      fs.readFile(metaPath, "utf8"),
-      fs.stat(dataPath)
+    const [metaStat, dataStat] = await Promise.all([
+      fs.lstat(metaPath),
+      fs.lstat(dataPath)
     ]);
+    if (!metaStat.isFile() || metaStat.isSymbolicLink() || metaStat.size > 4096
+      || !dataStat.isFile() || dataStat.isSymbolicLink() || !dataStat.size || dataStat.size > IMAGE_PROXY_MAX_CACHE_BYTES) return null;
     if (!allowStale && Date.now() - dataStat.mtimeMs > IMAGE_PROXY_CACHE_TTL_MS) return null;
-    const meta = JSON.parse(metaRaw);
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8"));
     const contentType = String(meta.contentType || "").toLowerCase();
     if (!contentType.startsWith("image/")) return null;
+    const buffer = await fs.readFile(dataPath);
+    if (meta.sha256 && (meta.bytes !== buffer.length || createHash("sha256").update(buffer).digest("hex") !== meta.sha256)) return null;
     return {
-      buffer: await fs.readFile(dataPath),
+      buffer,
       contentType
     };
   } catch {
@@ -2146,13 +2156,14 @@ async function readCachedRemoteImage(target, { allowStale = false } = {}) {
 async function writeCachedRemoteImage(target, payload) {
   if (!payload?.buffer?.length || payload.buffer.length > IMAGE_PROXY_MAX_CACHE_BYTES) return;
   const { dataPath, metaPath } = imageProxyCachePaths(target);
-  await fs.mkdir(imageProxyCacheDir, { recursive: true });
-  await Promise.all([
-    fs.writeFile(dataPath, payload.buffer),
-    fs.writeFile(metaPath, JSON.stringify({
+  await imageProxyCacheWriter.write([
+    { name: path.basename(dataPath), buffer: payload.buffer },
+    { name: path.basename(metaPath), buffer: Buffer.from(JSON.stringify({
       contentType: payload.contentType,
-      cachedAt: new Date().toISOString()
-    }), "utf8")
+      cachedAt: new Date().toISOString(),
+      bytes: payload.buffer.length,
+      sha256: createHash("sha256").update(payload.buffer).digest("hex")
+    }), "utf8") }
   ]);
 }
 
@@ -2173,7 +2184,7 @@ async function fetchRemoteImagePayload(target) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), IMAGE_PROXY_FETCH_TIMEOUT_MS);
   try {
-    if (isManagedOssObjectUrl(target)) {
+    if (isManagedPublicImageSource(target)) {
       const managed = await readManagedOssObject(target, {
         maxBytes: IMAGE_PROXY_MAX_RESPONSE_BYTES,
         timeoutMs: IMAGE_PROXY_FETCH_TIMEOUT_MS

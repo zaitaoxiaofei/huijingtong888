@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { assertAiCreditProviderBoundary } from "./ai-credit-runtime.js";
-import { currentAiTenantSession, needsAiTenantSession, reserveTenantAiRequest, withAiTenantSession } from "./ai-tenant-context.js";
+import { assertCurrentAiTenantPermission, currentAiTenantSession, needsAiTenantSession, reserveTenantAiRequest, withAiTenantSession } from "./ai-tenant-context.js";
+import { prepareVisionImageTransfers } from "./vision-image-transfer.js";
 import { config } from "../config.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { testOpenAiImageProvider } from "../server/services/openai/imageGenerationService.js";
@@ -436,7 +437,9 @@ export async function streamAiProviderResponse(payload = {}, handlers = {}) {
     route,
     fallbackRoute: route === "vision" ? "text" : undefined
   });
-  const messages = route === "vision" ? normalizeVisionMessages(payload.messages) : normalizeMessages(payload.messages, payload.prompt);
+  const messages = route === "vision"
+    ? await prepareVisionImageTransfers(normalizeVisionMessages(payload.messages), { beforeRequest: assertCurrentAiTenantPermission })
+    : normalizeMessages(payload.messages, payload.prompt);
   if (!messages.length) throw new Error("AI 调用内容不能为空");
   await reserveTenantAiRequest("text");
   return streamOpenAiCompatibleChat(runtimeConfig, {
@@ -449,7 +452,7 @@ export async function streamAiProviderResponse(payload = {}, handlers = {}) {
 
 export async function visionWithAiProvider(payload = {}) {
   const runtimeConfig = await resolveRuntimeConfig({}, { requireEnabled: true, route: "vision", fallbackRoute: "text" });
-  const messages = normalizeVisionMessages(payload.messages);
+  const messages = await prepareVisionImageTransfers(normalizeVisionMessages(payload.messages), { beforeRequest: assertCurrentAiTenantPermission });
   if (!messages.length) throw new Error("AI vision content cannot be empty");
   await reserveTenantAiRequest("text");
   const callOptions = {

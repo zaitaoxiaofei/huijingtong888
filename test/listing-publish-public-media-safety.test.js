@@ -344,3 +344,26 @@ test("prewarm revocation prevents retries and the next video's network request",
   assert.equal(response.total, 2); assert.equal(response.failed, 2); assert.equal(response.ok, 0);
   assert.equal(network.network.length, 1); assert.equal(network.lookups.length, 1);
 });
+
+test("prewarm reuses complete immutable-image checks while reauthorizing each new caller", async () => {
+  const image = "https://prewarm-fixture.oss-cn-heyuan.aliyuncs.com/listing-media/ab/" + "ab".repeat(32) + ".jpg";
+  const env = { OSS_ENABLED: "true", OSS_REGION: "oss-cn-heyuan", OSS_BUCKET: "prewarm-fixture",
+    OSS_ACCESS_KEY_ID: "fixture", OSS_ACCESS_KEY_SECRET: "fixture" };
+  const network = networkFixture({ responses: Array.from({ length: 2 }, () => ({
+    headers: { "content-type": "image/jpeg", "content-length": "3" }, chunks: [Buffer.from("img")]
+  })) });
+  const listing = listingFixture(network, {
+    verifyRemoteImagesReadyForOzon: (urls, options) => verifyRemoteImagesReadyForOzon(urls, { ...options, env, waitImpl: async () => {} })
+  });
+  assert.equal((await listing.prewarmPublishMediaUrls([image], { beforeRequest: async () => {} })).ok, 1);
+  let checks = 0;
+  assert.equal((await listing.prewarmPublishMediaUrls([image], { beforeRequest: async () => { checks++; } })).ok, 1);
+  assert.equal(checks, 2);
+  const denied = await listing.prewarmPublishMediaUrls([image], {
+    beforeRequest: async () => { throw new Error("fixture cached prewarm actor revoked"); }
+  });
+  assert.equal(denied.failed, 1); assert.equal(denied.ok, 0);
+  assert.equal(network.network.length, 2);
+  assert.ok(network.network.every(request => request.method === "GET" && !request.headers.Range));
+  assert.deepEqual(network.streams.map(stream => stream.bodyBytes), [3, 3]);
+});
