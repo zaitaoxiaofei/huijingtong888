@@ -4,6 +4,10 @@ const round=n=>Math.round((n+Number.EPSILON)*100)/100;
 const moneyPattern=String.raw`-?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}|(?:\d{1,3}(?: \d{3})+|\d+),\d{2})`;
 function number(value){const s=String(value).replace(/\s/g,'');const n=Number(s.includes('.')?s.replaceAll(',',''):s.replace(',','.'));if(!Number.isFinite(n))fail('金额无法识别');return n;}
 const invoiceMetric=label=>{
+ if(/Product Reviews Management Subscription/i.test(label))return '平台其他费用';
+ if(/^Brand promotion$/i.test(label))return '品牌推广费';
+ if(/^Electronic Service: Pin Review$/i.test(label))return '评价置顶服务费';
+ if(/^FBO service \(without storage\) \/ FBS service \(Marketplace Seller services\)$/i.test(label))return '平台履约服务费（不含仓储）';
  if(/Cost Per Click/i.test(label))return '点击广告费';
  if(/Electronic service for connection/i.test(label))return '平台物流连接服务费';
  if(/Ozon agency fee|Агентское вознаграждение за продажу/i.test(label))return '佣金';
@@ -21,14 +25,15 @@ export function platformInvoiceFacts(flat){
   if(!nums||nums.length<3)fail('综合发票项目金额列不完整');
   return {metric:invoiceMetric(r[2].trim()),amount:round(number(nums.at(-1))),currency:'CNY',source:`发票项目${r[1]}：${r[2].trim()}`};
  });
- const total=flat.slice(end).match(/^In total for payment\s+(-?[\d,.]+)\s+(-?[\d,.]+|[—–-])\s+(-?[\d,.]+)/);
+ const total=flat.slice(end).match(new RegExp('^In total for payment\\s+('+moneyPattern+')\\s+('+moneyPattern+'|[—–-])\\s+('+moneyPattern+')'));
  if(!total||Math.abs(round(facts.reduce((n,f)=>n+f.amount,0))-number(total[3]))>0.01)fail('综合发票明细与打印总额不符，停止入账');
  return facts;
 }
 export function rechargedServiceFacts(flat){
  const start=flat.indexOf('Name of works'),end=flat.indexOf('Total services provided');if(start<0||end<0)fail('转收费报告缺少项目表或合计');const body=flat.slice(start,end);
- const rows=[...body.matchAll(/\b(\d+)\s+(Payment for acquiring services|Cross charging for international delivery services|Reinvoicing for last mile services)\s+(-?[\d ]+,\d{2})/g)];
- const facts=rows.map((m,i)=>{if(Number(m[1])!==i+1)fail('转收费项目编号不连续，存在未支持项目');return {metric:m[2].startsWith('Payment')?'一般收单支付服务费':m[2].startsWith('Reinvoicing')?'尾程派送费':'国际物流费',amount:round(number(m[3])),currency:'CNY',source:`转收费报告第${m[1]}项：${m[2]}`};});
+ const rows=[...body.matchAll(/\b(\d+)\s+(Payment for acquiring services|Cross charging for international delivery services|Reinvoicing for last mile services|International freight forwarding service for the organization of international transportation|Reinvoicing for processing returns, cancellations, and non-purchased orders by partners)\s+(-?[\d ]+,\d{2})/g)];
+ const facts=rows.map((m,i)=>{if(Number(m[1])!==i+1)fail('转收费项目编号不连续，存在未支持项目');return {metric:m[2].startsWith('Payment')?'一般收单支付服务费':m[2].startsWith('Reinvoicing for processing')?'退货取消及未取货处理费':m[2].startsWith('Reinvoicing')?'尾程派送费':m[2].startsWith('International freight')?'国际货运代理组织服务费':'国际物流费',amount:round(number(m[3])),currency:'CNY',source:`转收费报告第${m[1]}项：${m[2]}`};});
+ const count=flat.slice(end).match(/^Total services provided:\s*(\d+)/);if(!count||Number(count[1])!==facts.length)fail('转收费声明行数与解析行数不一致');
  const total=body.match(/Total\s+([\d ]+,\d{2})/);if(!total||!facts.length||Math.abs(round(facts.reduce((n,f)=>n+f.amount,0))-number(total[1]))>0.01)fail('转收费报告明细与总额不符，停止入账');
  return facts;
 }

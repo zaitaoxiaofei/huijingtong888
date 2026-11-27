@@ -194,3 +194,23 @@ test('plugin binding is rechecked after parsing and before a draft write',async(
  await assert.rejects(db.service.preview({company_id:1,shop_id:10,month:'2026-10',attachment_url:'/uploads/team-attachments/sync.xlsx',archive_source:{sha256:hash,folder_id:'realizationReports',language:'en',document_id:'123',ozon_company_id:'77',months:'2026-10',binding_token:'verified'}},session()),/归属已变化/);
  assert.equal(db.docs.length,0);
 });
+
+test('collected summary exposes pending parsed amounts and evidence without posting or duplicating confirmed amounts',async()=>{
+ const db=database(),s=session(),buffer=await starFile();db.files.set('/uploads/team-attachments/pending.xlsx',{tenant:1,buffer,row:{original_name:'pending.xlsx'}});
+ const d=await db.service.preview({company_id:1,shop_id:10,month:'2026-10',attachment_url:'/uploads/team-attachments/pending.xlsx'},s);
+ let report=await db.service.report({company_id:1,month:'2026-10'},s);
+ assert.deepEqual(report.metrics,{});assert.equal(report.collected_summary.metrics['星级商品推广费'],249.02);
+ assert.equal(report.collected_summary.pending_documents,1);assert.equal(report.collected_summary.lines[0].document_id,d.document.id);
+ assert.equal(report.collected_summary.lines[0].shop_id,10);assert.equal(report.collected_summary.lines[0].parse_status,'preview');
+ assert.equal(report.collected_summary.lines[0].attachment_url,'/uploads/team-attachments/pending.xlsx');
+ assert.equal(report.collected_summary.matrix.rows.find(g=>g.id==='platform').pending_cells['2026-10'],true);
+ const archive=await JSZip.loadAsync((await db.service.export({company_id:1,month:'2026-10'},s)).buffer);const b=new ExcelJS.Workbook();await b.xlsx.load(await archive.file(Object.keys(archive.files).find(n=>n.endsWith('00_公司汇总与明细.xlsx'))).async('nodebuffer'));
+ assert.equal(b.getWorksheet('参考金额原件依据').getRow(2).getCell(5).value,'待核对');
+ await db.service.confirm({company_id:1,document_id:d.document.id},s);report=await db.service.report({company_id:1,month:'2026-10'},s);
+ assert.equal(report.metrics['星级商品推广费'],249.02);assert.equal(report.collected_summary.metrics['星级商品推广费'],249.02);assert.equal(report.collected_summary.pending_documents,0);
+});
+test('collected amounts exclude parse errors, support, other currency and out-of-period facts; cash remains confirmed-only',()=>{
+ const docs=['preview','confirmed','error'].map((parse_status,i)=>({id:i+1,shop_key:10,month_key:'2026-10',parse_status,payload_json:{facts:[{metric:'佣金',amount:10,currency:'CNY'}],cash:[{type:'platform-payment',amount:10,currency:'CNY',date:'2026-10-01',reference:String(i)}]}}));
+ docs.push({parse_status:'preview',month_key:'2026-11',payload_json:{facts:[{metric:'佣金',amount:99,currency:'CNY'}]}},{parse_status:'preview',month_key:'2026-10',payload_json:{kind:'support',facts:[]}},{parse_status:'preview',month_key:'2026-10',payload_json:{facts:[{metric:'佣金',amount:99,currency:'RUB'}]}});
+ const summary=summarizeImportedDocuments(docs,{from:'2026-10',to:'2026-10'},{includePreview:true});assert.equal(summary.metrics['佣金'],20);assert.equal(summary.lines.length,2);assert.equal(summary.cash.length,1);
+});

@@ -2,7 +2,7 @@
 export const FINANCE_GROUPS = [
  {id:'income',name:'销售与其他收入',sign:1,metrics:['已确认商品销售额','销售退回冲减额','合作伙伴补贴收入','平台赔偿收入']},
  {id:'goods',name:'已售商品成本',sign:-1,metrics:['已售商品采购成本']},
- {id:'platform',name:'平台费用',sign:-1,metrics:['佣金','国际物流费','平台物流连接服务费','尾程派送费','点击广告费','星级商品推广费','一般收单支付服务费','国际货代合同管理服务费','国际运输合同缔约服务费','客户部分补偿扣款','缺件扣款','退货处理及货损费用','平台其他费用']},
+ {id:'platform',name:'平台费用',sign:-1,metrics:['佣金','国际物流费','平台物流连接服务费','尾程派送费','点击广告费','品牌推广费','评价置顶服务费','星级商品推广费','一般收单支付服务费','国际货代合同管理服务费','国际运输合同缔约服务费','客户部分补偿扣款','缺件扣款','退货处理及货损费用','退货取消及未取货处理费','国际货运代理组织服务费','平台履约服务费（不含仓储）','平台其他费用']},
  {id:'labor',name:'人工与社保',sign:-1,metrics:['工资','加班及补贴','公司承担社保','公司承担公积金','公司承担缴费']},
  {id:'premises',name:'场地费用',sign:-1,metrics:['场地租金','水电物业费']},
  {id:'software',name:'AI与软件费用',sign:-1,metrics:['AI使用费','软件订阅费']},
@@ -43,7 +43,8 @@ export function financeMatrix(lines,year,mode) {
   const selected=lines.filter(l=>l.month>=p.from&&l.month<=p.to&&metrics.includes(l.metric)&&l.currency==='CNY');
   return [p.id,selected.length?round(selected.reduce((n,l)=>n+l.amount*(signed?financeLineSign(l.metric):1),0)):null];
  }));
- const rows=groups.map(g=>({...g,cells:cells(g.metrics,g.id==='income'),children:g.metrics.map(metric=>({id:`${g.id}:${metric}`,name:metric,metrics:[metric],cells:cells([metric]),sign:g.sign,refund:metric==='销售退回冲减额'}))}));
+ const pending=metrics=>Object.fromEntries(periods.map(p=>[p.id,lines.some(l=>l.month>=p.from&&l.month<=p.to&&metrics.includes(l.metric)&&l.currency==='CNY'&&l.parse_status==='preview')]));
+ const rows=groups.map(g=>({...g,pending_cells:pending(g.metrics),cells:cells(g.metrics,g.id==='income'),children:g.metrics.map(metric=>({id:`${g.id}:${metric}`,name:metric,metrics:[metric],pending_cells:pending([metric]),cells:cells([metric]),sign:g.sign,refund:metric==='销售退回冲减额'}))}));
  return {periods,rows};
 }
 export function financeSourceShops(lines,shops) {
