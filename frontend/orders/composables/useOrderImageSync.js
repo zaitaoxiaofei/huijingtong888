@@ -14,13 +14,13 @@ export function useOrderImageSync(onSaved) {
     for (const request of requests.values()) request.abort();
     requests.clear(); failed.value = new Set(); busy.value = new Set(); revisions.value = new Map();
   }
-  async function syncImage(orderId, itemId = 0) {
+  async function syncImage(orderId, itemId = 0, platform) {
     const id = Number(orderId); if (!id || busy.value.has(id)) return;
     const scope = currentApiCacheScope(), controller = new AbortController();
     requests.set(id, controller); busy.value = new Set(busy.value).add(id);
     const timeout = window.setTimeout(() => controller.abort(), 60000);
     try {
-      const result = await syncOrderImages(id, itemId, { signal: controller.signal });
+      const result = await syncOrderImages(id, itemId, { signal: controller.signal, ...(platform === 'wb' ? { platform } : {}) });
       if (disposed || controller.signal.aborted || requests.get(id) !== controller || scope !== currentApiCacheScope()) return;
       await onSaved(result);
       if (disposed || requests.get(id) !== controller || scope !== currentApiCacheScope()) return;

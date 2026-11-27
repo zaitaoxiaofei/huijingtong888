@@ -22,6 +22,7 @@ export function createWbRoutes({ readJson, platform = wbPlatform, authorize = au
   register('GET', 'inventory-usage', 'inventoryUsage', 'inventory.read');
   register('GET', 'supply', 'supply', 'orders.read');
   for (const [path, action] of [['shops/save','saveShop'],['check','check'],['warehouses/save','saveWarehouse']]) register('POST', path, action, 'enterprise.admin');
+  register('POST','orders/sync-media','syncOrderMedia','orders.manage');
   register('POST','orders/bind-inventory','bindOrderInventory','inventory.write');
   register('POST','orders/create-inventory','createOrderInventory','inventory.write');
   register('POST','products/bind','bindProduct','inventory.write');

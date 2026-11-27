@@ -509,6 +509,11 @@ export async function fetchOrderDetail(orderId) {
 }
 
 export async function syncOrderImages(orderId, itemId = 0, options = {}) {
+  if (options.platform === 'wb') {
+    return apiClient.post('/api/wb/orders/sync-media', {
+      order_id: Number(orderId), ...(Number(itemId) > 0 ? { item_id: Number(itemId) } : {})
+    }, { signal: options.signal });
+  }
   return apiClient.post(`/api/orders/${Number(orderId)}/sync-images`, Number(itemId) > 0 ? { item_id: Number(itemId) } : {}, options);
 }
 

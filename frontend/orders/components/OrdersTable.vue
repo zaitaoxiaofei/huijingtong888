@@ -489,7 +489,7 @@ function canEditCollaborationNote(row) {
                   ><template #error><div class="orders-thumb-empty">图片加载失败</div></template></el-image>
                   <div v-else class="orders-thumb-empty">无图</div>
                 </div>
-                <el-button v-if="canSyncOrderImages && row.platform !== 'wb' && imageSync.needsSync(row.id,item.orderItemId,item.imageUrl)" link type="primary" size="small" :loading="imageSync.busy.value.has(Number(row.id))" :aria-label="`补同步订单 ${row.posting_number || row.id} 商品 ${item.sku} 主图`" @click.stop="imageSync.syncImage(row.id,item.orderItemId)">补同步主图</el-button>
+                <el-button v-if="canSyncOrderImages && (row.platform === 'wb' || imageSync.needsSync(row.id,item.orderItemId,item.imageUrl))" link type="primary" size="small" :loading="imageSync.busy.value.has(Number(row.id))" :aria-label="`补同步订单 ${row.posting_number || row.id} 商品 ${item.sku} ${row.platform === 'wb' ? '信息' : '主图'}`" @click.stop="imageSync.syncImage(row.id,item.orderItemId,row.platform)">{{ row.platform === 'wb' ? '补同步商品' : '补同步主图' }}</el-button>
               </div>
               <div class="orders-product-copy">
                 <a
