@@ -18,6 +18,7 @@ import OrdersTable from "./components/OrdersTable.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
 import { apiClient,currentApiCacheScope } from "../admin/utils/api.js";
+import MarketplaceSwitcher from "../admin/components/MarketplaceSwitcher.vue";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
 import {
   INVENTORY_LIST_PAGE_SIZE,
@@ -89,6 +90,7 @@ function openInventoryDetail(row, productId) {
   inventoryDetail.visible = true;
 }
 
+const props = defineProps({ platformTabs: { type: Boolean, default: false } });
 const orderDetailCache = new Map();
 const orderClock = ref(Date.now());
 let latestOrderSyncTimer = 0;
@@ -104,6 +106,7 @@ const {
   inventoryRefreshFailed,
   loadLogisticsOptions,
   submitFilters,
+  changePlatform,
   changeStatus,
   changeFulfillmentType,
   changePrintView,
@@ -129,7 +132,25 @@ const {
   loadLatestOrderSyncStatus,
   saveStatusTabPreference,
   defaultStatusTabOrder,
-} = useOrdersPage();
+} = useOrdersPage({ platform: props.platformTabs ? (route.query.platform === "wb" ? "wb" : "ozon") : "all" });
+const activePlatformShops = computed(() => props.platformTabs
+  ? vm.shops.filter(shop => (shop.platform || "ozon") === vm.filters.platform)
+  : vm.shops);
+
+async function switchOrderPlatform(platform) {
+  if (vm.syncRunning || vm.filters.platform === platform) return;
+  detailDialog.visible = false;
+  selectionDialogVisible.value = false;
+  orderDetailCache.clear();
+  try {
+    await Promise.all([
+      changePlatform(platform),
+      router.replace({ query: { ...route.query, platform, orderId: undefined, action: undefined, sku: undefined } })
+    ]);
+  } catch (error) {
+    if (error?.name !== "AbortError") console.warn("switch order platform failed", error);
+  }
+}
 
 const selectedCount = computed(() => selectedOrderIds.value.size);
 const selectedOrderIdList = computed(() => [...selectedOrderIds.value]);
@@ -1909,6 +1930,16 @@ async function bootstrapFromRoute() {
   const orderId = Number(route.query.orderId || 0);
   if (!orderId) return;
   orderRouteBootstrapDone.value = true;
+  if (props.platformTabs) {
+    try {
+      const payload = await fetchOrderDetail(orderId);
+      const order = payload?.order || payload;
+      if (order?.platform) await changePlatform(order.platform === "wb" ? "wb" : "ozon", { load: false });
+      orderDetailCache.set(orderId, { payload, timestamp: Date.now() });
+    } catch (error) {
+      console.warn("resolve linked order platform failed", error);
+    }
+  }
   vm.filters.searchType = "order";
   vm.filters.searchQuery = String(orderId);
   vm.filters.page = 1;
@@ -1923,7 +1954,8 @@ async function bootstrapFromRoute() {
     await handleOpenCreateProductFromOrder(orderId, routeSku);
     return;
   }
-  await openProfitDetail(orderId);
+  if (vm.filters.platform === "wb") await openDrawer("detail", orderId);
+  else await openProfitDetail(orderId);
 }
 
 async function handleRecalculate(orderId) {
@@ -2890,10 +2922,13 @@ onBeforeUnmount(() => {
       <el-button @click="backToAftersales">返回售后补损</el-button>
     </div>
 
+    <div v-if="platformTabs" class="order-platform-tabs">
+      <MarketplaceSwitcher :model-value="vm.filters.platform" label="订单平台" @update:model-value="switchOrderPlatform" />
+    </div>
     <OrdersToolbar
       :mark-options="vm.markOptions" :marking="markingSelected" @batch-mark="handleBatchMark"
       :filters="vm.filters"
-      :shops="vm.shops"
+      :shops="activePlatformShops"
       :logistics-carrier-options="vm.logisticsCarrierOptions"
       :logistics-method-options="vm.logisticsMethodOptions"
       :logistics-service-class-options="vm.logisticsServiceClassOptions"
@@ -2901,7 +2936,7 @@ onBeforeUnmount(() => {
       :sync-status="vm.syncStatus"
       :sync-running="vm.syncRunning"
       :last-sync-text="vm.lastSyncText"
-      :more-actions="vm.moreActions"
+      :more-actions="vm.filters.platform === 'wb' ? vm.moreActions.filter(action => action.value === 'prepare-selected') : vm.moreActions"
       :selected-count="selectedCount"
       :page-row-count="tableRows.length"
       :preparable-count="pagePreparePlan.ids.length"
@@ -2920,9 +2955,9 @@ onBeforeUnmount(() => {
       @load-logistics-options="loadLogisticsOptions"
     >
       <OrdersStatusTabs
-        :status-tabs="vm.statusTabs"
+        :status-tabs="vm.filters.platform === 'wb' ? vm.statusTabs.filter(tab => tab.value !== 'ogl_dispatched') : vm.statusTabs"
         :active-status="vm.filters.status"
-        :fulfillment-type-options="vm.fulfillmentTypeOptions"
+        :fulfillment-type-options="vm.filters.platform === 'wb' ? [] : vm.fulfillmentTypeOptions"
         :active-fulfillment-type="vm.filters.fulfillmentType"
         :print-views="vm.printViews"
         :active-print-views="[vm.filters.sortMode === 'inventory' ? 'inventory' : '', vm.filters.printFilter !== 'all' ? vm.filters.printFilter : ''].filter(Boolean)"
@@ -3017,6 +3052,7 @@ onBeforeUnmount(() => {
     </el-dialog>
     <div class="orders-table-section">
       <OrdersTable
+        :key="vm.filters.platform"
         :can-sync-order-images="canSyncOrderImages"
         :can-prepare="canPreparePage"
         :can-update-inventory="canUpdateInventory"
@@ -4467,3 +4503,7 @@ onBeforeUnmount(() => {
     </section>
   </el-config-provider>
 </template>
+
+<style scoped>
+.order-platform-tabs { flex: none; padding-bottom: 12px; }
+</style>

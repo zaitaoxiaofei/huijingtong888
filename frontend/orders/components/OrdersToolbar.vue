@@ -100,6 +100,7 @@ function handlePrintCommand(command) {
           </el-select>
 
           <el-select
+            v-if="filters.platform !== 'wb'"
             :model-value="filters.logisticsCarrier"
             class="orders-toolbar-select"
             @change="changeLogisticsCarrier"
@@ -113,6 +114,7 @@ function handlePrintCommand(command) {
           </el-select>
 
           <el-select
+            v-if="filters.platform !== 'wb'"
             :model-value="filters.logisticsServiceClass"
             class="orders-toolbar-select orders-toolbar-logistics-select"
             @change="changeLogisticsServiceClass"
@@ -159,7 +161,7 @@ function handlePrintCommand(command) {
 
           <div class="orders-toolbar-actions-main">
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
-              <el-tooltip :content="`最近成功同步：${lastSyncText}（北京时间）。按当前店铺和日期范围校正订单状态或补历史漏单。`" placement="top">
+              <el-tooltip :content="filters.platform === 'wb' ? '按当前 WB 店铺和日期范围同步订单。' : `最近成功同步：${lastSyncText}（北京时间）。按当前店铺和日期范围校正订单状态或补历史漏单。`" placement="top">
                 <el-button
                   class="orders-toolbar-btn orders-toolbar-btn-secondary"
                   type="primary"
@@ -228,8 +230,8 @@ function handlePrintCommand(command) {
             <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :loading="marking" :disabled="!selectedCount||marking">批量标记（{{selectedCount}}）</el-button>
             <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="option in markOptions" :key="option.value" :command="option.value">{{option.label}}</el-dropdown-item></el-dropdown-menu></template>
           </el-dropdown>
-          <el-button type="primary" :disabled="!selectedCount" @click="handleCommand('ogl-manual-ship')">关联 OGL 发运并标记已发运</el-button>
-          <el-dropdown trigger="click" @command="handleCommand">
+          <el-button v-if="filters.platform !== 'wb'" type="primary" :disabled="!selectedCount" @click="handleCommand('ogl-manual-ship')">关联 OGL 发运并标记已发运</el-button>
+          <el-dropdown v-if="filters.platform !== 'wb'" trigger="click" @command="handleCommand">
             <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">OGL 发运</el-button>
             <template #dropdown>
               <el-dropdown-menu>

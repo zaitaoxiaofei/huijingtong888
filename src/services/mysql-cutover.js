@@ -31398,7 +31398,13 @@ async function orderBaseSqlMysql(query = {}, tenantId = "admin") {
   const where = ["1 = 1"];
   const params = [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
-  where.push(`EXISTS (SELECT 1 FROM shops tenant_shop WHERE tenant_shop.id = o.shop_id AND ${orderTenantPredicateMysql("tenant_shop", tenantScope)})`);
+  const platform = String(query.platform || "all");
+  if (!["all", "ozon", "wb"].includes(platform)) {
+    throw Object.assign(new Error("订单平台无效，请选择 Ozon 或 WB。"), { statusCode: 400 });
+  }
+  const platformClause = platform === "all" ? "" : " AND COALESCE(tenant_shop.platform, 'ozon') = ?";
+  where.push(`EXISTS (SELECT 1 FROM shops tenant_shop WHERE tenant_shop.id = o.shop_id AND ${orderTenantPredicateMysql("tenant_shop", tenantScope)}${platformClause})`);
+  if (platformClause) params.push(platform);
   const shopId = String(query.shopId || query.shop_id || "all");
   if (shopId !== "all") {
     where.push("o.shop_id = ?");
