@@ -1,5 +1,5 @@
 // Reuse page coverage and one batched balance response; never fetch a ledger per row.
-export function inventoryOverview(row) {
+export function inventoryOverview(row, quantities = new Map()) {
   const coverage = row.procurement_coverage;
   const products = new Map();
   for (const summary of row.inventorySummaries || []) {
@@ -62,6 +62,8 @@ export function inventoryOverview(row) {
       name: summary.productName, inventoryNumber: summary.inventoryNumber,
       compositionKind: inventoryCompositionKind(summary),
       quantity: summary.quantity, virtual: summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || summary.pickingItems?.some(part => Number(part.product_id) !== Number(summary.productId)),
+      finishedAvailable: row.inventory_refresh_pending?undefined:quantities.get(Number(summary.productId))?.finished_available,
+      maximumAvailable: row.inventory_refresh_pending?undefined:quantities.get(Number(summary.productId))?.maximum_available,
       localAvailable: localSets(summary, products, 'local_available'),
       localPhysical: localSets(summary, products, 'physical_estimate'),
       localLedger: row.inventory_refresh_pending ? undefined : summary.stock?.local,

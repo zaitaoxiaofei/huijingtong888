@@ -1,7 +1,7 @@
 <script setup>
 import { ref } from 'vue';
 import { shanghaiDateTimeText } from '../../admin/utils/shanghai-date.js';
-defineProps({ parents: { type: Array, default: () => [] }, active: Boolean });
+defineProps({ parents: { type: Array, default: () => [] }, active: Boolean, compactBundles:Boolean });
 const expanded = ref(new Set());
 function toggle(id) {
   const next = new Set(expanded.value);
@@ -17,7 +17,8 @@ function toggle(id) {
         <span class="inventory-parent-quantity">本单 {{ parent.quantity ?? '待核' }} {{ parent.virtual ? '套' : '件' }}</span>
       </div>
       <strong class="inventory-parent-name" :title="parent.name">{{ parent.name || '库存名称待核对' }}</strong>
-      <div class="inventory-local-counts" :class="{ 'has-multiple-fbp': parent.fbpStocks.length > 1 }">
+      <div v-if="compactBundles&&parent.compositionKind==='bundle'" class="inventory-local-counts"><span title="当前未被订单或备货占用的已打包成品">成品可发：<b>{{parent.finishedAvailable??'待核对'}}</b> 套</span><span title="未占用成品加上可用散件最多可组成的套数；共享配件不能跨套装相加">总可供：<b>{{parent.maximumAvailable??'待核对'}}</b> 套</span></div>
+      <div v-else class="inventory-local-counts" :class="{ 'has-multiple-fbp': parent.fbpStocks.length > 1 }">
         <span title="扣除全部待发本地订单需求及 FBP 占用后的可用数量">可用：<b>{{ parent.localAvailable ?? '待核对' }}</b></span>
         <span title="包含已分拣、已打包但尚未发出的货；以仓库盘点为准">实物：<b>{{ parent.localPhysical ?? '待核对' }}</b></span>
         <span v-for="stock in parent.fbpStocks" :key="stock.ozon_sku" class="inventory-stock-comparison" :title="`SKU ${stock.ozon_sku}；${stock.synced_at ? `Ozon 同步：${shanghaiDateTimeText(stock.synced_at, { assumeUtcWhenNaive: true })}；不同 SKU 库存独立` : '尚无此店铺 SKU 的 FBP 同步记录，不等于零库存'}`">
@@ -25,7 +26,7 @@ function toggle(id) {
         </span>
         <span v-if="!parent.fbpStocks.length" title="尚无此店铺 SKU 的 FBP 同步记录，不等于零库存">FBP：<b>待同步</b></span>
       </div>
-      <div v-if="parent.virtual" class="inventory-children">
+      <div v-if="parent.virtual&&!(compactBundles&&parent.compositionKind==='bundle')" class="inventory-children">
         <div v-for="child in (expanded.has(parent.id) ? parent.children : parent.children.slice(0, 2))" :key="child.product_id" class="inventory-child" :title="`${child.inventory_number || 'ID 待核对'} ${child.product_name || '库存名称待核对'}；本单实际消耗 ${child.quantity ?? '待核'}；${parent.quantity > 0 ? `每套 ${child.quantity / parent.quantity} × 本单 ${parent.quantity} 套` : '套数待核对'}`">
           <span class="inventory-child-label" :title="`${child.inventory_number || 'ID 待核对'} ${child.product_name || '库存名称待核对'}`">{{ child.inventory_number || 'ID 待核对' }} {{ child.product_name || '库存名称待核对' }}</span>
           <b class="inventory-child-quantity">× {{ child.quantity ?? '待核' }} {{ child.stock_unit || '件' }}</b>

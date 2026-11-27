@@ -37,6 +37,8 @@ import {
 
 const profitRecalculationDialog = ref();
 const InventoryLabelPrintDialog = defineAsyncComponent(() => import("../../components/inventory/InventoryLabelPrintDialog.vue"));
+const InventoryBundleConversionDialog=defineAsyncComponent(()=>import('../../components/inventory/InventoryBundleConversionDialog.vue'));
+const InventoryBundleStock=defineAsyncComponent(()=>import('../../components/inventory/InventoryBundleStock.vue'));
 const InventoryBundleDialog = defineAsyncComponent(()=>import('../../components/inventory/InventoryBundleDialog.vue'));
 
 const INVENTORY_LIST_CACHE_TTL_MS = 30 * 1000;
@@ -139,6 +141,8 @@ function openLabelPrint(rows) {
 const ledgerVisible = ref(false);
 const ledgerInitialAction = ref("");
 const bundleDialog=reactive({visible:false,id:0,editable:false});
+const bundleConversion=reactive({visible:false,id:0});
+function openBundleConversion(row){Object.assign(bundleConversion,{visible:true,id:Number(row.id)});}
 function openInventoryLedger(row, action = "") { if(Number(row.component_count)>0){Object.assign(bundleDialog,{visible:true,id:Number(row.id),editable:action==='stocktake'&&canWriteInventory.value});return;}ledgerProductId.value = Number(row.id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
 const ledgerProductId = ref(0);
 const manualOutboundVisible = ref(false);
@@ -1914,7 +1918,8 @@ onActivated(() => {
           <template #default="{ row }">
             <div class="inventory-stock-cell">
               <div class="stock-summary-list">
-                <span class="local-stock-line">
+                <InventoryBundleStock v-if="Number(row.component_count)>0" :value="row"/>
+                <template v-else><span class="local-stock-line">
                   <span class="stock-label">{{Number(row.component_count)>0?'本地折合库存':'本地库存'}}</span><strong>{{ row.physical_stock == null ? '—' : integer(row.physical_stock) }} {{ productUnit(row) }}</strong>
                   <el-popover
                     v-if="hasProductComponents(row)"
@@ -1955,8 +1960,7 @@ onActivated(() => {
                     </div>
                   </el-popover>
                 </span>
-                <small v-if="row.finished_stock!=null">成品 {{integer(row.finished_available)}} · 散件最多可组 {{integer(row.assemblable_stock)}}（共享配件）</small>
-                <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free == null ? '—' : integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div>
+                <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free == null ? '—' : integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div></template>
                 <div class="fbp-stock-line"><span>FBP 库存</span><strong>{{ row.fbp_stock_known == null ? '未完整同步' : `${integer(row.fbp_stock_known)} ${productUnit(row)}` }}</strong></div>
               </div>
             </div>
@@ -2023,6 +2027,7 @@ onActivated(() => {
               <InventoryProductHistoryAction :product-id="Number(row.id)"/>
             </div>
             <div class="inventory-action-row">
+              <el-button v-if="canWriteInventory&&Number(row.component_count)>0" size="small" plain type="primary" @click="openBundleConversion(row)">库存转换</el-button>
               <el-button v-if="canWriteInventory" size="small" plain @click="openEditDialog(row)">编辑</el-button>
               <el-button v-if="canWriteInventory" size="small" plain @click="removeFromInventory(row)">删除</el-button>
             <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button size="small" plain>更多</el-button></template><div class="inventory-more-actions">
@@ -2338,6 +2343,7 @@ onActivated(() => {
     </el-dialog>
 
 
+    <InventoryBundleConversionDialog v-if="bundleConversion.visible" v-model="bundleConversion.visible" :product-id="bundleConversion.id" @saved="loadPageData();localQuantities.refresh(true)"/>
     <InventoryBundleDialog v-if="bundleDialog.visible" v-model="bundleDialog.visible" :product-id="bundleDialog.id" :editable="bundleDialog.editable&&canWriteInventory" @saved="loadPageData();localQuantities.refresh(true)"/>
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canWriteInventory" @saved="loadPageData();localQuantities.refresh(true)" />
     <ProductCreateEditDialog
