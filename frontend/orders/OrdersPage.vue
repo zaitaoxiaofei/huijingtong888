@@ -14,6 +14,8 @@ import zhCn from "element-plus/es/locale/lang/zh-cn";
 import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
 import OrdersQuickFilters from "./components/OrdersQuickFilters.vue";
 import ShippedReceiptDialog from "./components/ShippedReceiptDialog.vue";
+import {useInventoryLocalQuantities} from '../admin/utils/use-inventory-local-quantities.js';
+import {inventoryCompositionKind} from './utils/inventory-overview.js';
 import OrdersTable from "./components/OrdersTable.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
@@ -1380,6 +1382,8 @@ const tableRows = computed(() => (
   Array.isArray(vm.rows) ? vm.rows.map((row) => buildTableRow(row)) : []
 ));
 
+const bundleQuantities=useInventoryLocalQuantities(()=>tableRows.value.flatMap(row=>row.inventorySummaries||[]).filter(summary=>inventoryCompositionKind(summary)==='bundle'&&Number(summary.productId)>0).map(summary=>({id:Number(summary.productId)})));
+
 const selectedOrderRecords = ref(new Map());
 watch([tableRows, () => [...selectedOrderIds.value]], ([rows]) => {
   selectedOrderRecords.value = retainSelectedOrders(selectedOrderRecords.value, rows, selectedOrderIds.value);
@@ -1874,7 +1878,7 @@ function bulkPrepareSelected() {
 
 async function handleInventoryRowsSaved(change = {}) {
   orderDetailCache.clear();
-  await refreshInventoryRows(change);
+  await Promise.all([refreshInventoryRows(change),bundleQuantities.refresh(true)]);
 }
 
 async function openDrawer(mode, orderId) {
@@ -3068,6 +3072,7 @@ onBeforeUnmount(() => {
         :can-manage-order-notes="canManageOrderNotes"
         :can-edit-procurement-notes="canEditProcurementNotes"
         :rows="tableRows"
+        :inventory-quantities="bundleQuantities.rows.value"
         :mark-options="vm.markOptions"
         :selected-ids="selectedOrderIds"
         :all-selected="allRowsSelected"

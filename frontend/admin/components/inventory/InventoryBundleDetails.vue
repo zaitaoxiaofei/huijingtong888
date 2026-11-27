@@ -1,11 +1,15 @@
 <script setup>
-import {computed,onBeforeUnmount,ref,watch} from 'vue';
+import {computed,defineAsyncComponent,onBeforeUnmount,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {inventoryAdjustmentReasons,validateInventoryAdjustment} from '../../../../src/inventory-adjustment-reasons.js';
 import InventoryBundleConversion from './InventoryBundleConversion.vue';
+import {useAuthStore} from '../../stores/auth.js';
+import {hasPermission} from '../../../../src/shared/permissions.js';
+const ConversionDialog=defineAsyncComponent(()=>import('./InventoryBundleConversionDialog.vue'));
+const conversionVisible=ref(false),auth=useAuthStore(),canConvert=computed(()=>hasPermission(auth.user,'inventory.write'));
 import ProductImagePreview from '../ProductImagePreview.vue';
-const props=defineProps({productId:Number,editable:Boolean,embedded:Boolean,externalActions:Boolean}),emit=defineEmits(['saved','cancel','busy','state']);
+const props=defineProps({productId:Number,editable:Boolean,embedded:Boolean,externalActions:Boolean,mobile:Boolean,hideConversionAction:Boolean}),emit=defineEmits(['saved','cancel','busy','state']);
 const data=ref(null),loading=ref(false),busy=ref(false),error=ref(''),items=ref([]),reason=ref(''),note=ref(''),submission=ref(null);
 let version=0,disposed=false;
 const canSave=computed(()=>data.value&&!data.value.incomplete&&!loading.value&&!busy.value&&items.value.length&&items.value.every(row=>Number.isSafeInteger(row.counted_quantity)&&row.counted_quantity>=0)&&!!reason.value);
@@ -27,7 +31,8 @@ async function save(){
  catch(e){if(token!==version||scope!==currentApiCacheScope())return;error.value=e.message||'更新失败，请重试';if([400,403,404,409].includes(e.status)){submission.value=null;if(e.status===409){await load(true);error.value='库存或套装组成已变化，整批未保存。已刷新明细并保留填写的数量，请核对后重试。';}}}
  finally{if(token===version)busy.value=false;}
 }
-function clear(){++version;data.value=null;items.value=[];submission.value=null;busy.value=false;emit('cancel');}
+async function converted(result){await load();emit('saved',{...result,keepOpen:true});}
+function clear(){conversionVisible.value=false;++version;data.value=null;items.value=[];submission.value=null;busy.value=false;emit('cancel');}
 watch(()=>props.productId,()=>{reason.value='';note.value='';items.value=[];load();},{immediate:true});
 watch(busy,value=>emit('busy',value),{flush:'sync'});
 watch([canSave,busy,submission],()=>emit('state',{canSave:!!canSave.value,busy:busy.value,retrying:!!submission.value}),{immediate:true,flush:'sync'});
@@ -38,7 +43,8 @@ window.addEventListener('erp:auth-scope-changed',clear);onBeforeUnmount(()=>{dis
  <section class="bundle-details" v-loading="loading" aria-label="套装子库存明细">
   <el-alert v-if="error" :title="error" type="warning" :closable="false"/><el-button v-if="error&&!data" @click="load()">重新读取套装</el-button>
   <template v-if="data">
-   <InventoryBundleConversion :product-id="productId" @saved="load();emit('saved',$event)" @busy="busy=$event"/>
+   <div v-if="canConvert&&!editable&&!hideConversionAction" class="bundle-actions"><el-button type="primary" plain :disabled="busy" @click="conversionVisible=true">库存转换</el-button></div>
+   <InventoryBundleConversion :product-id="productId" read-only/>
    <header v-if="!embedded" class="bundle-product"><ProductImagePreview :src="data.product.image_url" :preview-list="[`/api/products/${data.product.id}/image`]" size="portrait"/><div><strong>{{data.product.name}}</strong><p>套装库存 ID：{{data.product.inventory_number||data.product.id}}</p><small>按当前实物可组成 {{physicalSets==null?'待核实':physicalSets}} 套</small></div></header>
    <el-alert v-if="data.incomplete" title="存在已停用子库存，请先核对套装组成；当前不能更新库存。" type="warning" :closable="false"/>
    <p v-if="editable" class="bundle-shared-note">逐项填写每个子产品在本地仓库的实际散件库存（不含已装入成品的配件），无货填 0。子产品可能被多个套装共用，更新会同时影响相关套装；成品通过组装入库和拆包单独记账。</p>
@@ -52,6 +58,7 @@ window.addEventListener('erp:auth-scope-changed',clear);onBeforeUnmount(()=>{dis
    </article>
    <template v-if="editable"><label>统一调整原因<select v-model="reason" aria-label="套装调整原因" :disabled="busy||!!submission"><option value="">请选择</option><option v-for="item in inventoryAdjustmentReasons" :key="item.code" :value="item.code">{{item.label}}</option></select></label><label>补充说明<textarea v-model="note" aria-label="套装调整说明" maxlength="500" :disabled="busy||!!submission"/></label><p v-if="submission&&!busy">上次提交结果尚未确认，请使用同一记录重试，避免重复更新。</p><div v-if="!externalActions" class="bundle-actions"><el-button :disabled="busy" @click="emit('cancel')">取消</el-button><el-button type="primary" :loading="busy" :disabled="!submission&&!canSave" @click="save">{{submission?'重试确认':'一次确认更新所有子库存'}}</el-button></div></template>
   </template>
+  <ConversionDialog v-if="conversionVisible" v-model="conversionVisible" :product-id="productId" :mobile="mobile" @busy="busy=$event" @saved="converted"/>
  </section>
 </template>
 <style scoped>

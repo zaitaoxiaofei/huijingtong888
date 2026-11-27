@@ -140,7 +140,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const count=key=>{if(!isBundle)return value?.[key]??null;const quantities=children.map(row=>{const v=byId.get(Number(row.id))?.[key];return v!=null?Math.floor(Math.max(0,v)/row.per_set_quantity):null;});return quantities.every(v=>v!==null)?Math.min(...quantities):null;};
       const assembled=isBundle?Math.max(0,value?.physical||0):0,finishedFree=isBundle?Math.max(0,value?.free||0):0,loose=count('free'),physical=count('physical');
       return {product_id:id,workflow_free:loose==null?null:loose+finishedFree,physical_stock:physical==null?null:physical+assembled,fbp_stock_known:official.get(id)?.present??null,
-        ...(isBundle?{finished_stock:assembled,finished_available:finishedFree,assemblable_stock:loose,maximum_available:loose==null?null:loose+finishedFree}: {})};
+        ...(isBundle?{finished_stock:assembled,finished_available:finishedFree,assemblable_stock:loose,maximum_available:loose==null?null:loose+finishedFree,loose_components:children.map(part=>({product_id:Number(part.id),name:part.name,inventory_number:part.inventory_number,stock_unit:part.stock_unit,per_set_quantity:part.per_set_quantity,physical_stock:byId.get(Number(part.id))?.physical??null}))}: {})};
     });
   }
   async function workspaceProducts(params,tenantId){

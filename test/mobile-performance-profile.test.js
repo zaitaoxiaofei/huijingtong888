@@ -15,6 +15,7 @@ import * as orderSearch from '../src/shared/order-search.js';
 import * as orderUtils from '../frontend/admin/views/mobile/mobile-orders-utils.js';
 import * as shanghai from '../frontend/admin/utils/shanghai-date.js';
 import * as purchaseQueue from '../frontend/admin/utils/purchase-queue-days.js';
+import * as orderImages from '../frontend/orders/utils/order-image-sync.js';
 import * as purchaseWorkers from '../frontend/admin/utils/purchase-batch-workers.js';
 const owner={id:1,personId:1,name:'Fixture member',username:'fixture',roles:['admin'],tenant:{id:2,role:'owner'}};
 export async function component(file,{inlineTemplate=false,get=async()=>({}),post=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
@@ -34,6 +35,8 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(id==='@element-plus/icons-vue'||id==='lucide-vue-next')return{Search:{}};
   if(id.endsWith('/stores/auth.js')||id.endsWith('/stores/auth'))return{useAuthStore:()=>auth};
   if(id.endsWith('/utils/api')||id.endsWith('/utils/api.js'))return{apiClient:api,currentApiCacheScope:()=>h.scope};
+  if(id.endsWith('useOrderImageSync.js'))return{useOrderImageSync:()=>({busy:vue.ref(new Set()),needsSync:()=>false,imageKey:(_order,_item,url)=>url,markFailed(){},syncImage:async()=>{}})};
+  if(id.endsWith('order-image-sync.js'))return orderImages;
   if(id.endsWith('permissions.js'))return permissions;
   if(id.endsWith('inventory-search-fields.js'))return search;
   if(id.endsWith('order-search.js'))return orderSearch;

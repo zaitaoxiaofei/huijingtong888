@@ -32,6 +32,7 @@ const props = defineProps({
   bindingIgnoreBusy: { type: String, default: "" },
   canEditProcurementNotes: { type: Boolean, default: false },
   rows: { type: Array, default: () => [] },
+  inventoryQuantities:{type:Map,default:()=>new Map()},
   markOptions: { type: Array, default: () => [] },
   selectedIds: { type: Object, default: () => new Set() },
   allSelected: { type: Boolean, default: false },
@@ -78,7 +79,7 @@ function parentInventoryItems(parent) {
   return parent.virtual ? parent.children.filter(item => Number(item.product_id) > 0) : [{ product_id: parent.productId, product_name: parent.name, inventory_number: parent.inventoryNumber }].filter(item => item.product_id > 0);
 }
 function openParentInventoryLedger(row, parent, action = '', productId = 0) {
-  openInventoryLedger(row, action, productId || parentInventoryItems(parent)[0]?.product_id || 0);
+  openInventoryLedger(row, action, productId || (!action&&parent.productId>0?parent.productId:parentInventoryItems(parent)[0]?.product_id) || 0);
 }
 const selectedInventoryRow = ref(null);
 const ledgerInitialAction = ref("");
@@ -89,9 +90,9 @@ function openInventoryLedger(row, action = "", productId = 0) {
   selectedInventoryRow.value = row;
 }
 const inventoryRow = computed(() => props.rows.find(row => row.id === selectedInventoryRow.value?.id) || selectedInventoryRow.value);
-const inventoryViews = computed(() => new Map(props.rows.map(row => [row.id, inventoryOverview(row)])));
+const inventoryViews = computed(() => new Map(props.rows.map(row => [row.id, inventoryOverview(row,props.inventoryQuantities)])));
 const detailVisible = computed({ get: () => !!inventoryRow.value, set: value => { if (!value) selectedInventoryRow.value = null; } });
-const selectedOverview = computed(() => inventoryRow.value ? inventoryOverview(inventoryRow.value) : null);
+const selectedOverview = computed(() => inventoryRow.value ? inventoryOverview(inventoryRow.value,props.inventoryQuantities) : null);
 
 const markChoices = computed(() => (
   (props.markOptions || []).filter((item) => item && item.value !== undefined)
@@ -541,10 +542,11 @@ function canEditCollaborationNote(row) {
           <el-popover trigger="hover" placement="right" :width="380" :show-after="250" :disabled="!orderAliasProducts(inventoryViews.get(row.id), { includeParents: true }).length" popper-class="order-inventory-alias-popover">
             <template #reference>
           <div class="inventory-compact">
-            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
+            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active" :compact-bundles="!isFbpOrder(row)">
               <template #actions="{ parent }">
 
-                <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
+                <div v-if="parent.compositionKind==='bundle'&&!isFbpOrder(row)" class="orders-inventory-quick-actions"><el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row,parent)">查看库存</el-button></div>
+                <div v-else class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
                   <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
                   <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>
                   <el-dropdown v-else-if="canUpdateInventory && parentInventoryItems(parent).length > 1" trigger="click" @command="id => openParentInventoryLedger(row, parent, 'stocktake', id)">
@@ -887,6 +889,19 @@ function canEditCollaborationNote(row) {
       <template #management>
         <template v-for="row in [inventoryRow]" :key="row.id">
           <p>账面参考与子产品绑定管理（不计入本单需求）</p>
+          <section v-for="parent in selectedOverview.parents.filter(p=>p.compositionKind==='bundle')" :key="parent.id" class="orders-inventory-item"><strong>{{parent.name}}</strong><div class="orders-inline-actions">
+                  <el-button v-if="(row.platform !== 'wb' || WB_REMOTE_WRITES_ENABLED) && parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
+                  <el-dropdown v-else-if="(row.platform !== 'wb' || WB_REMOTE_WRITES_ENABLED) && parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
+                    <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                  <el-button v-if="parent.productId > 0" link type="primary" size="small" :icon="EditPen" @click="emit('edit-inventory-product', parent.productId)">修改库存</el-button>
+                  <el-dropdown v-else-if="parentInventoryItems(parent).length" trigger="click" @command="id => emit('edit-inventory-product', id)">
+                    <el-button link type="primary" size="small" :icon="EditPen">修改子产品库存 ▾</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+
+          </div></section>
           <div class="orders-stock-list">
             <div
               v-for="product in row.inventorySummaries"
