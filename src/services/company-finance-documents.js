@@ -39,18 +39,18 @@ const mysqlQuery=async(...args)=>(await import('../mysql-pool.js')).mysqlQuery(.
 const mysqlExecute=async(...args)=>(await import('../mysql-pool.js')).mysqlExecute(...args);
 const mysqlTransaction=async worker=>(await import('../mysql-pool.js')).withMysqlTransaction(async connection=>worker({query:async(...args)=>(await connection.execute(...args))[0],execute:async(...args)=>(await connection.execute(...args))[0]}));
 const tenantPrivateFiles={owned:async(...args)=>(await import('./tenant-private-files.js')).tenantPrivateFiles.owned(...args),read:async(...args)=>(await import('./tenant-private-files.js')).tenantPrivateFiles.read(...args)};
-export function summarizeImportedDocuments(documents,period=null){
+export function summarizeImportedDocuments(documents,period=null,{includePreview=false}={}){
  const metrics={};const lines=[];const cash=[];
  for(const doc of documents){
-  if(doc.parse_status!=='confirmed')continue;
+  if(doc.parse_status!=='confirmed'&&!(includePreview&&doc.parse_status==='preview'))continue;
   const p=payload(doc);
   for(const [i,line]of (p.facts||[]).entries()){
    if(period&&(doc.month_key<period.from||doc.month_key>period.to))continue;
    if(line.currency!=='CNY')continue;
    metrics[line.metric]=rounded((metrics[line.metric]||0)+line.amount);
-   lines.push({...line,document_id:doc.id,line_index:i,shop_id:doc.shop_key,month:doc.month_key,review_status:doc.review_status,display_name:p.display_name||doc.original_name,original_name:doc.original_name,attachment_url:doc.attachment_url});
+   lines.push({...line,document_id:doc.id,line_index:i,shop_id:doc.shop_key,month:doc.month_key,parse_status:doc.parse_status,review_status:doc.review_status,display_name:p.display_name||doc.original_name,original_name:doc.original_name,attachment_url:doc.attachment_url});
   }
-  for(const item of p.cash||[])cash.push({...item,document_id:doc.id,shop_id:doc.shop_key,original_name:doc.original_name,attachment_url:doc.attachment_url});
+  for(const item of doc.parse_status==='confirmed'?(p.cash||[]):[])cash.push({...item,document_id:doc.id,shop_id:doc.shop_key,original_name:doc.original_name,attachment_url:doc.attachment_url});
  }
  const dedup=deduplicateFinanceCash(cash);return {metrics,lines,cash:dedup.cash,cash_duplicates:dedup.duplicates,cash_conflicts:dedup.conflicts};
 }
@@ -270,6 +270,9 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
        summary.lines.push(line);summary.metrics[metric]=rounded((summary.metrics[metric]||0)+amount);
      }
    }
+   const collected=summarizeImportedDocuments(documents,period,{includePreview:true});
+   for(const line of summary.lines.filter(l=>l.source_type==='payroll')){collected.lines.push({...line,parse_status:'confirmed'});collected.metrics[line.metric]=rounded((collected.metrics[line.metric]||0)+line.amount);}
+   const parsedCovered=new Set(documents.filter(d=>['confirmed','preview'].includes(d.parse_status)&&payload(d).kind==='sales').map(d=>Number(d.shop_key)));
    const covered=new Set(documents.filter(d=>d.parse_status==='confirmed'&&payload(d).kind==='sales').map(d=>Number(d.shop_key)));
    const evidence=new Map();
    for(const d of documents){
@@ -277,17 +280,19 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     const key=Number(p.related_document_id),items=evidence.get(key)||[];
     items.push({document_id:d.id,original_name:d.original_name,display_name:p.display_name||d.original_name,attachment_url:d.attachment_url,review_status:d.review_status});evidence.set(key,items);
    }
-   for(const line of summary.lines)line.linked_evidence=line.source_type==='payroll'
+   for(const line of [...summary.lines,...collected.lines])line.linked_evidence=line.source_type==='payroll'
      ?documents.filter(d=>d.parse_status==='confirmed'&&d.month_key===line.month&&payload(d).kind==='payroll').map(d=>({document_id:d.id,original_name:d.original_name,display_name:'本月工资资料 · '+(payload(d).display_name||d.original_name),attachment_url:d.attachment_url,review_status:d.review_status}))
      :evidence.get(Number(line.document_id))||[];
    const year=period.from.slice(0,4),mode=['month','quarter','year'].includes(input.period_mode)?input.period_mode:'month';
-   return {matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d),categories:financeDocumentCategories(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:covered.size,company_complete:false},gaps:['汇总已确认导入资料与已入账工资；不与订单利润或月度账单再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
+   return {collected_summary:{metrics:collected.metrics,lines:collected.lines,matrix:financeMatrix(collected.lines,year,mode),pending_documents:documents.filter(d=>d.parse_status==='preview'&&(payload(d).facts||[]).length).length,error_documents:documents.filter(d=>d.parse_status==='error').length},matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>({...d,payload_json:payload(d),categories:financeDocumentCategories(d)})),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:parsedCovered.size,shops_with_confirmed_sales:covered.size,company_complete:false},gaps:['参考汇总含已解析待核对资料；已确认金额另列，不与订单利润或月度账单再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
   },
   async export(input,session){
    const ctx=await company(input,session),period=range(input),report=await this.report(input,ctx.s);
    if(report.documents.length>500)fail('导出原件超过500份，请按月或季度缩小范围');
    const zip=new JSZip(),base=`${safeName(ctx.c.name)}/${period.from}_${period.to}`,book=new ExcelJS.Workbook();let bytes=0;
    const addSheet=(name,headers,rows)=>{const s=book.addWorksheet(name);s.addRow(headers);for(const r of rows)s.addRow(r.map(neutral));s.columns.forEach(c=>c.width=28);s.getRow(1).font={bold:true};};
+   addSheet('参考汇总（待核对）',['项目',...report.collected_summary.matrix.periods.map(p=>p.label)],report.collected_summary.matrix.rows.flatMap(g=>[[g.name,...report.collected_summary.matrix.periods.map(p=>g.cells[p.id])],...g.children.map(c=>[`  ${c.name}`,...report.collected_summary.matrix.periods.map(p=>c.cells[p.id])])]));
+   addSheet('参考金额原件依据',['月份','店铺ID','项目','金额CNY','金额状态','原件编号','原文件名','提取位置'],report.collected_summary.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.parse_status==='preview'?'待核对':'已确认',l.document_id,l.original_name,l.source]));
    addSheet('期间分类汇总',['项目',...report.matrix.periods.map(p=>p.label)],report.matrix.rows.flatMap(g=>[[g.name,...report.matrix.periods.map(p=>g.cells[p.id])],...g.children.map(c=>[`  ${c.name}`,...report.matrix.periods.map(p=>c.cells[p.id])])]));
    addSheet('公司已采集汇总',['项目','金额CNY','范围'],Object.entries(report.metrics).map(([k,v])=>[k,v,'已确认资料与已入账工资；公司未齐']));
    addSheet('店铺费用来源',['月份','店铺ID','项目','金额','币种','原件编号','原文件名','提取位置','费用编号','工资明细编号'],report.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.currency,l.document_id,l.original_name,l.source,l.expense_id,l.payroll_item_id]));

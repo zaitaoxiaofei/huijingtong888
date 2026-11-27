@@ -35,3 +35,14 @@ test('file classification can associate one original with several fee categories
 test('company document guide and overview disclosure compile as production Vue components',()=>{
  for(const filename of ['frontend/admin/views/finance/CompanyStatementsView.vue','frontend/admin/views/finance/FinanceOverviewView.vue']){const {descriptor,errors}=parse(readFileSync(filename,'utf8'),{filename});assert.deepEqual(errors,[]);const script=compileScript(descriptor,{id:'legacy-finance'});assert.deepEqual(compileTemplate({source:descriptor.template.content,filename,id:'legacy-finance',compilerOptions:{bindingMetadata:script.bindings}}).errors,[]);}
 });
+
+test('new invoice labels retain item evidence and thousand-space totals are independently checked',()=>{
+ const labels=[['Product Reviews Management Subscription','平台其他费用'],['Brand promotion','品牌推广费'],['Electronic Service: Pin Review','评价置顶服务费'],['FBO service (without storage) / FBS service (Marketplace Seller services)','平台履约服务费（不含仓储）']];
+ for(const [label,metric]of labels){const text=row(1,label,'1 636,77')+' In total for payment 1 636,77 — 1 636,77';const [fact]=platformInvoiceFacts(text);assert.equal(fact.metric,metric);assert.equal(fact.amount,1636.77);assert.ok(fact.source.includes(label));assert.throws(()=>platformInvoiceFacts(text.replace('— 1 636,77','— 1 637,77')),/总额不符/);}
+});
+test('new recharged fee rows require sequential rows, declared count and matching printed total',()=>{
+ const text='Name of works, services Amount(CNY) 1 International freight forwarding service for the organization of international transportation 111,68 2 Reinvoicing for processing returns, cancellations, and non-purchased orders by partners 1,43 Total 113,11 Total services provided: 2';
+ assert.deepEqual(rechargedServiceFacts(text).map(f=>[f.metric,f.amount]),[['国际货运代理组织服务费',111.68],['退货取消及未取货处理费',1.43]]);
+ assert.throws(()=>rechargedServiceFacts(text.replace('provided: 2','provided: 3')),/行数/);assert.throws(()=>rechargedServiceFacts(text.replace('Total 113,11','Total 114,11')),/总额不符/);
+ assert.throws(()=>rechargedServiceFacts(text.replace('111,68','112,68')),/总额不符/);
+});

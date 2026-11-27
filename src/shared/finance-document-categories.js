@@ -17,9 +17,9 @@ export const FINANCE_FILE_CATEGORIES=[
 ];
 const metricCategory=metric=>{
  if(['已确认商品销售额','销售退回冲减额','合作伙伴补贴收入'].includes(metric))return 'sales';
- if(/赔偿|扣款|货损|退货处理/.test(metric))return 'adjustments';
- if(['点击广告费','星级商品推广费'].includes(metric))return 'advertising';
- if(metric==='国际物流费')return 'international';if(metric==='尾程派送费')return 'last-mile';
+ if(/赔偿|扣款|货损|退货处理|退货取消/.test(metric))return 'adjustments';
+ if(['点击广告费','星级商品推广费','品牌推广费','评价置顶服务费'].includes(metric))return 'advertising';
+ if(['国际物流费','国际货运代理组织服务费'].includes(metric))return 'international';if(metric==='尾程派送费')return 'last-mile';
  if(metric==='一般收单支付服务费')return 'acquiring';
  if(/佣金|平台|货代合同|运输合同/.test(metric))return 'platform';
  if(/工资|补贴|社保|公积金/.test(metric))return 'payroll';

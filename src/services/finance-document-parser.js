@@ -3,7 +3,7 @@ import { parseOrderSalesJson } from './finance-order-sales.js';
 import { platformInvoiceFacts, rechargedServiceFacts, paymentAdjustmentFacts } from './finance-platform-text.js';
 import { financeXlsxRows } from './finance-xlsx-reader.js';
 
-export const PARSER_VERSION = 'ozon-monthly-3';
+export const PARSER_VERSION = 'ozon-monthly-4';
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 export const rounded = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 function amount(value) {
