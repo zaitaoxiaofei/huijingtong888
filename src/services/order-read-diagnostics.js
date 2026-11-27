@@ -1,11 +1,12 @@
-const AREAS = new Set(['ordersPagedMysql', 'orderPageRowsMysql', 'orderRowsByIdsMysql']);
+const AREAS = new Set(['ordersPagedMysql', 'orderPageRowsMysql', 'orderRowsByIdsMysql', 'procurementRequestsMysql']);
 const STAGES = new Set([
   'scope', 'schema', 'base', 'filters', 'coverage', 'counts', 'options', 'sort', 'ids', 'rows',
   'query', 'raw', 'fallback', 'enrich', 'logistics', 'inventory', 'picking', 'profit', 'cache',
   'serialize', 'id_selection', 'page_rows', 'core_sql', 'raw_payload', 'quality', 'fbp', 'ogl',
-  'billing', 'logistics_dictionary', 'profit_labels', 'logistics_rows', 'inventory_balances', 'metadata'
+  'billing', 'logistics_dictionary', 'profit_labels', 'logistics_rows', 'inventory_balances', 'metadata',
+  'page_ids', 'details', 'projection', 'workflow', 'gaps'
 ]);
-const COUNTS = ['rows', 'page', 'page_size', 'include_counts', 'include_inventory', 'summary_only', 'total', 'count', 'failed'];
+const COUNTS = ['rows', 'page', 'page_size', 'include_counts', 'include_inventory', 'summary_only', 'total', 'count', 'failed', 'grouped'];
 
 // Marks measure successive intervals; measures have independent intervals and
 // can overlap marks or parallel work. Their times must not be added together.
@@ -52,7 +53,8 @@ export function createOrderReadDiagnostics(area, { clock = Date.now, logger = co
           const value = details?.[key];
           if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value) && value >= 0)) counts[key] = value;
         }
-        const result = logger(JSON.stringify({ event: 'order_read_slow', area, total_ms, stages, counts }));
+        const event = area === 'procurementRequestsMysql' ? 'procurement_read_slow' : 'order_read_slow';
+        const result = logger(JSON.stringify({ event, area, total_ms, stages, counts }));
         if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => {});
       } catch {}
     }

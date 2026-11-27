@@ -24,10 +24,11 @@ test('actual inventory and procurement services isolate A, B, and default across
     });
     const supplierA = await service.createSupplierMysql({ name: 'A supplier', tenant_id: 3 }, 2);
     const supplierB = await service.createSupplierMysql({ name: 'B supplier' }, 3);
+    const packaging = { package_weight_g: 100, length_cm: 10, width_cm: 8, height_cm: 6 };
     const products = {};
-    for (const id of [1, 2, 3]) products[id] = await service.createProductMysql({ name: `Product ${id}`, owner_person_id: id, created_by_person_id: id,
+    for (const id of [1, 2, 3]) products[id] = await service.createProductMysql({ ...packaging, name: `Product ${id}`, owner_person_id: id, created_by_person_id: id,
       image_url: `https://example.invalid/${id}.png`, supplier_id: id === 2 ? supplierA.id : id === 3 ? supplierB.id : null }, null, id);
-    const legacy = await service.createProductMysql({ name: 'Legacy default', owner_person_id: 1, created_by_person_id: 1 }, null, 'admin');
+    const legacy = await service.createProductMysql({ ...packaging, name: 'Legacy default', owner_person_id: 1, created_by_person_id: 1 }, null, 'admin');
     await query('UPDATE products SET tenant_id = NULL WHERE id = ?', [legacy.id]);
 
     await t.test('A/B/default lists and images never widen for admin or forged tenant fields', async () => {
@@ -196,7 +197,7 @@ test('actual inventory and procurement services isolate A, B, and default across
       }
     });
     await t.test('advanced demand, binding recommendations, cost history and receipt impact keep tenant ownership', async () => {
-      const related = await service.createProductMysql({ name: 'A related product', owner_person_id: 2, created_by_person_id: 2 }, null, 2);
+      const related = await service.createProductMysql({ ...packaging, name: 'A related product', owner_person_id: 2, created_by_person_id: 2 }, null, 2);
       const group = await query("INSERT INTO procurement_purchase_groups(name,source_type) VALUES('A bundle','1688')");
       await query('INSERT INTO procurement_purchase_group_items(group_id,product_id) VALUES(?,?),(?,?)', [group.insertId,products[2].id,group.insertId,related.id]);
       const poisonedGroup = await query("INSERT INTO procurement_purchase_groups(name,source_type) VALUES('Foreign private group','1688')");

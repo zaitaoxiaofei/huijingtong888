@@ -17442,15 +17442,17 @@ async function deleteTenantProcurementRequestMysql(id, tenantId) {
   });
 }
 
-export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
+export async function procurementRequestsMysql(query = {}, tenantId = "admin", { diagnostics = null } = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
+  diagnostics?.mark('scope');
   await requireProcurementTenantSchemaMysql();
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   await ensureStockLocationSchemaMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   // Listing must not infer a receipt from transport status.
+  diagnostics?.mark('schema');
   const compact = String(query.compact || "") === "1";
   const requestColumns = compact
     ? `pr.id, pr.request_group_no, pr.product_id, pr.raw_name, pr.raw_spec, pr.binding_status,
@@ -17468,14 +17470,17 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
   // A shortage is already net of assigned stock and receipts; never subtract
   // product-wide incoming stock from that shortage a second time.
   const queueCoverage = realOrderView ? await inventoryScopeCoverageMysql(scope) : null;
+  diagnostics?.mark('coverage');
   const queueProducts=queueCoverage?[...new Set([...queueCoverage.values()].flatMap(order=>order.items.map(item=>Number(item.product_id))))]:[];
   const demandCancellations=activeDemandCancellations(await readDemandCancellationEvents(mysqlQuery,scope.id,queueProducts));
   const shortageProductIds = queueCoverage ? [...new Set([...queueCoverage.values()]
     .filter(order => order.needs_fulfillment && order.stock_location !== 'FBP')
     .flatMap(order => order.items.filter(item => item.product_id > 0 && cancelledOrderPurchase(item,item.product_id,demandCancellations).actionable_shortage_quantity > 0).map(item => item.product_id)))] : null;
+  diagnostics?.mark('filters');
   const groupedPage = String(query.grouped || "") === "1"
     ? await procurementGroupedPageIdsMysql(query, shortageProductIds, String(scope.id))
     : null;
+  diagnostics?.mark('page_ids');
   if (groupedPage && !groupedPage.productIds.length) {
     return {
       rows: [],
@@ -17498,8 +17503,13 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     : "";
   const groupedProductFilter = (column, tenantOwned = true) => `${tenantOwned ? `AND ${inventoryTenantSql(scope, column.includes('.') ? column.split('.')[0] : '')}` : ''}
     ${groupedPage ? `AND ${column} IN (${groupedProductPlaceholders})` : ''}`;
+  const groupedComponentFilter = (column) => groupedPage ? `AND ${column} IN (
+    SELECT page_component.component_product_id FROM product_components page_component
+    WHERE ${inventoryTenantSql(scope, 'page_component')}
+      AND page_component.product_id IN (${groupedProductPlaceholders})
+  )` : '';
   const groupedQueryParams = groupedPage
-    ? Array.from({ length: 11 }, () => groupedPage.productIds).flat()
+    ? Array.from({ length: 13 }, () => groupedPage.productIds).flat()
     : [];
   const rows = await mysqlQuery(`
     SELECT ${requestColumns}, ${workflowFbpCandidateMysql(scope)} AS workflow_candidate, ${queueCoverage ? 'p.id' : 'pr.product_id'} AS product_id,
@@ -17615,12 +17625,14 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
         WHERE status = 'posted'
           AND ${localStockLocationPredicateMysql()}
           AND ${inventoryTenantSql(scope)}
+          ${groupedComponentFilter("inventory_movements.product_id")}
         GROUP BY inventory_movements.product_id
       ) component_stock ON component_stock.product_id = pc.component_product_id
       LEFT JOIN (
         SELECT product_id, SUM(quantity) AS incoming_stock
         FROM inbound_records
         WHERE status = 'pending_arrival' AND ${inventoryTenantSql(scope)}
+          ${groupedComponentFilter("product_id")}
         GROUP BY product_id
       ) component_incoming ON component_incoming.product_id = pc.component_product_id
       WHERE ${compact ? "0 = 1" : "1 = 1"}
@@ -17644,6 +17656,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
       WHERE LOWER(sales_order.status) NOT LIKE '%cancel%'
         AND EXISTS (SELECT 1 FROM shops sales_shop WHERE sales_shop.id = sales_order.shop_id AND ${inventoryTenantSql(scope, 'sales_shop')})
         AND LOWER(COALESCE(sales_order.tracking_stage, '')) NOT LIKE '%cancel%'
+        AND sales_order.ordered_at >= CONVERT_TZ(DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY), '+08:00', '+00:00')
         ${groupedProductFilter("sales_mapping.product_id")}
       GROUP BY sales_mapping.product_id
     ) sales ON sales.product_id = p.id
@@ -17714,6 +17727,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     ${groupedWhereSql}
     ORDER BY COALESCE(pr.updated_at, pr.created_at) DESC, pr.created_at DESC, pr.id DESC
   `, groupedQueryParams);
+  diagnostics?.mark('details');
   if (String(query.grouped || "") !== "1") {
     const bindingStatus = String(query.bindingStatus || query.binding_status || "all");
     const scopedRows = bindingStatus === "all"
@@ -17760,7 +17774,9 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     row.incoming_stock = Math.max(0, Number(row.incoming_stock || 0) - (historicalIncomingByProduct.get(Number(row.product_id)) || 0));
   }
   // SQL already selected this page. Do not apply its offset a second time.
+  diagnostics?.mark('projection');
   const workflows=await createInventoryWorkflowService().batch(groupedPage.productIds,scope.id,{coverage});
+  diagnostics?.mark('workflow');
   for(const row of rows) {
     row.workflow=workflows.find(w=>w.product_id===Number(row.product_id));
     if(!row.status && row.workflow_candidate) {row.status='pending';row.quantity=0;row.demand_type='warehouse_request';row.request_reason_code='flow_fbp_stock';}
@@ -17833,6 +17849,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
       row.stock_gap_unresolved_quantity = Math.max(0, remainingGap);
     }
   }
+  diagnostics?.mark('gaps');
   return {
     ...grouped
   };
