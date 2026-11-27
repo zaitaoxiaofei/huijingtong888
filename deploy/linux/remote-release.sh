@@ -12,6 +12,11 @@ reviewed_ai_media_retention_manifest="${8:-}"
 expected_production_commit="${9:-}"
 reviewed_inventory_consumables_manifest="${10:-}"
 reviewed_inventory_numbering_manifest="${11:-}"
+skip_storage_lifecycle_setup="${12:-0}"
+if [[ "$skip_storage_lifecycle_setup" != "0" && "$skip_storage_lifecycle_setup" != "1" ]]; then
+  echo "Invalid storage lifecycle setup skip flag" >&2
+  exit 2
+fi
 inventory_numbering_recovery_failed=0
 material_change_required="ready"
 candidate_warmup_seconds=360
@@ -49,7 +54,7 @@ cleanup_material_manifest() {
 trap cleanup_material_manifest EXIT
 
 if [[ -z "$archive_path" || -z "$release_version" ]]; then
-  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest] [allow-service-interruption:1|0] [reviewed-ai-media-retention-manifest] [expected-production-commit] [reviewed-inventory-consumables-manifest] [reviewed-inventory-numbering-manifest]" >&2
+  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest] [allow-service-interruption:1|0] [reviewed-ai-media-retention-manifest] [expected-production-commit] [reviewed-inventory-consumables-manifest] [reviewed-inventory-numbering-manifest] [skip-storage-lifecycle-setup:0|1]" >&2
   exit 2
 fi
 
@@ -875,7 +880,9 @@ candidate_pid=""
 
 trap - ERR
 # Finance-only releases must not install unapproved storage workers/timers.
-if [[ "${BINLOG_ARCHIVE_ENABLED:-0}" == "1" || "${MEDIA_CACHE_LIFECYCLE_ENABLED:-0}" == "1" ]]; then
+if [[ "$skip_storage_lifecycle_setup" == "1" ]]; then
+  echo "Storage lifecycle setup explicitly skipped; existing workers, timers and flags left unchanged."
+elif [[ "${BINLOG_ARCHIVE_ENABLED:-0}" == "1" || "${MEDIA_CACHE_LIFECYCLE_ENABLED:-0}" == "1" ]]; then
   install_storage_lifecycle_timers
 else
   echo "Storage lifecycle flags remain disabled; existing timers left unchanged."
