@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { createWbClient } from '../src/services/wb-client.js';
 import { wbOrderState, wbOrderCapabilities, wbOrderAmountCny } from '../src/shared/wb-order-state.js';
 import { createWbPlatform, wbFulfillmentEnabled } from '../src/services/wb-platform.js';
@@ -14,6 +16,10 @@ test('WB submission, physical acceptance, pickup and receipt remain distinct',()
   assert.equal(wbOrderState('confirm','waiting').label,'待交接');
   assert.equal(wbOrderState('complete','waiting').status,'awaiting_deliver');
   assert.equal(wbOrderState('complete','accepted_by_carrier').status,'delivering');
+  assert.deepEqual(wbOrderState('complete','delivering_by_carrier'), {
+    status: 'delivering', label: '运往 WB 仓库', stage: 'delivering_by_carrier'
+  });
+  assert.equal(wbOrderState('cancel','delivering_by_carrier').status,'cancelled');
   assert.equal(wbOrderState('complete','ready_for_pickup').status,'delivering');
   assert.equal(wbOrderState('complete','sold').status,'delivered');
   assert.equal(wbOrderState('complete','canceled_by_client').status,'cancelled');
@@ -239,6 +245,10 @@ test('WB financial evidence is tenant-scoped and unknown movement costs remain u
       return params[0] === 2 ? [{ id: 17, shop_id: 20, wb_order_id: 30,
         raw_json: { convertedCurrencyCode: 156, convertedPrice: 7075 } }] : [];
     }
+    if (sql.includes('FROM wb_order_settlement_lines')) {
+      assert.deepEqual(params, [2, 20, 30]);
+      return [];
+    }
     assert.match(sql, /stock_location_source='wb_fbs'/);
     assert.deepEqual(params, [2, 20, 17]);
     return [cost];
@@ -266,4 +276,78 @@ test('WB fulfillment activation is explicit and completed supplies cannot be sub
   });
   await assert.rejects(service.supplyAction(2, { order_id: 17, action: 'handover' }), { statusCode: 409 });
   assert.deepEqual(calls, [['/api/v3/supplies/WB-GI-1', undefined]]);
+});
+
+test('WB SKU inheritance stays link-only for older orders and for already handed-over orders', async () => {
+  const source = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
+  const marker = 'export async function reconcileWbOrderInventoryMysql';
+  const reconcile = vm.runInNewContext(`(${source.slice(source.indexOf(marker) + 'export '.length).trim()})`, {
+    orderOwnershipTenantScopeMysql: async id => ({ id }),
+    orderTenantPredicateMysql: () => 'p.tenant_id=2',
+    invalidateOrderProcurementCoverage() {},
+    postProductInventoryWithComponentsMysql: async () => { debits++; }
+  });
+  const order = { id: 10, shop_id: 20, status: 'awaiting_deliver', supplier_status: 'confirm' };
+  const item = { id: 11, product_id: 30, mapping_id: 40, current_mapping_id: null, ordered_after_binding: 0 };
+  let debits = 0;
+  let outbound = null;
+  let links = 0;
+  const connection = { async execute(sql, args) {
+    if (sql.includes('SELECT o.id,o.status')) return [[order]];
+    if (sql.includes('ordered_after_binding')) return [[item]];
+    if (sql.includes('SELECT id,status,product_id')) return [[outbound].filter(Boolean)];
+    if (sql.startsWith('UPDATE order_items')) {
+      links++;
+      item.current_mapping_id = args[0];
+    } else if (sql.startsWith('INSERT INTO outbound_records')) outbound = { id: 1, product_id: 30 };
+    else assert.fail(sql);
+    return [{}];
+  }};
+  await reconcile(10, 2, connection);
+  await reconcile(10, 2, connection);
+  assert.equal(links, 1);
+  assert.equal(debits, 0);
+
+  order.handover_at = '2026-11-27';
+  await reconcile(10, 2, connection, { explicitBinding: true });
+  assert.equal(debits, 0);
+
+  order.handover_at = null;
+  await reconcile(10, 2, connection, { explicitBinding: true });
+  await reconcile(10, 2, connection, { explicitBinding: true });
+  assert.equal(debits, 1);
+});
+
+test('WB rebind preserves prior SKU mapping and refuses an uncorrected local debit', async () => {
+  const writes = [];
+  let net = -1;
+  const db = { async execute(sql, params) {
+    if (sql.includes('SELECT id FROM products')) return [[{ id: 31 }]];
+    if (sql.includes('SELECT id,product_id,active')) return [[{ id: 40, product_id: 30, active: 1 }]];
+    if (sql.includes('SELECT i.id, o.status')) return [[{ id: 11, status: 'awaiting_deliver', product_id: 30, outbound_id: 51 }]];
+    if (sql.includes('AS net_quantity')) return [[{ product_id: 30, net_quantity: net }]];
+    writes.push({ sql, params });
+    return [{ insertId: 41 }];
+  }};
+  const service = createWbPlatform({
+    query: async (sql, params) => {
+      if (sql.includes('SELECT o.id,o.shop_id')) return params[0] === 2
+        ? [{ id: 10, shop_id: 20, raw_json: { nmId: 200, chrtId: 300 } }] : [];
+      if (sql.includes('wb_shop_credentials')) return [{ tenant_id: 2, shop_id: 20 }];
+      if (sql.includes('FROM tenants')) return [{ id: 2, slug: 'a' }];
+      assert.fail(sql);
+    },
+    transaction: work => work(db),
+    reconcileInventory: async () => assert.fail('must preserve existing movement evidence')
+  });
+  const body = { order_id: 10, product_id: 31, expected_product_id: 30 };
+  await assert.rejects(service.bindOrderInventory(3, body), { statusCode: 404 });
+  await assert.rejects(service.bindOrderInventory(2, body), /未冲正/);
+  assert.equal(writes.length, 0);
+  net = 0;
+  assert.equal((await service.bindOrderInventory(2, body)).product_id, 31);
+  assert.deepEqual(writes[0].params, ['WB-300:retired:40', 40]);
+  assert.deepEqual(writes[2].params, [41, 2, 20, 'WB-300', 40]);
+  assert.deepEqual(writes[3].params, [41, 11]);
+  assert.ok(writes.every(write => !write.sql.includes('inventory_movements')));
 });

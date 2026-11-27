@@ -29,6 +29,12 @@ export const WB_SCHEMA = [WB_CATALOG_CACHE_SCHEMA,
     supply_id VARCHAR(128) NULL, handover_at DATETIME NULL, raw_json JSON NOT NULL, synced_at DATETIME NOT NULL,
     UNIQUE KEY uk_wb_order_shop (shop_id, wb_order_id), KEY idx_wb_orders_tenant (tenant_id, shop_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+  `CREATE TABLE IF NOT EXISTS wb_order_settlement_lines (
+    tenant_id BIGINT UNSIGNED NOT NULL, shop_id BIGINT UNSIGNED NOT NULL,
+    report_id BIGINT UNSIGNED NOT NULL, row_id BIGINT UNSIGNED NOT NULL, wb_order_id BIGINT UNSIGNED NOT NULL,
+    payload_json JSON NOT NULL, synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id,shop_id,report_id,row_id), KEY idx_wb_settlement_order (tenant_id,shop_id,wb_order_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
   `CREATE TABLE IF NOT EXISTS wb_product_cards (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, tenant_id BIGINT UNSIGNED NOT NULL,
     shop_id BIGINT UNSIGNED NOT NULL, nm_id BIGINT UNSIGNED NOT NULL, vendor_code VARCHAR(255) NOT NULL,

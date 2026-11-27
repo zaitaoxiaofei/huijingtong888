@@ -2759,8 +2759,15 @@ async function submitInventoryDialog() {
     const scope = inventoryDialog.wbScope;
     inventoryDialog.submitting = true;
     try {
+      if (inventoryDialog.currentProductId && Number(bindForm.productId) !== inventoryDialog.currentProductId) {
+        try {
+          await ElMessageBox.confirm("更新本店该 WB SKU 的默认库存，并同步未出库订单的绑定。已有的出库流水将保留。", "修改 WB 库存绑定", { type: "warning" });
+        } catch { return; }
+        if (scope !== currentApiCacheScope()) return;
+      }
       await apiClient.post("/api/wb/orders/bind-inventory", {
-        order_id: inventoryDialog.orderId, product_id: Number(bindForm.productId)
+        order_id: inventoryDialog.orderId, product_id: Number(bindForm.productId),
+        expected_product_id: inventoryDialog.currentProductId || undefined
       });
       if (scope !== currentApiCacheScope()) return;
       resetInventoryDialog();
@@ -3547,7 +3554,7 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="inventoryDialog.visible"
-      :title="inventoryDialog.wbScope ? 'WB 订单 · 绑定已有库存' : inventoryDialog.mode === 'bind' ? '修改库存绑定' : '创建库存商品'"
+      :title="inventoryDialog.wbScope ? (inventoryDialog.currentProductId ? 'WB 订单 · 修改库存绑定' : 'WB 订单 · 绑定已有库存') : inventoryDialog.mode === 'bind' ? '修改库存绑定' : '创建库存商品'"
       width="92vw"
       align-center
       class="erp-centered-dialog order-inventory-modal"

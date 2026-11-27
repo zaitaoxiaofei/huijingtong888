@@ -7,6 +7,7 @@ export function wbOrderState(supplierStatus, wbStatus) {
   if (['sorted', 'accepted_by_carrier', 'ready_for_pickup', 'postponed_delivery'].includes(wbStatus)) {
     return { status: 'delivering', label: wbStatus === 'ready_for_pickup' ? '待买家取件' : '运输中', stage: wbStatus };
   }
+  if (wbStatus === 'delivering_by_carrier') return { status: 'delivering', label: '运往 WB 仓库', stage: wbStatus };
   if (wbStatus === 'sent_to_carrier') return { status: 'delivering', label: '送往承运商', stage: 'sent_to_carrier' };
   if (supplierStatus === 'complete') return { status: 'awaiting_deliver', label: '待揽收', stage: 'handover_submitted' };
   if (supplierStatus === 'confirm') return { status: 'awaiting_deliver', label: '待交接', stage: 'awaiting_deliver' };

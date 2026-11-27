@@ -1,5 +1,5 @@
 const HOSTS = Object.freeze({
-  marketplace: 'marketplace-api', content: 'content-api', prices: 'discounts-prices-api', calendar: 'dp-calendar-api', common: 'common-api'
+  marketplace: 'marketplace-api', content: 'content-api', prices: 'discounts-prices-api', calendar: 'dp-calendar-api', common: 'common-api', finance: 'finance-api'
 });
 const queues = new Map();
 const nextAt = new Map();
@@ -9,10 +9,10 @@ export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now
   return async function request(account, service, path, { method = 'GET', body, query, signal, beforeRequest } = {}) {
     if (!HOSTS[service] || !path.startsWith('/') || path.startsWith('//') || path.includes('://')) throw new Error('WB 接口地址无效');
     if (!account?.token) throw Object.assign(new Error('缺少 WB API 授权，请到企业店铺编辑该 WB 店铺，填写 API Token 并检查授权。'), { statusCode: 409 });
-    const readOnly=method==='GET'||(method==='POST'&&(['/api/v3/orders/status','/api/v3/orders/stickers','/api/v3/orders/stickers/cross-border','/content/v2/get/cards/list','/content/v2/get/cards/trash','/content/v2/cards/error/list'].includes(path)||/^\/api\/v3\/stocks\/\d+$/.test(path)));
+    const readOnly=method==='GET'||(method==='POST'&&(['/api/v3/orders/status','/api/finance/v1/sales-reports/detailed','/api/v3/orders/stickers','/api/v3/orders/stickers/cross-border','/content/v2/get/cards/list','/content/v2/get/cards/trash','/content/v2/cards/error/list'].includes(path)||/^\/api\/v3\/stocks\/\d+$/.test(path)));
     const environment = account.environment || 'production';
     if (!['production', 'sandbox'].includes(environment)) throw new Error('WB 接口环境无效');
-    if (environment === 'sandbox' && ['calendar', 'common'].includes(service)) throw Object.assign(new Error('该 WB 能力未启用沙箱，请使用有对应权限的正式店铺。'), { statusCode: 409 });
+    if (environment === 'sandbox' && ['calendar', 'common', 'finance'].includes(service)) throw Object.assign(new Error('该 WB 能力未启用沙箱，请使用有对应权限的正式店铺。'), { statusCode: 409 });
     const base = `${HOSTS[service]}${environment === 'sandbox' ? '-sandbox' : ''}.wildberries.cn`;
     const url = new URL(`https://${base}${path}`);
     for (const [key, value] of Object.entries(query || {})) if (value !== undefined && value !== null && value !== '') {
@@ -27,7 +27,7 @@ export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now
       signal?.throwIfAborted();
       await beforeRequest?.();
       signal?.throwIfAborted();
-      nextAt.set(key, now() + 1100);
+      nextAt.set(key, now() + (service === 'finance' ? 60000 : 1100));
       let response;
       try {
         response = await fetchImpl(url, { method, headers: { Authorization: account.token, 'Content-Type': 'application/json' },
@@ -49,9 +49,10 @@ export function createWbClient({ fetchImpl = fetch, sleep = wait, now = Date.now
       if (!text) return {};
       try {
         // WB order cursors can exceed the precision of a JavaScript number.
-        const value = service === 'marketplace' && path === '/api/v3/orders'
+        const finance = service === 'finance';
+        const value = finance || (service === 'marketplace' && path === '/api/v3/orders')
           ? JSON.parse(text, (key, value, context) => {
-            if (key !== 'next' || typeof value !== 'number' || Number.isSafeInteger(value)) return value;
+            if (!(finance ? ['reportId','rrdId','orderId'].includes(key) : key === 'next') || typeof value !== 'number' || Number.isSafeInteger(value)) return value;
             if (!/^\d+$/.test(context?.source || '')) throw new Error('Invalid WB order cursor');
             return context.source;
           })

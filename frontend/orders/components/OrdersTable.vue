@@ -1,5 +1,4 @@
 ﻿<script setup>
-import { WB_REMOTE_WRITES_ENABLED } from "../../../src/shared/wb-capabilities.js";
 import MarketplaceBadge from "../../admin/components/MarketplaceBadge.vue";
 import { computed, defineAsyncComponent, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
@@ -552,8 +551,8 @@ function canEditCollaborationNote(row) {
                     <el-button link type="primary" size="small">更新本地库存</el-button>
                     <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
                   </el-dropdown>
-                  <el-button v-if="(row.platform !== 'wb' || WB_REMOTE_WRITES_ENABLED) && parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
-                  <el-dropdown v-else-if="(row.platform !== 'wb' || WB_REMOTE_WRITES_ENABLED) && parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
+                  <el-button v-if="(row.platform !== 'wb' || canUpdateInventory) && parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
+                  <el-dropdown v-else-if="(row.platform !== 'wb' || canUpdateInventory) && parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
                     <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
                     <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
                   </el-dropdown>
@@ -587,6 +586,7 @@ function canEditCollaborationNote(row) {
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
               <el-button v-if="!inventoryViews.get(row.id)?.parents.length && (row.platform !== 'wb' || inventoryViews.get(row.id)?.items.length)" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button v-if="row.platform === 'wb' && !inventoryViews.get(row.id)?.parents.length && canUpdateInventory && row.productDisplayRows?.[0]?.productId" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, row.productDisplayRows[0].sku)">修改绑定</el-button>
               <el-button v-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
               <el-dropdown v-else-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
                 <el-button link type="primary" size="small">更新本地库存</el-button>
