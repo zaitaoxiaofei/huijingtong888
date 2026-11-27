@@ -982,7 +982,18 @@ export const mysqlRuntimeServices = {
   applyProcurementLedger: applyProcurementLedgerMysql,
   previewProcurementLedger: previewProcurementLedgerMysql,
   procurementProductPurchaseHistory: procurementProductPurchaseHistoryMysql,
-  procurementRequests: procurementRequestsMysql,
+  procurementRequests: async (query = {}, tenantId = 'admin') => {
+    const diagnostics = createOrderReadDiagnostics('procurementRequestsMysql');
+    try {
+      const result = await procurementRequestsMysql(query, tenantId, { diagnostics });
+      diagnostics.finish({ rows: Array.isArray(result?.rows) ? result.rows.length : 0, total: result?.total,
+        page: result?.page, page_size: result?.pageSize, grouped: String(query.grouped || '') === '1' });
+      return result;
+    } catch (error) {
+      diagnostics.finish({ failed: true });
+      throw error;
+    }
+  },
   procurementBindingSuggestions: procurementBindingSuggestionsMysql,
   procurementPlatformOrders: procurementPlatformOrdersMysql,
   procurementPlatformOrderCandidates: procurementPlatformOrderCandidatesMysql,
