@@ -273,6 +273,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
 
 export function isPrivateImageRead(req, parts = []) {
   if (!req || !["GET", "HEAD"].includes(String(req.method || "").toUpperCase())) return false;
+  if (parts.length === 2 && parts[1] === "image-thumbnail" && req.method === "GET") return true;
   if (parts[1] === "products" && parts[2] && ["image", "detail-images"].includes(parts[3])) return true;
   if (parts[1] === "ai" && parts[2] === "file") return true;
   return parts[1] === "asset-variant-engine"

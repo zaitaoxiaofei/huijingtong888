@@ -6,6 +6,7 @@ import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { useAuthStore } from "./stores/auth";
 import { useGlobalImagePreviewDismiss } from "./composables/useGlobalImagePreviewDismiss";
 import { apiClient, currentApiCacheScope, getAuthToken } from "./utils/api";
+import { createDisplayReadScope } from "./utils/display-read-scope.js";
 
 const authStore = useAuthStore();
 const route = useRoute();
@@ -33,9 +34,38 @@ let updateEventSource = null;
 let updateNotification = null;
 let updateNotificationKey = "";
 let authExpiredNotification = null;
+let updateReadController = null;
+let updatePollingStarted = false;
+let updateScheduleVersion = 0;
+let analyticsPluginReadDenied = false;
+let analyticsPluginReadController = null;
+const updateReads = createDisplayReadScope({
+  visible: document.visibilityState !== "hidden",
+  onPause() {
+    ++updateScheduleVersion;
+    updateReadController = null;
+    analyticsPluginReadController = null;
+    window.clearInterval(updateCheckTimer);
+    window.clearTimeout(initialUpdateCheckTimer);
+    window.clearTimeout(updateEventReconnectTimer);
+    updateEventReconnectTimer = 0;
+  },
+  onResume() {
+    scheduleInitialUpdateCheck(updatePollingStarted ? 0 : 3500);
+    updatePollingStarted = true;
+  }
+});
+function updateVisibilityChanged() { updateReads.setVisible(document.visibilityState !== "hidden"); }
+function updateAuthorityVerified() {
+  analyticsPluginReadDenied = false;
+  const wasReading = updateReads.canRead();
+  updateReads.resetAuthorization();
+  if (wasReading) scheduleInitialUpdateCheck(0);
+}
 
 async function syncAnalyticsPluginUpdate(status = {}) {
   analyticsPluginUpdateSnapshot = status;
+  if (!updateReads.canRead() || analyticsPluginReadDenied || analyticsPluginReadController) return;
   const target = status?.analytics_plugin || status?.analyticsPlugin || null;
   if (!target?.version) return;
   const instance = currentAnalyticsPluginIdentity();
@@ -43,20 +73,26 @@ async function syncAnalyticsPluginUpdate(status = {}) {
     requestAnalyticsPluginIdentity();
     return;
   }
+  const controller = updateReads.controller();
+  if (!controller) return;
+  analyticsPluginReadController = controller;
+  const current = () => !controller.signal.aborted && updateReads.canRead() && currentAnalyticsPluginIdentity() === instance;
   try {
     const pluginStatus = await apiClient.get(`/api/db/seller-analytics/plugin-status?plugin_instance_id=${encodeURIComponent(instance.id)}`, {
       routeScoped: false,
-      noCache: true
+      noCache: true,
+      signal: controller.signal
     });
-    if (currentAnalyticsPluginIdentity() !== instance) return;
+    if (!current()) return;
     const installedVersion = instance.version || String(pluginStatus?.plugin_version || "").trim();
     const versionStatus = installedVersion
       ? await apiClient.get(`/api/system/update-status?analytics_plugin_version=${encodeURIComponent(installedVersion)}`, {
         routeScoped: false,
-        noCache: true
+        noCache: true,
+        signal: controller.signal
       })
       : null;
-    if (currentAnalyticsPluginIdentity() !== instance) return;
+    if (!current()) return;
     const update = versionStatus?.analytics_plugin;
     if (update?.update_available || update?.update_required) {
       window.dispatchEvent(new CustomEvent("app:plugin-update", {
@@ -66,8 +102,11 @@ async function syncAnalyticsPluginUpdate(status = {}) {
       window.dispatchEvent(new CustomEvent("app:plugin-update-clear", { detail: { type: "analytics_plugin" } }));
     }
   } catch (error) {
+    if (!current() || error?.name === "AbortError") return;
+    if (Number(error?.status || error?.statusCode) === 403) analyticsPluginReadDenied = true;
+    if (Number(error?.status || error?.statusCode) === 401 && updateReads.reject(error)) closeUpdateEventStream();
     console.warn("check analytics plugin update failed", error);
-  }
+  } finally { updateReads.release(controller); if (analyticsPluginReadController === controller) analyticsPluginReadController = null; }
 }
 
 let analyticsPluginIdentity = null;
@@ -260,7 +299,7 @@ function resetUpdateEventBackoff() {
 }
 
 function scheduleUpdateEventReconnect() {
-  if (!authStore.isAuthenticated || updateEventReconnectTimer || updateEventPollingFallback) return;
+  if (!updateReads.canRead() || !authStore.isAuthenticated || updateEventReconnectTimer || updateEventPollingFallback) return;
   const delay = Math.min(
     UPDATE_EVENT_RECONNECT_BASE_MS * (2 ** Math.min(updateEventRetryCount, 5)),
     UPDATE_EVENT_RECONNECT_MAX_MS
@@ -285,7 +324,7 @@ function handleUpdateStatusPayload(status) {
 }
 
 function openUpdateEventStream() {
-  if (!authStore.isAuthenticated || updateEventSource || updateEventReconnectTimer || updateEventPollingFallback || typeof EventSource === "undefined") return;
+  if (!updateReads.canRead() || !authStore.isAuthenticated || updateEventSource || updateEventReconnectTimer || updateEventPollingFallback || typeof EventSource === "undefined") return;
   const token = getAuthToken();
   if (!token) return;
   const params = new URLSearchParams({
@@ -362,7 +401,11 @@ function openUpdateEventStream() {
 }
 
 async function checkUpdateStatus() {
-  if (!authStore.isAuthenticated) return;
+  if (!updateReads.canRead() || !authStore.isAuthenticated || !getAuthToken() || updateReadController) return;
+  const scope = currentApiCacheScope();
+  const controller = updateReads.controller();
+  if (!controller) return;
+  updateReadController = controller;
   try {
     const params = new URLSearchParams({
       app_version: APP_RELEASE_VERSION,
@@ -370,31 +413,44 @@ async function checkUpdateStatus() {
     });
     const status = await apiClient.get(`/api/system/update-status?${params.toString()}`, {
       routeScoped: false,
-      noCache: true
+      noCache: true,
+      signal: controller.signal
     });
+    if (controller.signal.aborted || !updateReads.canRead() || scope !== currentApiCacheScope()) return;
     handleUpdateStatusPayload(status);
     if (!updateEventPollingFallback) openUpdateEventStream();
   } catch (error) {
+    if (controller.signal.aborted || error?.name === "AbortError" || scope !== currentApiCacheScope()) return;
+    if (updateReads.reject(error)) closeUpdateEventStream();
     if (Number(error?.status || 0) !== 401) console.warn("check update status failed", error);
-  }
+  } finally { updateReads.release(controller); if (updateReadController === controller) updateReadController = null; }
 }
 
-function scheduleInitialUpdateCheck() {
+function scheduleInitialUpdateCheck(delay = 3500) {
+  const version = ++updateScheduleVersion;
   window.clearInterval(updateCheckTimer);
   window.clearTimeout(initialUpdateCheckTimer);
+  if (!updateReads.canRead() || !authStore.isAuthenticated) return;
   initialUpdateCheckTimer = window.setTimeout(async () => {
     await checkUpdateStatus();
+    if (version !== updateScheduleVersion || !updateReads.canRead() || !authStore.isAuthenticated) return;
     if (!updateEventPollingFallback) openUpdateEventStream();
     updateCheckTimer = window.setInterval(checkUpdateStatus, UPDATE_CHECK_INTERVAL_MS);
-  }, 3500);
+  }, delay);
 }
 
 function resetUpdateEventStreamForAuthScope() {
+  analyticsPluginReadDenied = false;
+  updateReads.cancel();
+  updateReadController = null;
+  analyticsPluginReadController = null;
   resetAnalyticsPluginIdentity();
   inventoryRequestNotice?.close();inventoryRequestNotice=null;
   closeUpdateEventStream();
   resetUpdateEventBackoff();
-  scheduleInitialUpdateCheck();
+  const wasReading = updateReads.canRead();
+  updateReads.resetAuthorization();
+  if (wasReading) scheduleInitialUpdateCheck();
 }
 
 function handleUpdateStorageChange(event) {
@@ -416,10 +472,12 @@ onMounted(async () => {
   window.addEventListener("app:auth-expired", handleAuthExpired);
   window.addEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
   window.addEventListener("storage", handleUpdateStorageChange);
+  window.addEventListener("erp:auth-verified", updateAuthorityVerified);
+  document.addEventListener("visibilitychange", updateVisibilityChanged);
   await authStore.bootstrap();
   requestAnalyticsPluginIdentity();
   consumeLoginWelcome();
-  scheduleInitialUpdateCheck();
+  updateReads.activate();
 });
 
 watch(
@@ -441,6 +499,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("app:auth-expired", handleAuthExpired);
   window.removeEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
   window.removeEventListener("storage", handleUpdateStorageChange);
+  window.removeEventListener("erp:auth-verified", updateAuthorityVerified);
+  document.removeEventListener("visibilitychange", updateVisibilityChanged);
+  updateReads.dispose();
   closeUpdateEventStream();
   window.clearInterval(updateCheckTimer);
   window.clearTimeout(initialUpdateCheckTimer);

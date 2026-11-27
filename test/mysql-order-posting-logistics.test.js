@@ -16,6 +16,11 @@ function memoryDatabase() {
         return [{ affectedRows: 1 }];
       }
       if (sql.includes("UPDATE ozon_orders_raw")) {
+        if (/SET fetched_at = CURRENT_TIMESTAMP/.test(sql)) {
+          assert.equal(params.length, 2);
+          assert.ok(table.has(`${params[0]}:${params[1]}`));
+          return [{ affectedRows: 1 }];
+        }
         const [order, status, substatus, raw, store, number] = params;
         table.set(`${store}:${number}`, { order_id: order, status, substatus, raw_json: raw });
         return [{ affectedRows: 1 }];
@@ -56,6 +61,18 @@ test("atomic raw merge retains rich FBP logistics but accepts the incoming busin
   assert.equal(stored.status, "delivered");
   assert.equal(JSON.parse(stored.raw_json).raw.delivery_method.tpl_provider, "CEL");
   assert.ok(db.sqlLog.every((sql) => !/order_items|order_profit|inventory|history/.test(sql)));
+});
+
+test("an unchanged observation refreshes fetched_at without rewriting the raw TEXT payload", async () => {
+  const db = memoryDatabase();
+  await save(db, rich);
+  db.sqlLog.length = 0;
+  await save(db, { ...rich, raw: { ...rich.raw } });
+  const updates = db.sqlLog.filter(sql => sql.includes("UPDATE ozon_orders_raw"));
+  assert.equal(updates.length, 1);
+  assert.match(updates[0], /SET fetched_at = CURRENT_TIMESTAMP/);
+  assert.doesNotMatch(updates[0], /raw_json\s*=/);
+  assert.equal(JSON.parse(db.table().get("7:P1").raw_json).tracking_number, "TRACK1");
 });
 
 test("same posting number in another shop never inherits logistics", async () => {

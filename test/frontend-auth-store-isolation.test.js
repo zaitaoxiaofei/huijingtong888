@@ -32,17 +32,18 @@ function harness() {
   const calls = [];
   const listeners = new Map();
   const timers = new Map();
+  const events = [];
   const localStorage = storage();
   const context = vm.createContext({
     window: {
       localStorage, sessionStorage: storage(), location: { hash: "#/dashboard" },
-      setTimeout(callback) { const id = Symbol(); timers.set(id, callback); return id; },
+      setTimeout(callback, delay = 0) { const id = Symbol(); timers.set(id, { callback, delay }); return id; },
       clearTimeout(id) { timers.delete(id); },
       addEventListener(type, listener) {
         if (!listeners.has(type)) listeners.set(type, []);
         listeners.get(type).push(listener);
       },
-      dispatchEvent(event) { for (const listener of listeners.get(event.type) || []) listener(event); }
+      dispatchEvent(event) { events.push(event); for (const listener of listeners.get(event.type) || []) listener(event); }
     },
     AbortController, DOMException, console,
     CustomEvent: class { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } },
@@ -60,7 +61,17 @@ function harness() {
     globalThis.store = useAuthStore();
   })()`, context, { filename: "frontend/admin/stores/auth.js" });
   return {
-    store: context.store, api: context.api, calls, localStorage, timers,
+    store: context.store, api: context.api, calls, localStorage, timers, events,
+    flushImmediateTimers() {
+      let count = 0;
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay !== 0) continue;
+        timers.delete(id);
+        timer.callback();
+        count++;
+      }
+      return count;
+    },
     login(id, { tenantId = id, token = `fixture-session-${id}` } = {}) {
       context.store.applyLoginResult({ token, user: person(id, tenantId) });
     },
@@ -129,6 +140,10 @@ for (const rotation of ["token", "tenant"]) {
     assert.equal(h.store.user.value.name, currentUser.name);
     assert.equal(h.cachedUser().name, currentUser.name);
     assert.equal(h.api.getAuthToken(), rotation === "token" ? "fixture-session-2" : "fixture-session-1");
+    assert.deepEqual([...h.timers.values()].map(timer => timer.delay), [0], "verification timeout must be cleared before its one-shot notification runs");
+    assert.equal(h.events.filter(event => event.type === "erp:auth-verified").length, 0);
+    assert.equal(h.flushImmediateTimers(), 1);
+    assert.equal(h.events.filter(event => event.type === "erp:auth-verified").length, 1);
     assert.equal(h.timers.size, 0);
   });
 }
@@ -198,6 +213,9 @@ test("first bootstrap adopts canonical identity and finishes after its own cache
   assert.equal(h.store.user.value.id, 1);
   assert.equal(h.cachedUser().id, 1);
   assert.equal(h.store.bootstrapped.value, true);
+  assert.deepEqual([...h.timers.values()].map(timer => timer.delay), [0], "bootstrap timeout must be cleared before its one-shot notification runs");
+  assert.equal(h.flushImmediateTimers(), 1);
+  assert.equal(h.events.filter(event => event.type === "erp:auth-verified").length, 0, "the bootstrap's prior identity scope must not wake reads after adopting canonical identity");
   assert.equal(h.timers.size, 0);
 });
 

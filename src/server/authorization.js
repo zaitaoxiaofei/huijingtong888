@@ -82,6 +82,7 @@ export function authorizeApiRequest(req, parts = []) {
     "tools/pricing/logistics-rules"
   ].includes(path)) return { allowed: true };
 
+  if (method === "GET" && path === "image-thumbnail") return { allowed: true };
   if (["auth", "user-preferences", "system-notifications", "ready", "image-proxy"].includes(resource)) return { allowed: true };
   if (resource === "tenants") {
     if (parts[2] === "plugin-token" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };

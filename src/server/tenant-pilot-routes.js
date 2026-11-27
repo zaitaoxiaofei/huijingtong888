@@ -52,7 +52,7 @@ const routes = new Set([
   'POST asset-variant-engine/generate-video', 'POST asset-variant-engine/register-richtext-image',
   'POST asset-variant-engine/title-preview', 'POST asset-variant-engine/import-listing-automation',
   'POST asset-variant-engine/publish-to-ozon', 'POST asset-variant-engine/publish-selection',
-  'GET system-notifications', 'POST system-notifications/read-all', 'GET system/events',
+  'GET system-notifications', 'POST system-notifications/read-all', 'GET system/events', 'GET image-thumbnail',
   'GET inventory', 'GET inventory/availability', 'GET stock-alerts', 'GET inventory/ledger',
   'POST inventory/ledger/preview', 'POST inventory/ledger', 'GET inventory/stock-debts', 'POST inventory/stock-debts/adjust',
   'GET inventory/batch-stocktake', 'POST inventory/batch-stocktake',

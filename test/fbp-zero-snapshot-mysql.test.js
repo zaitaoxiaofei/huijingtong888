@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 import {createTenantMysqlFixture} from './helpers/tenant-mysql-fixture.js';
 import {resolveInventoryTenantScope,inventoryTenantSql} from '../src/services/inventory-tenant-scope.js';
+import {writeStockSnapshotSync} from '../src/services/online-product-sync-write.js';
 const source=readFileSync(new URL('../src/services/mysql-cutover.js',import.meta.url),'utf8');
 const functionSource=name=>source.match(new RegExp(`async function ${name}\\([^]*?\\n}`))[0];
 test('bulk sync keeps explicitly verified FBP zero timestamps; real FBP rows replace only that SKU marker',{skip:!process.env.TENANT_TEST_MYSQL_SOCKET&&'Requires isolated socket-only MySQL'},async t=>{
@@ -15,7 +16,9 @@ test('bulk sync keeps explicitly verified FBP zero timestamps; real FBP rows rep
    await q('DELETE FROM ozon_stock_snapshots');
    await q("INSERT INTO ozon_stock_snapshots(shop_id,product_id,ozon_sku,ozon_product_id,offer_id,warehouse_id,stock_type,present,available,reserved,synced_at) VALUES(20,NULL,'101','201','one','flow-confirmed-zero','fbp_real',0,0,0,'2026-10-30 01:00:00'),(20,NULL,'101','201','one','fbs','fbs_virtual',50,50,0,'2026-10-30 01:00:00'),(20,NULL,'102','202','two','normal','fbp_real',5,4,1,'2026-10-30 01:00:00'),(30,NULL,'101','201','one','flow-confirmed-zero','fbp_real',0,0,0,'2026-10-30 01:00:00')");
   };
-  const context=vm.createContext({mysqlExecute:q,mysqlQuery:q,mysqlQueryOne:async(sql,args)=>(await q(sql,args))[0],ensureOzonStockStorageSchemaMysql:async()=>{},resolveInventoryTenantScope:tenant=>resolveInventoryTenantScope(tenant,q),inventoryTenantSql,
+  const context=vm.createContext({mysqlExecute:q,mysqlQuery:q,mysqlQueryOne:async(sql,args)=>(await q(sql,args))[0],writeStockSnapshotSync,
+   withMysqlTransaction:async operation=>{await f.connection.beginTransaction();try{const result=await operation(f.connection);await f.connection.commit();return result;}catch(error){await f.connection.rollback();throw error;}},
+   ensureOzonStockStorageSchemaMysql:async()=>{},resolveInventoryTenantScope:tenant=>resolveInventoryTenantScope(tenant,q),inventoryTenantSql,
    stockWarehouseRulesEnabledMysql:async()=>[],resolveStockTypeMysql:row=>row.stock_type,normalizedOzonSkuCandidateMysql:row=>row.ozon_sku,missingOnlineProductSkuMarker:()=>{throw Error('No SKU');},snapshotStockNumberMysql:value=>Number(value||0),normalizeMysqlNullableDate:value=>value||null,nullableNumber:value=>value==null?null:Number(value)});
   vm.runInContext(['clearStockSnapshotsForSyncMysql','upsertStockSnapshotMysql'].map(functionSource).join('\n'),context);
   await t.test('full, product-ID and offer filters preserve verified zeros and do not create invented zero rows',async()=>{

@@ -1,4 +1,5 @@
 import { postFbpPhysicalShipment } from "./fbp-physical-shipment.js";
+import { writeOnlineProductSync, writeStockSnapshotSync } from "./online-product-sync-write.js";
 import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
 import {createInventoryBundleConversion} from './inventory-bundle-conversion.js';
 import {createBundleOrderReconciliation} from './bundle-order-reconciliation.js';
@@ -3170,39 +3171,8 @@ function resolveOnlineProductPublishedAtMysql(row = {}) {
 
 async function upsertOnlineProductDualWrite(shopId, item = {}, options = {}) {
   const storageItem = await prepareOnlineProductMediaForStorage(item, options.mediaOptions);
-  await options.beforeWrite?.();
   const payload = buildOnlineProductPayload(shopId, storageItem);
-  await mysqlExecute(`
-    INSERT INTO online_products
-    (shop_id, ozon_sku, offer_id, ozon_product_id, name, image_url, primary_image, sale_price,
-     currency_code, marketing_price, old_price, status, visibility, archived, is_discounted,
-     images_json, barcodes_json, stocks_json, commissions_json, attributes_json, raw_json, published_at, ozon_updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      offer_id = VALUES(offer_id),
-      ozon_product_id = VALUES(ozon_product_id),
-      name = VALUES(name),
-      image_url = VALUES(image_url),
-      primary_image = VALUES(primary_image),
-      sale_price = VALUES(sale_price),
-      currency_code = VALUES(currency_code),
-      marketing_price = VALUES(marketing_price),
-      old_price = VALUES(old_price),
-      status = VALUES(status),
-      visibility = VALUES(visibility),
-      archived = VALUES(archived),
-      is_discounted = VALUES(is_discounted),
-      images_json = VALUES(images_json),
-      barcodes_json = VALUES(barcodes_json),
-      stocks_json = VALUES(stocks_json),
-      commissions_json = VALUES(commissions_json),
-      attributes_json = VALUES(attributes_json),
-      raw_json = VALUES(raw_json),
-      published_at = VALUES(published_at),
-      ozon_updated_at = VALUES(ozon_updated_at),
-      synced_at = CURRENT_TIMESTAMP,
-      updated_at = CURRENT_TIMESTAMP
-  `, payload);
+  await writeOnlineProductSync({ transaction: withMysqlTransaction, payload, beforeWrite: options.beforeWrite });
 
 
 
@@ -7732,33 +7702,7 @@ async function upsertStockSnapshotMysql(shopId, row, { beforeWrite = null } = {}
     DELETE FROM ozon_stock_snapshots
     WHERE shop_id = ? AND ozon_sku = ? AND warehouse_id = ? AND stock_type != ?
   `, [Number(shopId), normalizedSku, warehouseId, stockType]);
-  await beforeWrite?.();
-  await mysqlExecute(`
-    INSERT INTO ozon_stock_snapshots
-    (shop_id, online_product_id, product_id, ozon_product_id, ozon_sku, offer_id, warehouse_id, warehouse_name, stock_type,
-     present, reserved, available, free_stock_count, paid_stock_count, expiring_stock_count, waitingdocs_stock_count,
-     paid_storage_start_at, stock_days, average_daily_sales, stock_level, raw_json, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON DUPLICATE KEY UPDATE
-      online_product_id = VALUES(online_product_id),
-      product_id = VALUES(product_id),
-      ozon_product_id = VALUES(ozon_product_id),
-      offer_id = VALUES(offer_id),
-      warehouse_name = VALUES(warehouse_name),
-      present = VALUES(present),
-      reserved = VALUES(reserved),
-      available = VALUES(available),
-      free_stock_count = VALUES(free_stock_count),
-      paid_stock_count = VALUES(paid_stock_count),
-      expiring_stock_count = VALUES(expiring_stock_count),
-      waitingdocs_stock_count = VALUES(waitingdocs_stock_count),
-      paid_storage_start_at = VALUES(paid_storage_start_at),
-      stock_days = VALUES(stock_days),
-      average_daily_sales = VALUES(average_daily_sales),
-      stock_level = VALUES(stock_level),
-      raw_json = VALUES(raw_json),
-      synced_at = CURRENT_TIMESTAMP
-  `, [
+  await writeStockSnapshotSync({ transaction: withMysqlTransaction, beforeWrite, payload: [
     Number(shopId),
     online.online_product_id || null,
     online.product_id || null,
@@ -7780,7 +7724,7 @@ async function upsertStockSnapshotMysql(shopId, row, { beforeWrite = null } = {}
     nullableNumber(row.average_daily_sales),
     String(row.stock_level || ""),
     row.raw_json || JSON.stringify(row)
-  ]);
+  ] });
 }
 
 async function clearStockSnapshotsForSyncMysql(shopId, { productId = null, filters = {} } = {}) {
@@ -9675,9 +9619,11 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
     };
     const healthStartedAt = new Date().toISOString();
     try {
-      const checkCurrentShop = async () => {
-        await checkAccess();
-        const current = await assertInventoryRecord(scope, "shop", shop.id);
+      const checkCurrentShop = async connection => {
+        const query = typeof connection?.execute === 'function'
+          ? (sql, params) => mysqlConnectionQuery(connection, sql, params) : mysqlQuery;
+        await assertOrderTaskAccessMysql(scope, options, ["operations"], query);
+        const current = await assertInventoryRecord(scope, "shop", shop.id, query);
         if (current.status !== "active") throw Object.assign(new Error("店铺已停用，商品拉取已停止"), { statusCode: 403 });
         return current;
       };
@@ -31341,17 +31287,18 @@ function orderTenantPredicateMysql(alias, scope) {
   return `(${column} = ${scope.id}${scope.defaultTenant ? ` OR ${column} IS NULL` : ""})`;
 }
 
-async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["orders.manage", "technical"]) {
+async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["orders.manage", "technical"], query = null) {
   if (options[ORDER_SPLIT_IMPORT] === true && permissions.length === 2 && permissions[0] === "orders.manage" && permissions[1] === "technical") permissions = ["packing", "orders.manage"];
   if (options[OGL_DISPATCH_REFRESH] === true && permissions.length === 2
     && permissions[0] === "orders.manage" && permissions[1] === "technical") permissions = ["packing", "orders.manage"];
   throwIfAbortedMysql(options.signal);
-  const tenant = await mysqlQueryOne(`SELECT id FROM tenants WHERE id = ? AND status = 'active'
+  const readOne = query ? async (sql, params) => (await query(sql, params))[0] : mysqlQueryOne;
+  const tenant = await readOne(`SELECT id FROM tenants WHERE id = ? AND status = 'active'
     AND subscription_status IN ('active', 'trial')
     AND (subscription_expires_at IS NULL OR subscription_expires_at > UTC_TIMESTAMP()) LIMIT 1`, [scope.id]);
   if (!tenant) throw Object.assign(new Error("任务所属企业或订阅已不可用"), { statusCode: 403 });
   if (options.session) {
-    const current = await authorizeBusinessTaskSession(options.session, mysqlQuery);
+    const current = await authorizeBusinessTaskSession(options.session, query || mysqlQuery);
     if (Number(current.tenant.id) !== scope.id || !permissions.some((permission) => hasPermission(current, permission))) {
       throw Object.assign(new Error("当前企业成员已无权执行此订单任务"), { statusCode: 403 });
     }

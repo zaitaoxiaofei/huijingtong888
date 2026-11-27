@@ -2,7 +2,7 @@
 import { dashboardForSession, canViewDashboardFinance } from "../../../src/shared/dashboard-visibility.js";
 import DashboardShopCapacity from "../components/DashboardShopCapacity.vue";
 import { mergeDashboardSections } from "../../../src/shared/dashboard-sections.js";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
@@ -25,7 +25,8 @@ import {
   Truck,
   Zap
 } from "lucide-vue-next";
-import { apiClient, currentApiCacheScope } from "../utils/api";
+import { apiClient, currentApiCacheScope, getAuthToken } from "../utils/api";
+import { createDisplayReadScope } from "../utils/display-read-scope.js";
 import DashboardInventoryRanking from "../components/DashboardInventoryRanking.vue";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { shanghaiDateKey } from "../utils/shanghai-date.js";
@@ -52,6 +53,18 @@ const selectedDate = ref(/^\d{4}-\d{2}-\d{2}$/.test(String(route.query.date || "
 let dashboardSnapshotRefreshTimer = null;
 let dashboardSnapshotRefreshAttempts = 0;
 let dashboardRequestSeq = 0;
+let dashboardRevision = "";
+const deniedDashboardReads = new Set();
+const dashboardReads = createDisplayReadScope({
+  visible: document.visibilityState !== "hidden",
+  onPause: pauseDashboardReads,
+  onResume() {
+    dashboardSnapshotRefreshAttempts = 0;
+    const snapshotOnly = hasDashboardLoaded.value;
+    void loadDashboard({ snapshotOnly });
+    if (snapshotOnly) void loadOverviewPanels();
+  }
+});
 const DASHBOARD_SESSION_CACHE_PREFIX = "erp:dashboard:last-success:v3:";
 
 const dashboard = ref({
@@ -144,8 +157,13 @@ function dashboardSessionCacheKey(dateKey) {
   return `${DASHBOARD_SESSION_CACHE_PREFIX}${encodeURIComponent(JSON.stringify(authority))}:${dateKey}`;
 }
 
-function waitForDashboardRetry(delay) {
-  return new Promise((resolve) => window.setTimeout(resolve, delay));
+function waitForDashboardRetry(delay, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Display read paused", "AbortError"));
+    const abort = () => { window.clearTimeout(timer); reject(new DOMException("Display read paused", "AbortError")); };
+    const timer = window.setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, delay);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 function aiMoney(value) {
@@ -154,21 +172,36 @@ function aiMoney(value) {
 }
 
 async function getDashboardWithRetry(url, options = {}, retries = 2) {
+  if (!getAuthToken()) throw new DOMException("Display read has no active login", "AbortError");
+  const readKey = String(url);
+  if (deniedDashboardReads.has(readKey)) throw Object.assign(new Error("Display resource access requires verification"), { status: 403 });
+  const controller = dashboardReads.controller();
+  if (!controller) throw new DOMException("Display read paused", "AbortError");
   let lastError;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      return await apiClient.get(url, {
-        ...options,
-        dedupe: false
-      });
-    } catch (error) {
-      lastError = error;
-      const transientNetworkError = error instanceof TypeError || /fetch|network|connection|socket/i.test(String(error?.message || ""));
-      if (!transientNetworkError || attempt >= retries) throw error;
-      await waitForDashboardRetry(350 * (attempt + 1));
+  try {
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        return await apiClient.get(url, {
+          ...options,
+          dedupe: false,
+          signal: controller.signal
+        });
+      } catch (error) {
+        lastError = error;
+        if (controller.signal.aborted || error?.name === "AbortError") throw error;
+        const status = Number(error?.status || error?.statusCode || 0);
+        if (status === 401 || status === 403 && readKey.split("?")[0] === "/api/dashboard") {
+          dashboardReads.reject(error);
+          throw error;
+        }
+        if (status === 403) { deniedDashboardReads.add(readKey); throw error; }
+        const transientNetworkError = error instanceof TypeError || /fetch|network|connection|socket/i.test(String(error?.message || ""));
+        if (!transientNetworkError || attempt >= retries) throw error;
+        await waitForDashboardRetry(350 * (attempt + 1), controller.signal);
+      }
     }
-  }
-  throw lastError;
+    throw lastError;
+  } finally { dashboardReads.release(controller); }
 }
 
 function mergeDashboardPayload(payload) {
@@ -179,6 +212,8 @@ async function applyDashboardDate(value) {
   const next = String(value || "").slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(next) || next > todayDateKey.value) return;
   selectedDate.value = next;
+  dashboardReads.cancel();
+  dashboardRevision = "";
   refreshing.value = hasDashboardLoaded.value;
   snapshotBuilding.value = false;
   dashboard.value = {
@@ -931,6 +966,7 @@ const dashboardInsightCards = computed(() => [
 ]);
 
 async function loadDashboard(options = {}) {
+  if (!dashboardReads.canRead() || !getAuthToken()) return;
   const scope = currentApiCacheScope();
   const requestSeq = ++dashboardRequestSeq;
   const dateKey = String(options?.dateKey || selectedDate.value).slice(0, 10);
@@ -956,18 +992,27 @@ async function loadDashboard(options = {}) {
     const url = forceRefresh
       ? `/api/dashboard?${dateParam}&refresh=1&_=${Date.now()}`
       : snapshotOnly
-        ? `/api/dashboard?${dateParam}&snapshotOnly=1&_=${Date.now()}`
+        ? `/api/dashboard?${dateParam}&snapshotOnly=1&statusOnly=1`
         : `/api/dashboard?${dateParam}`;
-    const res = await getDashboardWithRetry(url, {
+    let res = await getDashboardWithRetry(url, {
       noCache: true, cache: "no-store",
       routeScoped: false
     });
     if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
+    if (res?.status_only === true && (!res.snapshot?.revision || res.snapshot.revision !== dashboardRevision)) {
+      res = await getDashboardWithRetry(`/api/dashboard?${dateParam}&snapshotOnly=1`, {
+        noCache: true, cache: "no-store", routeScoped: false
+      });
+      if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
+    }
     snapshotBuilding.value = res?.snapshot?.status === "building";
     mergeDashboardPayload(res);
     if (res?.snapshot?.status === "partial") ElMessage.warning("部分首页指标暂未更新，请稍后刷新");
     hasDashboardLoaded.value = true;
-    if (["fresh", "snapshot"].includes(res?.snapshot?.status)) writeDashboardSessionCache(dateKey, res);
+    if (res?.status_only !== true) {
+      dashboardRevision = res?.snapshot?.revision || "";
+      if (["fresh", "snapshot"].includes(res?.snapshot?.status)) writeDashboardSessionCache(dateKey, res);
+    }
     if (res?.snapshot?.status === "building" && dashboardSnapshotRefreshAttempts < 60) {
       dashboardSnapshotRefreshAttempts += 1;
       scheduleDashboardSnapshotReload(1500);
@@ -976,6 +1021,7 @@ async function loadDashboard(options = {}) {
       scheduleDashboardSnapshotReload(2500);
     }
   } catch (error) {
+    if (!dashboardReads.canRead() || error?.name === "AbortError") return;
     console.error(error);
     if (requestSeq === dashboardRequestSeq && !forceRefresh && dashboardSnapshotRefreshAttempts < 60) {
       dashboardSnapshotRefreshAttempts += 1;
@@ -995,6 +1041,7 @@ async function loadDashboard(options = {}) {
 }
 
 async function loadTopInventory(dateKey = selectedDate.value) {
+  if (!dashboardReads.canRead() || !getAuthToken()) return;
   const scope = currentApiCacheScope();
   const requestSeq = ++rankingRequestSeq;
   topInventoryError.value = "";
@@ -1007,7 +1054,7 @@ async function loadTopInventory(dateKey = selectedDate.value) {
     topInventoryRows.value = Array.isArray(result?.rows) ? result.rows : [];
     topInventoryHasMore.value = Number(result?.total) > 15;
   } catch (error) {
-    if (requestSeq === rankingRequestSeq && scope === currentApiCacheScope()) {
+    if (dashboardReads.canRead() && error?.name !== "AbortError" && requestSeq === rankingRequestSeq && scope === currentApiCacheScope()) {
       topInventoryError.value = error?.message || "库存榜单读取失败，请重试";
     }
   } finally {
@@ -1026,6 +1073,9 @@ function clearInventoryRanking() {
 }
 
 function resetDashboardScope() {
+  dashboardReads.cancel();
+  deniedDashboardReads.clear();
+  dashboardRevision = "";
   ++dashboardRequestSeq;
   clearDashboardSnapshotReload();
   clearInventoryRanking();
@@ -1034,14 +1084,17 @@ function resetDashboardScope() {
   loading.value = false;
   refreshing.value = false;
   snapshotBuilding.value = false;
-  loadDashboard();
+  const wasReading = dashboardReads.canRead();
+  dashboardReads.resetAuthorization();
+  if (wasReading) void loadDashboard();
 }
 
 async function loadOverviewPanels(dateKey = selectedDate.value) {
+  if (!dashboardReads.canRead() || !getAuthToken()) return;
   clearTimeout(shopLimitsRefreshTimer);
   const requestSeq = ++overviewRequestSeq;
   const scope = currentApiCacheScope();
-  const isCurrent = () => requestSeq === overviewRequestSeq && dateKey === selectedDate.value && scope === currentApiCacheScope();
+  const isCurrent = () => dashboardReads.canRead() && requestSeq === overviewRequestSeq && dateKey === selectedDate.value && scope === currentApiCacheScope();
   shopLimitsLoading.value = true;
   const applyLimits = (result) => {
     if (!isCurrent()) return;
@@ -1076,6 +1129,7 @@ async function loadOverviewPanels(dateKey = selectedDate.value) {
 
 function scheduleDashboardSnapshotReload(delay = 2500) {
   clearDashboardSnapshotReload();
+  if (!dashboardReads.canRead()) return;
   dashboardSnapshotRefreshTimer = window.setTimeout(() => {
     dashboardSnapshotRefreshTimer = null;
     loadDashboard({ snapshotOnly: true });
@@ -1086,10 +1140,41 @@ function refreshDashboard() {
   loadDashboard({ refresh: true });
 }
 
+function pauseDashboardReads() {
+  ++dashboardRequestSeq;
+  ++rankingRequestSeq;
+  ++overviewRequestSeq;
+  clearDashboardSnapshotReload();
+  clearTimeout(shopLimitsRefreshTimer);
+  loading.value = false;
+  refreshing.value = false;
+  shopLimitsLoading.value = false;
+  topInventoryLoading.value = false;
+  snapshotBuilding.value = false;
+}
+function dashboardVisibilityChanged() { dashboardReads.setVisible(document.visibilityState !== "hidden"); }
+function dashboardAuthorityVerified() {
+  deniedDashboardReads.clear();
+  const wasReading = dashboardReads.canRead();
+  dashboardReads.resetAuthorization();
+  if (wasReading) {
+    dashboardReads.cancel();
+    dashboardSnapshotRefreshAttempts = 0;
+    const snapshotOnly = hasDashboardLoaded.value;
+    void loadDashboard({ snapshotOnly });
+    if (snapshotOnly) void loadOverviewPanels();
+  }
+}
+
 onMounted(() => {
   window.addEventListener("erp:auth-scope-changed", resetDashboardScope);
-  loadDashboard();
+  window.addEventListener("erp:auth-verified", dashboardAuthorityVerified);
+  document.addEventListener("visibilitychange", dashboardVisibilityChanged);
+  dashboardReads.activate();
 });
+
+onActivated(() => dashboardReads.activate());
+onDeactivated(() => dashboardReads.deactivate());
 
 onBeforeUnmount(() => {
   ++rankingRequestSeq;
@@ -1097,6 +1182,9 @@ onBeforeUnmount(() => {
   clearTimeout(shopLimitsRefreshTimer);
   ++dashboardRequestSeq;
   window.removeEventListener("erp:auth-scope-changed", resetDashboardScope);
+  window.removeEventListener("erp:auth-verified", dashboardAuthorityVerified);
+  document.removeEventListener("visibilitychange", dashboardVisibilityChanged);
+  dashboardReads.dispose();
   clearDashboardSnapshotReload();
 });
 </script>

@@ -1,5 +1,5 @@
 <script setup>
-import { KeepAlive, computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { KeepAlive, computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
 import { ArrowDown, Bell, Camera, Close, Download, Expand, Fold, Lock, Operation, Paperclip, RefreshRight, SwitchButton, Ticket, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -10,7 +10,8 @@ import { useAppStore } from "../stores/app";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { uploadListingMedia } from "../api/tools/imageCropper";
-import { apiClient, currentApiCacheScope } from "../utils/api";
+import { apiClient, currentApiCacheScope, getAuthToken } from "../utils/api";
+import { createDisplayReadScope } from "../utils/display-read-scope.js";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { membershipDisplay } from "../utils/account-membership.js";
 import { canAccessPage, needsMembershipActivation,hasPermission } from "../../../src/shared/permissions.js";
@@ -52,14 +53,40 @@ let mobileViewportQuery = null;
 let notificationRefreshTimer = 0;
 let notificationEventTimer = 0;
 let notificationReadVersion=0;
+let notificationReadController = null;
+let notificationListRevision = "";
 const approvingInventoryRequest=ref(null);
-function queueNotificationRefresh(){window.clearTimeout(notificationEventTimer);notificationEventTimer=window.setTimeout(()=>loadNotifications({quiet:true}),250);}
-function resetNotificationsForScope(){approvingInventoryRequest.value=null;notifications.value=[];notificationUnread.value=0;notificationDrawerVisible.value=false;queueNotificationRefresh();}
+function queueNotificationRefresh(){if(!notificationReads.canRead())return;window.clearTimeout(notificationEventTimer);notificationEventTimer=window.setTimeout(()=>loadNotifications({quiet:true}),250);}
+function resetNotificationsForScope(){notificationReadController?.abort();++notificationReadVersion;notificationListRevision="";approvingInventoryRequest.value=null;notifications.value=[];notificationUnread.value=0;notificationDrawerVisible.value=false;notificationReads.resetAuthorization();queueNotificationRefresh();}
 const notificationDrawerVisible = ref(false);
 const notificationLoading = ref(false);
 const notifications = ref([]);
 const notificationUnread = ref(0);
 const notificationStatus = ref("all");
+const notificationReads = createDisplayReadScope({
+  visible: document.visibilityState !== "hidden",
+  onPause() {
+    ++notificationReadVersion;
+    window.clearTimeout(notificationEventTimer);
+    window.clearInterval(notificationRefreshTimer);
+    notificationLoading.value = false;
+  },
+  onResume() {
+    void loadNotifications({ quiet: true });
+    window.clearInterval(notificationRefreshTimer);
+    notificationRefreshTimer = window.setInterval(() => loadNotifications({ quiet: true }), 60000);
+  }
+});
+function notificationVisibilityChanged(){notificationReads.setVisible(document.visibilityState!=="hidden");}
+function notificationAuthorityVerified(){notificationReads.resetAuthorization();queueNotificationRefresh();}
+watch(notificationDrawerVisible, visible => {
+  if (!visible) {
+    notificationReadController?.abort();
+    ++notificationReadVersion;
+    notificationLoading.value = false;
+    queueNotificationRefresh();
+  }
+});
 const activationDialogVisible = ref(false);
 const accountName = computed(() => String(authStore.user?.name || authStore.user?.username || "我的账户"));
 const avatarLetter = computed(() => Array.from(accountName.value)[0] || "我");
@@ -291,24 +318,39 @@ watch(exchangeRateDialogRequest, () => {
 }, { immediate: true, flush: "sync" });
 
 async function loadNotifications({ quiet = false } = {}) {
+  if (!notificationReads.canRead() || !getAuthToken()) return;
   const scope = currentApiCacheScope(),read=++notificationReadVersion;
   if (!authStore.user?.tenant?.id || authStore.user.tenant.access_allowed === false) {
     notifications.value = [];
     notificationUnread.value = 0;
     return;
   }
+  notificationReadController?.abort();
+  const controller = notificationReads.controller();
+  if (!controller) return;
+  notificationReadController = controller;
+  const summaryOnly = !notificationDrawerVisible.value;
+  const params = new URLSearchParams({ status: notificationStatus.value, pageSize: "50" });
+  if (summaryOnly) params.set("summaryOnly", "1");
+  else if (notificationListRevision) params.set("sinceRevision", notificationListRevision);
   if (!quiet) notificationLoading.value = true;
   try {
-    const result = await apiClient.get(`/api/system-notifications?status=${notificationStatus.value}&pageSize=50`, {
+    const result = await apiClient.get(`/api/system-notifications?${params}`, {
       routeScoped: false,
-      noCache: true
+      noCache: true,
+      signal: controller.signal
     });
-    if (scope !== currentApiCacheScope()||read!==notificationReadVersion) return;
-    notifications.value = result?.rows || [];
+    if (controller.signal.aborted || scope !== currentApiCacheScope()||read!==notificationReadVersion) return;
+    if (!summaryOnly && !result?.unchanged) notifications.value = result?.rows || [];
+    if (!summaryOnly && result?.revision) notificationListRevision = result.revision;
     notificationUnread.value = Number(result?.unread || 0);
   } catch (error) {
+    if (controller.signal.aborted || error?.name === "AbortError") return;
+    if (notificationReads.reject(error)) { notifications.value=[]; notificationUnread.value=0; notificationListRevision=""; }
     if (!quiet&&scope===currentApiCacheScope()&&read===notificationReadVersion) ElMessage.error(error?.message || "通知加载失败");
   } finally {
+    notificationReads.release(controller);
+    if (notificationReadController === controller) notificationReadController = null;
     if (scope === currentApiCacheScope()&&read===notificationReadVersion) notificationLoading.value = false;
   }
 }
@@ -824,9 +866,13 @@ onMounted(() => {
   window.addEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
   window.addEventListener('erp:system-notification',queueNotificationRefresh);
   window.addEventListener('erp:auth-scope-changed',resetNotificationsForScope);
-  loadNotifications({ quiet: true });
-  notificationRefreshTimer = window.setInterval(() => loadNotifications({ quiet: true }), 60000);
+  window.addEventListener('erp:auth-verified',notificationAuthorityVerified);
+  document.addEventListener('visibilitychange',notificationVisibilityChanged);
+  notificationReads.activate();
 });
+
+onActivated(() => notificationReads.activate());
+onDeactivated(() => notificationReads.deactivate());
 
 onBeforeUnmount(() => {
   mobileViewportQuery?.removeEventListener("change", syncMobileViewport);
@@ -837,6 +883,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
   window.removeEventListener('erp:system-notification',queueNotificationRefresh);
   window.removeEventListener('erp:auth-scope-changed',resetNotificationsForScope);
+  window.removeEventListener('erp:auth-verified',notificationAuthorityVerified);
+  document.removeEventListener('visibilitychange',notificationVisibilityChanged);
+  notificationReads.dispose();
   window.clearTimeout(notificationEventTimer);
   window.clearInterval(notificationRefreshTimer);
   window.clearTimeout(routeSwitchTimer);

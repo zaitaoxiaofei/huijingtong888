@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
+import { createDisplayReadScope } from "../frontend/admin/utils/display-read-scope.js";
 
 const source = readFileSync(new URL("../frontend/admin/layouts/AdminLayout.vue", import.meta.url), "utf8");
 const load = source.match(/async function loadNotifications\([\s\S]*?(?=\nasync function openNotificationDrawer)/)[0];
@@ -9,11 +10,15 @@ function fixture(tenant = { id: 42 }) {
   let scope = "a", resolve, calls = 0;
   const pending = new Promise(done => { resolve = done; });
   const context = vm.createContext({
-    notificationReadVersion:0,authStore: { user: { id: 1, tenant } }, currentApiCacheScope: () => scope,
+    notificationReadVersion:0, notificationReadController: null, notificationListRevision: "",
+    notificationDrawerVisible: { value: true }, URLSearchParams, getAuthToken: () => "fixture-session",
+    authStore: { user: { id: 1, tenant } }, currentApiCacheScope: () => scope,
     notifications: { value: [{ id: "old" }] }, notificationUnread: { value: 1 },
     notificationLoading: { value: false }, notificationStatus: { value: "all" },
     apiClient: { get() { calls++; return pending; } }, ElMessage: { error(message) { throw new Error(message); } }
   });
+  context.notificationReads = createDisplayReadScope();
+  context.notificationReads.activate();
   vm.runInContext(load, context);
   return { context, resolve, calls: () => calls, rotate: () => { scope = "b"; } };
 }

@@ -28,7 +28,7 @@ test("online sync routes and task handles preserve live A/B/default authority in
     await connection.changeUser({ database });
     const query = async (sql, params = []) => (await connection.execute(sql, params))[0];
     for (const sql of [
-      "CREATE TABLE tenants(id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL)",
+      "CREATE TABLE tenants(id BIGINT PRIMARY KEY, slug VARCHAR(80), plan_code VARCHAR(32) DEFAULT 'monthly', status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL)",
       "CREATE TABLE people(id BIGINT PRIMARY KEY, active TINYINT DEFAULT 1, role VARCHAR(32), roles_json JSON NULL)",
       "CREATE TABLE tenant_members(tenant_id BIGINT, person_id BIGINT, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'member', business_roles_json JSON, PRIMARY KEY(tenant_id,person_id))",
       "CREATE TABLE shops(id BIGINT PRIMARY KEY, tenant_id BIGINT NULL, name VARCHAR(80), status VARCHAR(32) DEFAULT 'active')"

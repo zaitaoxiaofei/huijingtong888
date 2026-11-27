@@ -12,13 +12,14 @@ import * as sku from '../src/services/mysql-online-product-sku.js';
 import * as client from '../src/ozonClient.js';
 import { prepareOnlineProductMediaForStorage } from '../src/services/online-product-media-storage.js';
 import { requestPublicMediaStream } from '../src/http/public-image-request.js';
+import { writeOnlineProductSync, writeStockSnapshotSync } from '../src/services/online-product-sync-write.js';
 
 test('actual product sync worker scopes reads/writes, stops after revocation and avoids full-catalog empty pulls', {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && 'Requires isolated socket-only MySQL'
 }, async t => {
   const database = 'ozon_online_worker_' + randomBytes(8).toString('hex');
   const connection = await mysql.createConnection({ socketPath: process.env.TENANT_TEST_MYSQL_SOCKET, user: 'root', dateStrings: true });
-  let created = false;
+  let created = false, pool;
   const originalFetch = globalThis.fetch;
   let hook = null, mediaHook = null, empty = false, archive = false, withStocks = false, outsideBucket = false, missingSku = false, unknownStock = false;
   const requests = [], progress = [];
@@ -27,7 +28,16 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
     await connection.query('CREATE DATABASE `' + database + '`'); created = true;
     await connection.changeUser({ database });
     await createOrderFixtureSchema(connection);
-    const query = async (sql, params = []) => (await connection.execute(sql, params))[0];
+    pool = mysql.createPool({ socketPath: process.env.TENANT_TEST_MYSQL_SOCKET, user: 'root', database,
+      dateStrings: true, connectionLimit: 1 });
+    await pool.query("SET time_zone = '+00:00'");
+    const query = async (sql, params = []) => {
+      let deadline;
+      try {
+        return await Promise.race([pool.execute(sql, params).then(result => result[0]),
+          new Promise((_, reject) => { deadline = setTimeout(() => reject(Error('Single-connection fixture pool was starved')), 2500); })]);
+      } finally { clearTimeout(deadline); }
+    };
     await query("INSERT INTO tenants(id,slug,name,status,subscription_status) VALUES(1,'default','Default','active','active'),(2,'a','A','active','active'),(3,'b','B','active','active')");
     await query("INSERT INTO people(id,name,role,active) VALUES(7,'Operator','operations',1)");
     await query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json,active) VALUES(1,7,'member',JSON_ARRAY('operations'),1),(2,7,'member',JSON_ARRAY('operations'),1),(3,7,'member',JSON_ARRAY('operations'),1)");
@@ -59,8 +69,16 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
     const context = vm.createContext({ invalidateOrderProcurementCoverage() {}, ORDER_SPLIT_IMPORT: Symbol("fixtureOrderSplitImport"), confirmedFbpZeroSnapshots, Date, Map, Set, Object, Array, Number, String, Boolean, Math, Promise, Error,
       ...client, ...sku, hasPermission, authorizeBusinessTaskSession, inventoryTenantSql, requestPublicMediaStream,
       mysqlQuery: query, mysqlQueryOne: async (sql, params) => (await query(sql, params))[0] || null, mysqlExecute: query,
+      mysqlConnectionQuery: async (connection, sql, params) => (await connection.execute(sql, params))[0],
+      writeOnlineProductSync, writeStockSnapshotSync,
+      withMysqlTransaction: async operation => {
+        const writer = await pool.getConnection();
+        try { await writer.beginTransaction(); const result = await operation(writer); await writer.commit(); return result; }
+        catch (error) { await writer.rollback(); throw error; }
+        finally { writer.release(); }
+      },
       resolveInventoryTenantScope: tenant => resolveInventoryTenantScope(tenant, query),
-      assertInventoryRecord: (scope, kind, id) => assertInventoryRecord(scope, kind, id, query),
+      assertInventoryRecord: (scope, kind, id, read = query) => assertInventoryRecord(scope, kind, id, read),
       assertInventoryReferences: (scope, body) => assertInventoryReferences(scope, body, query),
       // Credential-health logging is exercised by its own service tests.
       recordOzonSyncHealth: async () => {},
@@ -158,6 +176,7 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
     });
   } finally {
     globalThis.fetch = originalFetch;
+    if (pool) await pool.end();
     if (created) await connection.query('DROP DATABASE `' + database + '`');
     await connection.end();
   }
