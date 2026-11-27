@@ -3027,7 +3027,7 @@ export async function orderProcurementBatchesMysql(orderId, tenantId = "admin") 
           FROM order_items oi
           JOIN orders o ON o.id = oi.order_id
           JOIN sku_mappings sm ON sm.active = 1 AND sm.shop_id = o.shop_id AND ${inventoryTenantSql(scope, 'sm')}
-            AND (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+            AND (sm.id = oi.sku_mapping_id OR (NOT EXISTS (SELECT 1 FROM shops wb_shop WHERE wb_shop.id=o.shop_id AND wb_shop.platform='wb') AND sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
           LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id
             AND recipe.ozon_sku = oi.ozon_sku AND recipe.active = 1 AND recipe.mode = 'combo'
           LEFT JOIN sku_inventory_recipe_items recipe_item ON recipe_item.recipe_id = recipe.id
@@ -18493,7 +18493,7 @@ async function syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement, co
 }
 
 function orderOutboundSyncScopeMysql(options = {}, tenantScope) {
-  const where = ["oi.quantity > 0", `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`];
+  const where = ["oi.quantity > 0", `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND COALESCE(owned_shop.platform, 'ozon') <> 'wb' AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`];
   const params = [];
   const shopId = Number(options.shop_id || options.shopId || 0);
   const ozonSku = String(options.ozon_sku || options.ozonSku || "").trim();
@@ -29994,7 +29994,7 @@ export async function pendingSettlementCostsMysql(query = {}) {
       AND direct_sm.ozon_sku = oi.ozon_sku
       AND direct_sm.active = 1
     LEFT JOIN sku_mappings fallback_sm
-      ON direct_sm.id IS NULL
+      ON COALESCE(s.platform, 'ozon') <> 'wb' AND direct_sm.id IS NULL
       AND fallback_sm.shop_id = o.shop_id
       AND fallback_sm.ozon_sku = oi.ozon_sku
       AND fallback_sm.active = 1
@@ -30834,13 +30834,15 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       WHERE direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id
         AND direct_mapping.active = 1 AND ${orderTenantPredicateMysql("direct_mapping", tenantScope)}),
     (SELECT MIN(fallback_mapping.id) FROM sku_mappings fallback_mapping
-      WHERE fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
+      WHERE COALESCE(mapping_shop.platform, 'ozon') <> 'wb'
+        AND fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
         AND fallback_mapping.active = 1 AND ${orderTenantPredicateMysql("fallback_mapping", tenantScope)})
   )`;
   const itemScopeSql = `
       SELECT DISTINCT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, o.shop_id, sm.id AS mapping_id, scoped_product.id AS product_id
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
+      JOIN shops mapping_shop ON mapping_shop.id = o.shop_id
       ${mappingJoin}
       LEFT JOIN products scoped_product ON scoped_product.id = sm.product_id AND ${orderTenantPredicateMysql("scoped_product", tenantScope)}
       WHERE oi.order_id IN (${cleanIds.map(() => "?").join(",")})

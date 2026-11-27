@@ -136,7 +136,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1${tenantScope('direct_mapping.tenant_id')}
         LEFT JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, (
           SELECT MIN(fallback_mapping.id) FROM sku_mappings fallback_mapping
-          WHERE fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
+          WHERE NOT EXISTS (SELECT 1 FROM shops wb_shop WHERE wb_shop.id=o.shop_id AND wb_shop.platform='wb')
+            AND fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
             AND fallback_mapping.active = 1${tenantScope('fallback_mapping.tenant_id')}
         ))${tenantScope('sm.tenant_id')}
         LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1${tenantScope('p.tenant_id')}

@@ -568,7 +568,7 @@ function canEditCollaborationNote(row) {
                 <span>本单 {{ inventoryViews.get(row.id).items[0].quantity ?? '待核对' }} {{ inventoryViews.get(row.id).items[0].stock_unit || '件' }}</span>
               </div>
               <strong class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name || '库存名称待核对' }}</strong>
-              <small>可用：{{ inventoryViews.get(row.id).items[0].local_available ?? '待核对' }} · 实物：{{ inventoryViews.get(row.id).items[0].physical_estimate ?? '待核对' }} · FBP：待同步</small>
+              <small>可用：{{ inventoryViews.get(row.id).items[0].local_available ?? '待核对' }} · 实物：{{ inventoryViews.get(row.id).items[0].physical_estimate ?? '待核对' }}<template v-if="row.platform !== 'wb'"> · FBP：待同步</template></small>
               <small v-if="inventoryViews.get(row.id).active">现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
             </template>
             <template v-else-if="inventoryViews.get(row.id)?.items.length">
@@ -583,7 +583,7 @@ function canEditCollaborationNote(row) {
             </div>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
-              <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button v-if="!inventoryViews.get(row.id)?.parents.length && (row.platform !== 'wb' || inventoryViews.get(row.id)?.items.length)" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
               <el-button v-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
               <el-dropdown v-else-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
                 <el-button link type="primary" size="small">更新本地库存</el-button>
@@ -893,7 +893,7 @@ function canEditCollaborationNote(row) {
               <strong v-if="product.inventoryMode !== 'combo'">库存编号：{{ product.inventoryNumber || "待补核心品名" }}</strong>
               <small v-else>库存编号：见子产品明细</small>
               <div class="orders-stock-inline-facts">
-                <span>FBP: {{ product.stock?.fbp || 0 }}</span>
+                <span v-if="row.platform !== 'wb'">FBP: {{ product.stock?.fbp || 0 }}</span>
                 <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate !== undefined">现货推算: {{ Math.max(0, product.physicalStockEstimate) }}</span>
                 <span v-if="product.inventoryMode !== 'combo' && !Number(product.componentCount || 0) && product.physicalStockEstimate < 0">账面待核差异: {{ -product.physicalStockEstimate }}</span>
                 <el-tooltip content="已计入已记账的出入库和订单扣减，不是实物盘点数；详见表头“数量说明”。" placement="top">
@@ -920,7 +920,7 @@ function canEditCollaborationNote(row) {
             >
               <small class="orders-stock-product-name orders-product-name">{{ item.name }}</small>
               <div class="orders-stock-inline-facts">
-                <span>FBP: {{ item.stock?.fbp || 0 }}</span>
+                <span v-if="row.platform !== 'wb'">FBP: {{ item.stock?.fbp || 0 }}</span>
                 <span>本地: 未绑定</span>
               </div>
             </div>

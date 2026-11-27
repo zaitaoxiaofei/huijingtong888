@@ -269,6 +269,8 @@ const statusPreferenceRows = computed(() => statusPreferenceDialog.order.map((va
 const inventoryDialog = reactive({
   visible: false,
   mode: "bind",
+  wbScope: null,
+  postingNumber: "",
   submitting: false,
   orderId: null,
   orderItemId: null,
@@ -1689,6 +1691,8 @@ function resetInventoryDialog() {
   inventoryDialog.visible = false;
   createCompositionDialogVisible.value = false;
   inventoryDialog.mode = "bind";
+  inventoryDialog.wbScope = null;
+  inventoryDialog.postingNumber = "";
   inventoryDialog.submitting = false;
   inventoryDialog.orderId = null;
   inventoryDialog.orderItemId = null;
@@ -2516,8 +2520,7 @@ async function handleSetBindingIgnore(orderId, sku, ignored) {
 }
 
 const wbInventoryDialog = reactive({
-  visible: false, busy: false, mode: "bind", orderId: null, productId: null, scope: null,
-  products: [], search: "", name: "", length_cm: null, width_cm: null,
+  visible: false, busy: false, orderId: null, scope: null, name: "", length_cm: null, width_cm: null,
   height_cm: null, package_weight_g: null
 });
 const wbPackageFields = {
@@ -2525,29 +2528,13 @@ const wbPackageFields = {
   height_cm: "包装高（cm）", package_weight_g: "包装重量（g）"
 };
 
-function openWbOrderInventory(row, mode) {
+function openWbOrderInventory(row) {
   if (!canUpdateInventory.value || wbInventoryDialog.busy) return;
   Object.assign(wbInventoryDialog, {
-    visible: true, mode, orderId: Number(row.id), productId: null, scope: currentApiCacheScope(),
-    products: [], search: "", name: buildProductDisplayRows(row)[0]?.name || "",
+    visible: true, orderId: Number(row.id), scope: currentApiCacheScope(),
+    name: buildProductDisplayRows(row)[0]?.name || "",
     length_cm: null, width_cm: null, height_cm: null, package_weight_g: null
   });
-  if (mode === "bind") searchWbInventoryProducts();
-}
-
-async function searchWbInventoryProducts() {
-  const scope = currentApiCacheScope(), orderId = wbInventoryDialog.orderId;
-  wbInventoryDialog.busy = true;
-  try {
-    const result = await apiClient.get(`/api/products?inventory=1&paged=1&page=1&pageSize=30&search=${encodeURIComponent(wbInventoryDialog.search)}`, { noCache: true });
-    if (scope === currentApiCacheScope() && wbInventoryDialog.orderId === orderId) {
-      wbInventoryDialog.products = Array.isArray(result) ? result : result.rows || [];
-    }
-  } catch (error) {
-    if (scope === currentApiCacheScope()) ElMessage.error(error.message);
-  } finally {
-    wbInventoryDialog.busy = false;
-  }
 }
 
 async function saveWbOrderInventory() {
@@ -2557,12 +2544,11 @@ async function saveWbOrderInventory() {
     wbInventoryDialog.visible = false;
     return;
   }
-  const { orderId, mode, productId, name, length_cm, width_cm, height_cm, package_weight_g } = wbInventoryDialog;
+  const { orderId, name, length_cm, width_cm, height_cm, package_weight_g } = wbInventoryDialog;
   wbInventoryDialog.busy = true;
   try {
-    await apiClient.post(`/api/wb/orders/${mode === "bind" ? "bind-inventory" : "create-inventory"}`,
-      mode === "bind" ? { order_id: orderId, product_id: productId }
-        : { order_id: orderId, name: name.trim(), length_cm, width_cm, height_cm, package_weight_g });
+    await apiClient.post("/api/wb/orders/create-inventory",
+      { order_id: orderId, name: name.trim(), length_cm, width_cm, height_cm, package_weight_g });
     if (scope !== currentApiCacheScope()) return;
     wbInventoryDialog.visible = false;
     ElMessage.success("WB 订单已绑定库存");
@@ -2576,13 +2562,18 @@ async function saveWbOrderInventory() {
 
 async function handleOpenBindProductFromOrder(orderId, sku) {
   const row = tableRows.value.find(item => Number(item.id) === Number(orderId));
-  if (row?.platform === "wb") return openWbOrderInventory(row, "bind");
+  const wb = row?.platform === "wb";
+  if (wb && !canUpdateInventory.value) return;
+  const scope = currentApiCacheScope();
   const context = resolveOrderInventoryContext(orderId, sku);
-  if (!context?.onlineProductId) {
+  if (!context || (!wb && !context.onlineProductId)) {
     ElMessage.warning("当前 SKU 缺少在线商品 ID，暂时无法修改绑定");
     return;
   }
-  await ensureInventoryOptionsLoaded();
+  if (!wb) await ensureInventoryOptionsLoaded();
+  if (scope !== currentApiCacheScope()) return;
+  inventoryDialog.wbScope = wb ? scope : null;
+  inventoryDialog.postingNumber = wb ? row.postingNumber || row.posting_number : "";
   inventoryDialog.mode = "bind";
   inventoryDialog.visible = true;
   inventoryDialog.orderId = Number(orderId);
@@ -2606,7 +2597,7 @@ async function handleOpenBindProductFromOrder(orderId, sku) {
 
 async function handleOpenCreateProductFromOrder(orderId, sku) {
   const row = tableRows.value.find(item => Number(item.id) === Number(orderId));
-  if (row?.platform === "wb") return openWbOrderInventory(row, "create");
+  if (row?.platform === "wb") return openWbOrderInventory(row);
   const context = resolveOrderInventoryContext(orderId, sku);
   if (!context?.onlineProductId) {
     ElMessage.warning("当前 SKU 缺少在线商品 ID，暂时无法创建库存");
@@ -2721,6 +2712,27 @@ async function bindExistingProductDuringCreate(row) {
 watch(() => createForm.name, scheduleCreateSimilarProducts);
 
 async function submitInventoryDialog() {
+  if (inventoryDialog.wbScope) {
+    if (!canUpdateInventory.value || inventoryDialog.submitting) return;
+    if (inventoryDialog.wbScope !== currentApiCacheScope()) return resetInventoryDialog();
+    if (!bindForm.productId) return ElMessage.warning("请先选择库存商品");
+    const scope = inventoryDialog.wbScope;
+    inventoryDialog.submitting = true;
+    try {
+      await apiClient.post("/api/wb/orders/bind-inventory", {
+        order_id: inventoryDialog.orderId, product_id: Number(bindForm.productId)
+      });
+      if (scope !== currentApiCacheScope()) return;
+      resetInventoryDialog();
+      ElMessage.success("WB 订单已绑定库存");
+      await loadOrders({ silent: true, forceRefresh: true, includeCounts: true });
+    } catch (error) {
+      if (scope === currentApiCacheScope()) ElMessage.error(error.message);
+    } finally {
+      inventoryDialog.submitting = false;
+    }
+    return;
+  }
   if (!inventoryDialog.onlineProductId) {
     ElMessage.warning("当前订单缺少在线商品 ID");
     return;
@@ -3468,43 +3480,29 @@ onBeforeUnmount(() => {
     <el-dialog
       v-if="wbInventoryDialog.visible"
       v-model="wbInventoryDialog.visible"
-      :title="wbInventoryDialog.mode === 'bind' ? 'WB 订单 · 绑定已有库存' : 'WB 订单 · 创建并绑定'"
+      title="WB 订单 · 创建并绑定"
       width="min(560px, 95vw)"
     >
       <el-form label-position="top" :disabled="wbInventoryDialog.busy">
-        <template v-if="wbInventoryDialog.mode === 'bind'">
-          <el-form-item label="搜索库存">
-            <el-input v-model="wbInventoryDialog.search" placeholder="库存编号或产品名称" @keyup.enter="searchWbInventoryProducts">
-              <template #append><el-button @click="searchWbInventoryProducts">搜索</el-button></template>
-            </el-input>
-          </el-form-item>
-          <el-form-item label="库存产品" required>
-            <el-select v-model="wbInventoryDialog.productId" filterable>
-              <el-option v-for="p in wbInventoryDialog.products" :key="p.id" :value="Number(p.id)" :label="`${p.inventory_number || p.code || p.id} · ${p.name}`" />
-            </el-select>
-          </el-form-item>
-        </template>
-        <template v-else>
           <el-form-item label="库存产品名称" required>
             <el-input v-model="wbInventoryDialog.name" maxlength="255" />
           </el-form-item>
           <el-form-item v-for="(label, key) in wbPackageFields" :key="key" :label="label" required>
             <el-input-number v-model="wbInventoryDialog[key]" :min="0.001" :precision="3" :controls="false" />
           </el-form-item>
-        </template>
       </el-form>
       <template #footer>
         <el-button :disabled="wbInventoryDialog.busy" @click="wbInventoryDialog.visible=false">取消</el-button>
         <el-button type="primary" :loading="wbInventoryDialog.busy"
-          :disabled="wbInventoryDialog.mode === 'bind' ? !wbInventoryDialog.productId : !wbInventoryDialog.name.trim() || Object.keys(wbPackageFields).some(key => !(wbInventoryDialog[key] > 0))"
+          :disabled="!wbInventoryDialog.name.trim() || Object.keys(wbPackageFields).some(key => !(wbInventoryDialog[key] > 0))"
           @click="saveWbOrderInventory"
-        >{{ wbInventoryDialog.mode === 'bind' ? '保存绑定' : '创建并绑定' }}</el-button>
+        >创建并绑定</el-button>
       </template>
     </el-dialog>
 
     <el-dialog
       v-model="inventoryDialog.visible"
-      :title="inventoryDialog.mode === 'bind' ? '修改库存绑定' : '创建库存商品'"
+      :title="inventoryDialog.wbScope ? 'WB 订单 · 绑定已有库存' : inventoryDialog.mode === 'bind' ? '修改库存绑定' : '创建库存商品'"
       width="92vw"
       align-center
       class="erp-centered-dialog order-inventory-modal"
@@ -3536,7 +3534,7 @@ onBeforeUnmount(() => {
                 <div class="order-inventory-info-table">
                   <div class="order-inventory-info-row">
                     <span>订单号</span>
-                    <strong>{{ inventoryDialog.orderId || "-" }}</strong>
+                    <strong>{{ inventoryDialog.postingNumber || inventoryDialog.orderId || "-" }}</strong>
                   </div>
                   <div class="order-inventory-info-row">
                     <span>SKU</span>
@@ -3567,7 +3565,7 @@ onBeforeUnmount(() => {
                       }}
                     </strong>
                   </div>
-                  <div class="order-inventory-info-row">
+                  <div v-if="!inventoryDialog.wbScope" class="order-inventory-info-row">
                     <span>在线商品 ID</span>
                     <strong>{{ inventoryDialog.onlineProductId || "-" }}</strong>
                   </div>
@@ -3612,6 +3610,7 @@ onBeforeUnmount(() => {
               <div v-if="bindProductSearchMode === 'fuzzy'" class="inventory-search-row">
                 <el-input v-model="bindProductQuery" placeholder="搜索名称、编码、SKU，可输入多个关键词" clearable />
                 <OzonCategorySelect
+                  v-if="!inventoryDialog.wbScope"
                   v-model="bindProductCategory"
                   :show-sync="false"
                   placeholder="选择或搜索 Ozon 类目"
