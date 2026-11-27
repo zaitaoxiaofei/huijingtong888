@@ -12,8 +12,9 @@ export function createBundleOrderReconciliation({postMovement,rebuild}){
    const byItem=new Map();
    for(const item of order.items){if(!byItem.has(Number(item.order_item_id)))byItem.set(Number(item.order_item_id),[]);byItem.get(Number(item.order_item_id)).push(item);}
    for(const [itemId,items] of byItem){
+    const [owner]=await q(`SELECT oi.sku_mapping_id,o.shop_id,s.platform FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id WHERE oi.id=? AND ${inventoryTenantSql(scope,'s')} FOR UPDATE`,[itemId]);
+    if(owner?.platform==='wb')continue;
     const existing=await q(`SELECT im.* FROM inventory_movements im WHERE im.related_order_item_id=? AND im.source_type IN ('order_outbound','order_outbound_adjustment') AND im.status='posted' AND ${inventoryTenantSql(scope,'im')} AND COALESCE(NULLIF(im.stock_location,''),'LOCAL') NOT IN ('FBP','FBO','OGR') FOR UPDATE`,[itemId]);
-    const [owner]=await q(`SELECT oi.sku_mapping_id,o.shop_id FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id WHERE oi.id=? AND ${inventoryTenantSql(scope,'s')} FOR UPDATE`,[itemId]);
     if(!owner)throw new Error('订单所属企业已变化，请刷新后重试');
     const desired=new Map();for(const item of items){const id=Number(item.product_id);desired.set(id,{...item,quantity:Number(item.quantity)+(desired.get(id)?.quantity||0)});}
     const ids=new Set([...existing.map(m=>Number(m.product_id)),...desired.keys()]);

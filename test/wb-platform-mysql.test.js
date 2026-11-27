@@ -99,6 +99,16 @@ test('WB real SQL isolates shops, maps variants to shared products and imports o
       assert.deepEqual(links.map(r=>r.sku_mapping_id),[mapping.id,null]);
       const movements=await query("SELECT quantity_delta FROM inventory_movements WHERE related_posting_number IN ('WB-701','WB-702')");
       assert.deepEqual(movements.map(r=>Number(r.quantity_delta)),[-1]);
+      const visible = await runtime.orderRowsByIdsMysql([701,702], null, '2', {summaryOnly:true,bypassCache:true});
+      assert.equal(visible.find(row=>Number(row.id)===701).sku_product_ids,'WB-200:20');
+      assert.equal(visible.find(row=>Number(row.id)===702).unbound_skus,'WB-200');
+      await addOrder(703,true);
+      await service.bindOrderInventory(2,{order_id:703,product_id:20});
+      await runtime.repairOrderOutboundMysql('2',{order_ids:[702,703]});
+      const past=await query('SELECT order_item_id FROM outbound_records WHERE order_ref IN (?,?)',['WB-702','WB-703']);
+      assert.deepEqual(past,[]);
+      const [unselected]=await query('SELECT sku_mapping_id FROM order_items WHERE order_id=702');
+      assert.equal(unselected.sku_mapping_id,null);
     });
     await t.test('another tenant cannot prepare or inspect the imported shared order',async()=>{
       const order=(await query('SELECT id FROM orders WHERE shop_id=?',[a.id]))[0];const before=remote.length;
