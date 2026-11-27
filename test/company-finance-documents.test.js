@@ -1,4 +1,5 @@
 import test from 'node:test';
+import crypto from 'node:crypto';
 import assert from 'node:assert/strict';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
@@ -19,6 +20,8 @@ function database(options={}){
   if(sql.includes('FROM finance_expenses'))return (options.expenses||[]).filter(e=>e.company_id===p[0]&&e.tenant_id===p[1]);
   if(sql.includes('FROM finance_vouchers')){assert.match(sql,/e.company_id=\?/);assert.match(sql,/v.tenant_id=\?/);assert.match(sql,/pf.tenant_id=\?/);return options.vouchers||[];}
   if(sql.includes('FROM finance_companies'))return p[0]===p[1]?[{id:p[0],name:`Company ${p[0]}`,tax_number:''}]:[];
+  if(sql.startsWith('SELECT shop_id,DATE_FORMAT'))return [{shop_id:10,effective_from:'2026-01-01',effective_to:null}];
+  if(sql.includes('FROM orders o JOIN shops s')){assert.match(sql,/s.tenant_id=\?/);return options.items||[];}
   if(sql.includes('FROM finance_shop_company_assignments'))return p[0]===p[1]?[{id:p[0]*10,name:'Example Z'}]:[];
   if(sql.includes('FROM finance_reconciliation_adjustments'))return [];
   if(sql.includes('FROM finance_periods'))return closed.has(`${p[0]}:${p[1]}`)?[{id:1}]:[];
@@ -216,6 +219,17 @@ test('collected amounts exclude parse errors, support, other currency and out-of
  const summary=summarizeImportedDocuments(docs,{from:'2026-10',to:'2026-10'},{includePreview:true});assert.equal(summary.metrics['佣金'],20);assert.equal(summary.lines.length,2);assert.equal(summary.cash.length,1);
 });
 
+test('manual download directory survives preview, summary, deduplication and accountant export',async()=>{
+ const db=database(),s=session(),buffer=await starFile(),url='/uploads/team-attachments/location.xlsx';db.files.set(url,{tenant:1,buffer,row:{original_name:'Акт услуг.xlsx'}});
+ const input={company_id:1,shop_id:10,month:'2026-10',attachment_url:url,source_location:{platform:'ozon',folder_id:'agentReports',section:'报告'}};
+ const first=await db.service.preview(input,s);assert.equal(first.document.payload_json.source_location.folder_name,'合作伙伴报告');
+ await db.service.confirm({company_id:1,document_id:first.document.id},s);
+ assert.equal((await db.service.preview(input,s)).duplicate,true);
+ const report=await db.service.report({company_id:1,month:'2026-10'},s);assert.equal(report.lines[0].source_location.path,'Ozon Seller > 财务 > 文件 > 合作伙伴报告 > 报告');assert.equal(report.metrics['星级商品推广费'],249.02);
+ const archive=await db.service.export({company_id:1,month:'2026-10'},s),zip=await JSZip.loadAsync(archive.buffer),index=JSON.parse(await Object.values(zip.files).find(f=>f.name.endsWith('来源索引.json')).async('string'));assert.equal(index[0].source_location.path,report.lines[0].source_location.path);
+ const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(await Object.values(zip.files).find(f=>f.name.endsWith('00_公司汇总与明细.xlsx')).async('nodebuffer'));const sheet=workbook.getWorksheet('店铺费用来源');assert.equal(sheet.getRow(1).values.at(-1),'平台下载目录');assert.equal(sheet.getRow(2).values.at(-1),report.lines[0].source_location.path);
+ await assert.rejects(db.service.preview({...input,source_location:{platform:'ozon',folder_id:'agentReports',section:'bad'}},s),/下载目录/);
+});
 
 test('existing salaries and software registrations enter collected summary once with original month and company scope',async()=>{
  const expense=(id,category,amount,extra={})=>({id,company_id:1,tenant_id:1,month_key:'2026-10',category,amount_cny:amount,description:category,source_type:'user_cost_default',...extra});
@@ -225,4 +239,14 @@ test('existing salaries and software registrations enter collected summary once 
  const salary=r.collected_summary.lines.filter(l=>l.metric==='工资');assert.equal(salary.length,1);
  const software=r.collected_summary.lines.find(l=>l.metric==='软件订阅费');assert.equal(software.expense_id,2);assert.equal(software.month,'2026-10');assert.equal(software.shop_id,0);assert.equal(software.amount_status,'estimated');assert.equal(software.linked_evidence[0].attachment_url,'/uploads/team-attachments/software.pdf');
  assert.equal(r.collected_summary.lines.some(l=>l.expense_id===8),false);assert.equal(r.metrics['软件订阅费'],undefined);
+
+});
+
+test('company purchase reference joins report postings and exports rows without posting expenses or confirming previews',async()=>{
+ const items=[{shop_id:10,order_id:1,item_id:2,posting_number:'1-2-3',ozon_sku:'9',quantity:1,purchase_cost_cny:12,frozen_purchase_cost:8}];const db=database({items});
+ db.docs.push({id:77,tenant_id:1,company_id:1,shop_key:10,month_key:'2026-05',original_name:'order.json',attachment_url:'/uploads/team-attachments/order.json',parse_status:'preview',review_status:'pending',payload_json:JSON.stringify({kind:'order-sales',facts:[],order_rows:[{posting_number:'1-2-3',sku:'9',row_number:1,sold:100,returned:0,partner:0,partner_returned:0,bonus:0,bonus_returned:0,sold_quantity:1,returned_quantity:0,standard_fee:10,standard_fee_returned:0}]})});
+ const raw=Buffer.from('official source fixture'),url='/uploads/team-attachments/order.json';db.docs[0].sha256=crypto.createHash('sha256').update(raw).digest('hex');db.files.set(url,{tenant:1,buffer:raw,row:{original_name:'order.json'}});
+ const r=await db.service.report({company_id:1,from:'2026-01',to:'2026-12'},session());assert.equal(r.collected_summary.metrics['已售商品采购成本'],12);assert.equal(r.metrics['已售商品采购成本'],undefined);assert.equal(r.purchase_cost.complete,true);assert.equal(r.purchase_cost.lines[0].cost_row_count,1);assert.equal(db.docs[0].parse_status,'preview');assert.equal(r.documents[0].payload_json.order_rows,undefined);assert.equal(r.documents[0].payload_json.order_row_count,1);
+ const detail=await db.service.report({company_id:1,month:'2026-05',purchase_cost_details:'1',cost_shop_id:10},session());assert.equal(detail.purchase_cost.details.rows[0].amount,12);assert.equal(detail.purchase_cost.details.rows[0].posting_number,'1-2-3');assert.equal(detail.purchase_cost.details.total,1);
+ const exported=await db.service.export({company_id:1,month:'2026-05'},session()),zip=await JSZip.loadAsync(exported.buffer),book=new ExcelJS.Workbook();await book.xlsx.load(await Object.values(zip.files).find(f=>f.name.endsWith('00_公司汇总与明细.xlsx')).async('nodebuffer'));assert.equal(book.getWorksheet('采购成本匹配').getRow(2).getCell(7).value,12);assert.equal(db.docs[0].parse_status,'preview');
 });

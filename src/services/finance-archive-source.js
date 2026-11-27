@@ -1,9 +1,6 @@
 import { financeDocumentArchiveContext } from './finance-document-archive-context.js';
-const folders = new Map([
- ['updWithAdditionalServices','含附加服务的通用传输文件'],['realizationReports','销售报告'],['b2bSales','向法人销售'],
- ['agentReports','合作伙伴报告'],['analyticalReports','分析报告'],['compensationsAndOtherCharges','赔偿及其它应计项目'],
- ['securityPayments','保证金与罚款'],['invoices','扣款与待付账单'],['reconciliationActs','对账单'],['actsFBS','FBS发运']
-]);
+import {OZON_DOCUMENT_FOLDERS} from '../shared/finance-document-locations.js';
+const folders=new Map(OZON_DOCUMENT_FOLDERS.map(f=>[f.id,f.name]));
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 409 }); };
 const text = (value, max, label) => { if (typeof value !== 'string' || value.length > max || /[\x00-\x1f]/.test(value)) fail(`同步来源的${label}无效，请在插件重新检查月份后重试`); return value; };
 export function createArchiveSourceValidator({ readContext = financeDocumentArchiveContext } = {}) {

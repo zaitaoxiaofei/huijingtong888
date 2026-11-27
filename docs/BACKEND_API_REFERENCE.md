@@ -2654,7 +2654,7 @@ Save an explicitly reviewed AI cost company assignment and append policy history
 
 #### `POST /api/finance-center/document-import`
 
-Preview, explicitly confirm or review enterprise finance originals. Plugin lookup checks an existing original by scoped SHA256 and never confirms amounts. Optional archive_source is validated against current shop/month company bindings and the uploaded file hash; only normalized provenance is stored. Older manual upload clients remain supported.
+Preview, explicitly confirm or review enterprise finance originals. Plugin lookup checks an existing original by scoped SHA256 and never confirms amounts. Optional archive_source is validated against current shop/month company bindings and the uploaded file hash; only normalized provenance is stored. Optional manual source_location accepts platform=ozon, an official folder_id and a matching section; report lines, linked evidence and accountant exports retain the recorded Seller directory separately from suggested lookup paths. Older manual upload clients remain supported.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Request body: required
@@ -2662,6 +2662,21 @@ Preview, explicitly confirm or review enterprise finance originals. Plugin looku
 - Responses:
   - `200` `application/json` -> `object`
   - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/finance-center/document-report`
+
+Read scoped company finance originals, registered expenses and historical procurement costs matched by official posting/SKU and sales-report month. Preview originals contribute only to the reference projection; confirmed amounts remain separate. Procurement uses saved item CNY cost, falling back to frozen unit cost; no current catalog price, purchase payment or order-date substitution. Repeated reports deduplicate; conflicts, unmatched orders, missing history and excess quantities remain unknown, not zero. Refunds alone never reverse goods cost into stock. Summaries group cost rows by shop/month; purchase_cost_details=1 returns fifty rows per cost_page, optionally filtered by cost_shop_id. Raw official order_rows are omitted from the listing, retaining order_row_count and the original attachment. No source order, inventory or accounting expense is changed.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Query parameters:
+  - `company_id` (`integer`, required): Company owned by the current enterprise.
+  - `from` (`string`, required): Start month YYYY-MM.
+  - `to` (`string`, required): End month YYYY-MM.
+  - `purchase_cost_details` (`string`, required): 1 for paged historical cost evidence.
+  - `cost_page` (`integer`, required): One-based page; fifty rows.
+  - `cost_shop_id` (`integer`, required): Optional current-company shop filter.
+- Responses:
+  - `200` `application/json` -> `object`
 
 #### `POST /api/finance-center/order-sales-source`
 
