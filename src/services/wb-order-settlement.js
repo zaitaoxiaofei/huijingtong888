@@ -32,6 +32,7 @@ export async function summarizeWbSettlement(records, costCny, fxForDay = async (
   const fxDays = new Map();
   let hasSale = false;
   let convertedNet = 0;
+  const converted = Object.fromEntries(fields.map(field => [field, null]));
   let completeFx = true;
   let needsReview = false;
   for (const line of lines) {
@@ -43,25 +44,33 @@ export async function summarizeWbSettlement(records, costCny, fxForDay = async (
     if (line.deduction || line.additionalPayment || line.rebillLogisticCost ||
       line.cashbackAmount || line.cashbackDiscount || line.cashbackCommissionChange) needsReview = true;
     const aggregate = totals.get(line.currency) || Object.fromEntries(fields.map(field => [field, 0]));
+    const signed = {};
     for (const field of fields) {
       const value = line[field] ?? 0;
-      aggregate[field] += ['forPay', 'retailAmount', 'ppvzSalesCommission', 'acquiringFee'].includes(field) && sign
+      signed[field] = ['forPay', 'retailAmount', 'ppvzSalesCommission', 'acquiringFee'].includes(field) && sign
         ? sign * Math.abs(value) : value;
+      aggregate[field] += signed[field];
     }
     totals.set(line.currency, aggregate);
     const lineNet = (sign ? sign * Math.abs(line.forPay ?? 0) : 0)
       - (line.deliveryService ?? 0) - (line.paidStorage ?? 0) - (line.paidAcceptance ?? 0) - (line.penalty ?? 0);
-    if (line.currency === 'CNY') convertedNet += lineNet;
-    else if (lineNet !== 0) {
+    let exchangeRate = line.currency === 'CNY' ? 1 : null;
+    if (line.currency !== 'CNY' && fields.some(field => line[field] != null && signed[field] !== 0)) {
       if (line.currency === 'RUB' && /^\d{4}-\d{2}-\d{2}$/.test(line.date) && !fxDays.has(line.date)) {
         fxDays.set(line.date, await fxForDay(line.date));
       }
       const fx = line.currency === 'RUB' ? fxDays.get(line.date) : null;
       if (Number(fx?.rate) > 0) {
-        convertedNet += lineNet / Number(fx.rate);
+        exchangeRate = Number(fx.rate);
         line.fx_rate = fx.rate;
         line.fx_source_date = fx.source_date;
       } else completeFx = false;
+    }
+    if (exchangeRate || lineNet === 0) convertedNet += exchangeRate ? lineNet / exchangeRate : 0;
+    for (const field of fields) {
+      if (line[field] == null || converted[field] === false) continue;
+      if (!exchangeRate && signed[field] !== 0) converted[field] = false;
+      else converted[field] = (converted[field] ?? 0) + signed[field] / (exchangeRate || 1);
     }
   }
   const amounts = [...totals].map(([currency, totals]) => {
@@ -70,7 +79,9 @@ export async function summarizeWbSettlement(records, costCny, fxForDay = async (
       net_settlement: hasSale && !needsReview ? round(subtotal) : null };
   });
   const netCny = hasSale && !needsReview && completeFx ? round(convertedNet) : null;
-  return { lines, amounts, net_settlement_cny: netCny, actual_profit_cny: netCny == null || costCny == null ? null : round(netCny - costCny),
+  return { lines, amounts, amounts_cny: Object.fromEntries(fields.map(field => [
+    field, typeof converted[field] === 'number' ? round(converted[field]) : null
+  ])), net_settlement_cny: netCny, actual_profit_cny: netCny == null || costCny == null ? null : round(netCny - costCny),
     state: !lines.length ? 'pending' : needsReview ? 'needs_review' : !completeFx ? 'needs_fx' : 'reported' };
 }
 

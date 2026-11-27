@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { wbLogisticsQuote, calculateWbQuote } from '../frontend/admin/utils/wb-pricing.js';
+import { estimateWbOrderProfit } from '../frontend/orders/utils/wb-order-profit.js';
 import { calculateProfit } from '../frontend/admin/utils/pricing-tool.js';
 import { createWbPlatform } from '../src/services/wb-platform.js';
 import { wbRoutePermission } from '../src/server/wb-paths.js';
@@ -102,4 +103,16 @@ test('WB result records the exact warehouse, tariff version and source without m
   assert.equal(old.shipping.sourceSha256,wbTariffVersion('2026-09-01').sha256);
   assert.throws(()=>wbLogisticsQuote({...hefei,platform:'ozon'},input),/不能使用 Ozon/);
   assert.throws(()=>wbLogisticsQuote({...hefei,ruleKey:'ozon:1:1'},input),/不能使用 Ozon/);
+});
+
+test('WB order comparison estimates use the same freight, fees and profit as the WB calculator', () => {
+  const known = estimateWbOrderProfit({ ...input, sale: input.saleCny }, hefei);
+  const calculator = calculateWbQuote('profit', input, hefei);
+  assert.equal(known.delivery, calculator.shipping.freight);
+  assert.equal(known.withdrawal, calculator.withdrawalFee);
+  assert.equal(known.profit, calculator.profit);
+  const incomplete = estimateWbOrderProfit({ ...input, sale: input.saleCny }, null);
+  assert.equal(incomplete.commission, 20);
+  assert.equal(incomplete.delivery, null);
+  assert.equal(incomplete.profit, null);
 });
