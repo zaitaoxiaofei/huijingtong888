@@ -589,7 +589,11 @@ function canEditCollaborationNote(row) {
                 <el-button link type="primary" size="small">更新本地库存</el-button>
                 <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
               </el-dropdown>
-              <div v-for="item in (row.platform === 'wb' && !WB_REMOTE_WRITES_ENABLED ? [] : row.unboundItems)" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
+              <div v-if="row.platform === 'wb' && canUpdateInventory && row.unboundItems?.length" class="orders-inline-actions">
+                <el-button size="small" @click="emit('open-bind-product-from-order', row.id, row.unboundItems[0].sku)">绑定已有库存</el-button>
+                <el-button size="small" type="primary" @click="emit('open-create-product-from-order', row.id, row.unboundItems[0].sku)">创建并绑定</el-button>
+              </div>
+              <div v-for="item in (row.platform === 'wb' ? [] : row.unboundItems)" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
                 <el-button
                   size="small"
                   class="orders-inline-accent-button orders-inline-accent-button-secondary"

@@ -75,7 +75,7 @@ export function createWbProductWorkspace({query,transaction,request,account,sync
   const result=await products(tenantId,{shop_id:a.shop_id});
   return {ok:true,rows:nm?result.rows.filter(row=>Number(row.nm_id)===nm):result.rows,warnings};
  }
- async function createProductInventory(tenantId,body){
+ async function createProductInventory(tenantId,body,attachOrder){
   const a=await account(tenantId,body.shop_id),nm=id(body.nm_id),chrt=id(body.chrt_id),actor=id(actorId);
   if(!createInventoryProduct)throw fail('本地库存创建暂不可用，请稍后重试。',503);
   const scope=await resolveInventoryTenantScope(a.tenant_id,query);
@@ -89,13 +89,14 @@ export function createWbProductWorkspace({query,transaction,request,account,sync
    const card=owned&&parse(owned.raw_json),size=card?.sizes?.find(size=>Number(size.chrtID)===chrt);
    if(!size)throw fail('WB 商品规格不属于当前店铺，请同步商品后重新选择。',404);
    const sku=`WB-${chrt}`,[existing]=await q(`SELECT sm.product_id,p.code,p.active FROM sku_mappings sm LEFT JOIN products p ON p.id=sm.product_id AND ${inventoryTenantSql(scope,'p')} WHERE sm.tenant_id=? AND sm.shop_id=? AND sm.ozon_sku=? FOR UPDATE`,[a.tenant_id,a.shop_id,sku]);
-   if(existing){if(!existing.active)throw fail('此规格已绑定停用库存产品，请先核对原库存绑定。',409);return {ok:true,product_id:existing.product_id,code:existing.code,reused:true};}
+   if(existing){if(!existing.active)throw fail('此规格已绑定停用库存产品，请先核对原库存绑定。',409);if(attachOrder)await attachOrder(connection);return {ok:true,product_id:existing.product_id,code:existing.code,reused:true};}
    const dimensions={length:body.length_cm??card.dimensions?.length,width:body.width_cm??card.dimensions?.width,height:body.height_cm??card.dimensions?.height,weightBrutto:body.package_weight_g!==undefined?Number(body.package_weight_g)/1000:card.dimensions?.weightBrutto},name=String(body.name||card.title||'').trim();
    if(!name||name.length>255)throw fail('库存产品名称：请填写 1–255 个字符。');
    if(['length','width','height','weightBrutto'].some(key=>!(amount(dimensions[key])>0)))throw fail('本地库存包装尺寸和重量缺失，请在“创建库存”中填写包装长、宽、高（cm）及重量（g）；也可先同步 WB 包装资料。',409);
    const photos=(card.photos||[]).map(photo=>photo.big||photo.c516x688).filter(Boolean);
    const product=await createInventoryProduct({name,image_url:photos[0]||'',detail_image_urls:photos.slice(1),source_platform:'wb',supplier_note:`WB ${nm} / ${card.vendorCode||''} / ${sku}`,package_weight_g:Number(dimensions.weightBrutto)*1000,length_cm:Number(dimensions.length),width_cm:Number(dimensions.width),height_cm:Number(dimensions.height),owner_person_id:actor,created_by_person_id:actor,product_type:'main',stock_unit:'个'},connection,scope.id);
    await q('INSERT INTO sku_mappings (tenant_id,shop_id,product_id,ozon_sku,offer_id,commission_low,commission_high) VALUES (?,?,?,?,?,0,0)',[a.tenant_id,a.shop_id,product.id,sku,String(card.vendorCode||'')]);
+   if(attachOrder)await attachOrder(connection);
    return {ok:true,product_id:product.id,code:product.code,reused:false};
   });
  }
