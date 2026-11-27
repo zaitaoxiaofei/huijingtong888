@@ -77,6 +77,7 @@ function cacheOrdersList(requestUrl, result) {
 function ordersMetaCacheKey(filters = {}) {
   return JSON.stringify({
     scope: currentOrdersCacheScope(),
+    platform: String(filters.platform || "all"),
     shopId: String(filters.shopId || "all"),
     dateFrom: String(filters.dateFrom || ""),
     dateTo: String(filters.dateTo || ""),
@@ -221,11 +222,12 @@ function orderTabKey(row = {}) {
   return ["awaiting_packaging", "awaiting_deliver", "ogl_bound", "ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(key) ? key : "all";
 }
 
-export function useOrdersPage() {
+export function useOrdersPage({ platform = "all" } = {}) {
   const authStore = useAuthStore();
   let viewCacheScope = currentOrdersCacheScope();
   let ordersMetaTimer = 0;
   const loading = ref(false);
+  const platformFilters = new Map();
   const selectedOrderIds = ref(new Set());
   const orderSyncAbort = ref(null);
   const orderSyncCancelReason = ref("");
@@ -307,6 +309,7 @@ export function useOrdersPage() {
       pageSize: String(filters.pageSize || DEFAULT_PAGE_SIZE),
       status: filters.status === "possible_return" ? "aftersale" : filters.status || DEFAULT_ORDER_STATUS,
       aftersaleStatus: ["aftersale", "possible_return"].includes(filters.status) ? filters.aftersaleStatus || "all" : "all",
+      platform: filters.platform || "all",
       shopId: filters.shopId || "all",
       logisticsCarrier: filters.logisticsCarrier || "all",
       logisticsMethod: filters.logisticsMethod || "all",
@@ -345,7 +348,7 @@ export function useOrdersPage() {
     syncStatus: "",
     syncRunning: false,
     lastSyncText: "读取中...",
-    filters: createDefaultFilters(defaultFrom, defaultTo),
+    filters: { ...createDefaultFilters(defaultFrom, defaultTo), platform },
     meta: {
       total: 0,
       counts: {}
@@ -386,6 +389,7 @@ export function useOrdersPage() {
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
         status: filters.status === "possible_return" ? "aftersale" : filters.status === "ogl_bound" ? "awaiting_deliver" : ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
         aftersaleStatus: String(filters.aftersaleStatus || "all"),
+        platform: String(filters.platform || vm.filters.platform || "all"),
         shopId: String(filters.shopId || "all"),
         logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
@@ -433,6 +437,8 @@ export function useOrdersPage() {
       inventoryRefreshNotice.value = '';
       inventoryRefreshFailed.value = false;
       abortOrderReads();
+      platformFilters.clear();
+      vm.filters = { ...createDefaultFilters(defaultFrom, defaultTo), platform: vm.filters.platform };
       ordersLoadToken.value += 1;
       selectedOrderIds.value = new Set();
       statusTabOrder.value = [...DEFAULT_STATUS_TAB_ORDER];
@@ -673,10 +679,12 @@ export function useOrdersPage() {
         if (showLoading) loading.value = false;
         void loadPageInventory(vm.rows, requestToken, cacheKey);
       }
-      const shopsPromise = Promise.all([loadShopDictionary(), apiClient.get('/api/wb/shops', { noCache: true })]).then(([ozon,wb]) => [...ozon,...wb]).catch((error) => {
-        console.warn("fetch shops for orders failed", error);
-        return vm.shops;
-      });
+      const shopRequests = [];
+      if (filtersSnapshot.platform !== "wb") shopRequests.push(loadShopDictionary());
+      if (filtersSnapshot.platform !== "ozon") shopRequests.push(apiClient.get('/api/wb/shops', { noCache: true }));
+      const shopsPromise = Promise.allSettled(shopRequests).then(results => results.flatMap(result =>
+        result.status === "fulfilled" && Array.isArray(result.value) ? result.value : []
+      ));
       const result = await apiClient.get(requestUrl, {
         signal: controller.signal,
         noCache: options.forceRefresh === true,
@@ -732,10 +740,11 @@ export function useOrdersPage() {
   }
 
   async function loadLatestOrderSyncStatus() {
+    if (vm.filters.platform === "wb") return null;
     const scope = ensureOrdersViewScope();
     try {
       const status = await apiClient.get("/api/sync/ozon/status", { noCache: true, cache: "no-store" });
-      if (scope !== currentOrdersCacheScope()) return;
+      if (scope !== currentOrdersCacheScope() || vm.filters.platform === "wb") return;
       patch({
         lastSyncText: status?.last_synced_at
           ? shanghaiDateTimeText(status.last_synced_at, { assumeUtcWhenNaive: true })
@@ -1047,6 +1056,13 @@ export function useOrdersPage() {
     return [...ordered, ...hidden];
   }
 
+  function activeWbSyncShop() {
+    const shops = vm.shops.filter(shop => shop.platform === "wb");
+    if (vm.filters.platform === "wb" && vm.filters.shopId === "all" && shops.length === 1) return shops[0];
+    if (vm.filters.platform === "ozon") return null;
+    return shops.find(shop => Number(shop.id) === Number(vm.filters.shopId));
+  }
+
   return {
     vm,
     loading,
@@ -1060,6 +1076,23 @@ export function useOrdersPage() {
     inventoryRefreshNotice,
     inventoryRefreshFailed,
     loadLogisticsOptions,
+    changePlatform: async (nextPlatform, { load = true } = {}) => {
+      if (!["ozon", "wb"].includes(nextPlatform) || vm.filters.platform === nextPlatform || vm.syncRunning) return;
+      abortOrderReads();
+      ordersLoadToken.value += 1;
+      platformFilters.set(vm.filters.platform, { ...vm.filters });
+      selectedOrderIds.value = new Set();
+      vm.filters = { ...(platformFilters.get(nextPlatform) || createDefaultFilters(defaultFrom, defaultTo)), platform: nextPlatform };
+      patch({
+        rows: [], statusTabs: buildStatusTabs(), meta: { total: 0, counts: {} }, syncStatus: "",
+        lastSyncText: nextPlatform === "wb" ? "" : "读取中...",
+        logisticsCarrierOptions: LOGISTICS_CARRIER_OPTIONS,
+        logisticsMethodOptions: DEFAULT_LOGISTICS_METHOD_OPTIONS,
+        logisticsServiceClassOptions: DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS
+      });
+      if (load) await loadOrders();
+      if (load && nextPlatform === "ozon") void loadLatestOrderSyncStatus();
+    },
     submitFilters: async (nextFilters = null) => {
       if (nextFilters && typeof nextFilters === "object") {
         vm.filters = {
@@ -1127,7 +1160,11 @@ export function useOrdersPage() {
       await loadOrders();
     },
     syncRecent: async () => {
-      const wbShop=vm.shops.find(shop=>Number(shop.id)===Number(vm.filters.shopId)&&shop.platform==='wb');
+      const wbShop=activeWbSyncShop();
+      if (vm.filters.platform === "wb" && !wbShop) {
+        ElMessage.warning("请先选择要同步的 WB 店铺。");
+        return;
+      }
       if(wbShop){
         if(vm.syncRunning)return;
         vm.syncRunning=true;vm.syncStatus='正在同步 WB 订单与官方状态...';
@@ -1148,7 +1185,11 @@ export function useOrdersPage() {
       });
     },
     syncAll: async () => {
-      const wbShop=vm.shops.find(shop=>Number(shop.id)===Number(vm.filters.shopId)&&shop.platform==='wb');
+      const wbShop=activeWbSyncShop();
+      if (vm.filters.platform === "wb" && !wbShop) {
+        ElMessage.warning("请先选择要同步的 WB 店铺。");
+        return;
+      }
       if(wbShop){
         if(vm.syncRunning)return;
         vm.syncRunning=true;vm.syncStatus='正在同步 WB 订单与官方状态...';
