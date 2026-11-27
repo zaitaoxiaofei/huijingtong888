@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createWbClient } from '../src/services/wb-client.js';
 import { wbOrderState, wbOrderCapabilities, wbOrderAmountCny } from '../src/shared/wb-order-state.js';
-import { createWbPlatform } from '../src/services/wb-platform.js';
+import { createWbPlatform, wbFulfillmentEnabled } from '../src/services/wb-platform.js';
 import { createWbRoutes } from '../src/server/routes/wb.js';
 import { wbRoutePermission } from '../src/server/wb-paths.js';
 import { authorizeApiRequest } from '../src/server/authorization.js';
@@ -177,4 +177,93 @@ test('WB order media refresh matches the exact shop product and modifies only th
   assert.deepEqual(writes, [['Correct title', 'https://example.com/right.jpg', 2, 20, 17, 27, 'WB-300']]);
   assert.deepEqual(result.items[0], { id: 27, ozon_sku: 'WB-300', product_name: 'Correct title',
     image_url: 'https://example.com/right.jpg', updated: true, error: null });
+});
+
+test('WB prepare rejects stale or missing platform status before writing a supply', async () => {
+  const order = { id: 1, shop_id: 20, wb_order_id: 800, supplier_status: 'new',
+    wb_status: 'waiting', raw_json: { cargoType: 1 } };
+  const requests = [];
+  let current = order;
+  let platformStatus = [];
+  let unbound = [];
+  let supplyLookups = 0;
+  const service = createWbPlatform({
+    query: async (sql, params) => {
+      if (sql.includes('SELECT o.id,o.shop_id')) return [current];
+      if (sql.includes('LEFT JOIN order_items')) {
+        assert.deepEqual(params, [2, 1]);
+        return unbound;
+      }
+      if (sql.includes('wb_shop_credentials')) return [{ tenant_id: 2, shop_id: 20 }];
+      if (sql.includes('SELECT * FROM wb_supplies')) {
+        supplyLookups++;
+        return [{ status: 'creating' }];
+      }
+      assert.fail('attempted a supply write before verifying eligibility');
+    },
+    request: async (_account, _service, path, options) => {
+      requests.push(path);
+      assert.equal(path, '/api/v3/orders/status');
+      assert.deepEqual(options.body, { orders: [800] });
+      return { orders: platformStatus };
+    }
+  });
+  current = { ...order, wb_status: 'canceled_by_client' };
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), { statusCode: 409 });
+  current = { ...order, supply_id: 'WB-GI-123' };
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), { statusCode: 409 });
+  current = { ...order, raw_json: {} };
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), { statusCode: 409 });
+  assert.equal(requests.length, 0);
+
+  current = order;
+  unbound = [{ id: 1 }];
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), /未绑定库存/);
+  assert.equal(requests.length, 0);
+  unbound = [];
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), { statusCode: 409 });
+  platformStatus = [{ id: 800, supplierStatus: 'new', wbStatus: 'canceled_by_client' }];
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), { statusCode: 409 });
+  assert.equal(requests.length, 2);
+  assert.equal(supplyLookups, 0);
+
+  platformStatus = [{ id: 800, supplierStatus: 'new', wbStatus: 'waiting' }];
+  await assert.rejects(service.prepare(2, { order_ids: [1] }), /不能重复创建/);
+  assert.equal(supplyLookups, 1);
+});
+
+test('WB financial evidence is tenant-scoped and unknown movement costs remain unknown', async () => {
+  let cost = { posted_movements: 2, unpriced_movements: 1, net_cost: '10.50' };
+  const service = createWbPlatform({ query: async (sql, params) => {
+    if (sql.includes('FROM orders o JOIN wb_order_details')) {
+      return params[0] === 2 ? [{ id: 17, shop_id: 20, wb_order_id: 30,
+        raw_json: { convertedCurrencyCode: 156, convertedPrice: 7075 } }] : [];
+    }
+    assert.match(sql, /stock_location_source='wb_fbs'/);
+    assert.deepEqual(params, [2, 20, 17]);
+    return [cost];
+  }});
+  await assert.rejects(service.orderFinancialEvidence(3, { order_id: 17 }), { statusCode: 404 });
+  const unknown = await service.orderFinancialEvidence(2, { order_id: 17 });
+  assert.equal(unknown.revenue_cny, 70.75);
+  assert.equal(unknown.posted_inventory_cost_cny, null);
+  cost = { ...cost, unpriced_movements: 0 };
+  assert.equal((await service.orderFinancialEvidence(2, { order_id: 17 })).posted_inventory_cost_cny, 10.5);
+});
+
+test('WB fulfillment activation is explicit and completed supplies cannot be submitted again', async () => {
+  assert.equal(wbFulfillmentEnabled({}), false);
+  assert.equal(wbFulfillmentEnabled({ WB_ORDER_FULFILLMENT_ENABLED: 'true' }), true);
+  const calls = [];
+  const service = createWbPlatform({
+    query: async sql => sql.includes('FROM orders o JOIN wb_order_details')
+      ? [{ id: 17, shop_id: 20, supplier_status: 'confirm', wb_status: 'waiting', supply_id: 'WB-GI-1' }]
+      : [{ tenant_id: 2, shop_id: 20, handover_mode: 'collection_point' }],
+    request: async (_account, _api, path, options) => {
+      calls.push([path, options]);
+      return { done: true };
+    }
+  });
+  await assert.rejects(service.supplyAction(2, { order_id: 17, action: 'handover' }), { statusCode: 409 });
+  assert.deepEqual(calls, [['/api/v3/supplies/WB-GI-1', undefined]]);
 });
