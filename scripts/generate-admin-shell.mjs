@@ -56,13 +56,14 @@ async function main() {
     channel: process.env.OZON_RELEASE_CHANNEL || "local"
   }).replaceAll("<", "\\u003c");
   const html = `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" translate="no" class="notranslate">
   <head>
     <script>globalThis.__ERP_RELEASE_METADATA__ = ${releaseMetadata};</script>
     <script>
       window.__ERP_BOOT_STARTED_AT = performance && performance.now ? performance.now() : Date.now();
     </script>
     <meta charset="utf-8" />
+    <meta name="google" content="notranslate" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <link rel="manifest" href="/mobile.webmanifest" />
     <link rel="apple-touch-icon" href="/mobile-icon-192.png" />
