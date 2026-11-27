@@ -80,6 +80,10 @@ test('WB route permissions use exact paths and do not expose business capabiliti
   assert.equal(authorizeApiRequest({method:'POST',_session:{platform_role:'super_admin'}},['api','wb','prices','set']).allowed,false);
   assert.equal(wbRoutePermission(['api','wb','orders','prepare','anything'],'POST'),null);
   assert.equal(tenantIsolationDecision(ops,['api','wb','unknown'],'GET').allowed,false);
+  const media = ['api','wb','orders','sync-media'];
+  assert.equal(authorizeApiRequest({method:'POST',_session:ops},media).allowed,true);
+  assert.equal(authorizeApiRequest({method:'POST',_session:packing},media).allowed,false);
+  assert.equal(tenantIsolationDecision(ops,media,'POST').allowed,true);
 });
 test('WB routes take tenant exclusively from a freshly authorized session',async()=>{
   const calls=[];const routes=createWbRoutes({readJson:async()=>({shop_id:20,tenant_id:3}),authorize:async()=>({personId:7,roles:['operations'],tenant:{id:2,slug:'a',role:'member'}}),platform:async()=>({syncProducts:async(...args)=>{calls.push(args);return {ok:true};}})});
@@ -125,4 +129,52 @@ test('WB order amount uses the official converted CNY value and preserves real z
   assert.equal(wbOrderAmountCny({ convertedPrice: 0, convertedCurrencyCode: 156 }), 0);
   assert.equal(wbOrderAmountCny({ convertedPrice: 72900, convertedCurrencyCode: 643 }), null);
   assert.equal(wbOrderAmountCny({ convertedPrice: null, convertedCurrencyCode: 156 }), null);
+});
+
+test('WB order media refresh matches the exact shop product and modifies only the selected item', async () => {
+  const writes = [];
+  let requests = 0;
+  let invalidations = 0;
+  const service = createWbPlatform({
+    query: async (sql, params) => {
+      if (sql.includes('SELECT o.id,o.shop_id')) {
+        return params[0] === 2 ? [{ id: 17, shop_id: 20, raw_json: { nmId: 200, chrtId: 300 } }] : [];
+      }
+      if (sql.includes('SELECT id,ozon_image_url')) {
+        assert.deepEqual(params, [17, 'WB-300']);
+        return [{ id: 27, ozon_image_url: 'https://example.com/old.jpg' }];
+      }
+      if (sql.includes('wb_shop_credentials')) {
+        assert.deepEqual(params, [2, 2, 20]);
+        return [{ tenant_id: 2, shop_id: 20 }];
+      }
+      if (sql.includes('SELECT raw_json FROM wb_product_cards')) return [];
+      assert.match(sql, /SET i\.ozon_name=COALESCE\(\?,i\.ozon_name\),i\.ozon_image_url=COALESCE\(\?,i\.ozon_image_url\)/);
+      assert.match(sql, /s\.platform='wb'/);
+      writes.push(params);
+      return { affectedRows: 1 };
+    },
+    request: async (account, service, path, options) => {
+      requests++;
+      assert.equal(account.shop_id, 20);
+      assert.equal(service, 'content');
+      assert.equal(path, '/content/v2/get/cards/list');
+      assert.equal(options.body.settings.filter.textSearch, '200');
+      return { cards: [
+        { nmID: 201, title: 'Different product', photos: [{ big: 'https://example.com/wrong.jpg' }] },
+        { nmID: 200, title: 'Correct title', photos: [{ big: 'https://example.com/right.jpg' }] }
+      ] };
+    },
+    invalidate: () => { invalidations++; }
+  });
+  await assert.rejects(service.syncOrderMedia(3, { order_id: 17 }), { statusCode: 404 });
+  await assert.rejects(service.syncOrderMedia(2, { order_id: 17, item_id: 28 }), { statusCode: 404 });
+  assert.equal(requests, 0);
+  assert.equal(writes.length, 0);
+  const result = await service.syncOrderMedia(2, { order_id: 17, item_id: 27 });
+  assert.equal(requests, 1);
+  assert.equal(invalidations, 1);
+  assert.deepEqual(writes, [['Correct title', 'https://example.com/right.jpg', 2, 20, 17, 27, 'WB-300']]);
+  assert.deepEqual(result.items[0], { id: 27, ozon_sku: 'WB-300', product_name: 'Correct title',
+    image_url: 'https://example.com/right.jpg', updated: true, error: null });
 });

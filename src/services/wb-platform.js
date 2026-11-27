@@ -1,3 +1,4 @@
+import { findWbCard } from './wb-find-card.js';
 import {createWbStockManagement} from './wb-stock-management.js';
 import {createWbProductWorkspace,saveWbProductCard,wbProductView} from './wb-product-workspace.js';
 import {createWbPublishRecords} from './wb-publish-records.js';
@@ -24,6 +25,15 @@ const positiveId = value => {
   return id;
 };
 const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
+
+function wbCardMedia(title, photos) {
+  return {
+    title: String(title || '').trim() || null,
+    image: Array.isArray(photos)
+      ? photos.map(photo => photo?.big || photo?.c516x688).find(url => typeof url === 'string' && url.startsWith('https://')) || null
+      : null
+  };
+}
 
 export function createWbPlatform({ actorId, query, transaction, request = wbRequest, invalidate = () => {}, reconcileInventory = async () => {}, loadAvailability, loadSourceDraft, createInventoryProduct, prepareInventoryProduct }) {
   async function account(tenantId, shopId, allowUnchecked = false) {
@@ -314,11 +324,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
           [a.tenant_id, a.shop_id, row.nmId ?? null]
         );
         const card = cards[0];
-        const title = String(card?.title || '').trim() || null;
-        const photos = parse(card?.raw_json)?.photos;
-        const image = Array.isArray(photos)
-          ? photos.map(photo => photo?.big || photo?.c516x688).find(url => typeof url === 'string' && url.startsWith('https://')) || null
-          : null;
+        const { title, image } = wbCardMedia(card?.title, parse(card?.raw_json)?.photos);
         await connection.execute(`INSERT INTO orders (shop_id,posting_number,order_number,status,logistics_status,tracking_stage,ordered_at,tracking_number,last_synced_at)
           VALUES (?,?,?,?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE
           tracking_number=COALESCE(VALUES(tracking_number),tracking_number),last_synced_at=UTC_TIMESTAMP()`,
@@ -362,6 +368,39 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       WHERE w.tenant_id=? AND o.id IN (${clean.map(() => '?').join(',')})`, [positiveId(tenantId), ...clean]);
     if (rows.length !== clean.length) throw fail('所选 WB 订单不存在、店铺已停用或不属于当前企业。', 404);
     return clean.map(id => rows.find(row => Number(row.id) === id));
+  }
+  async function syncOrderMedia(tenantId, body) {
+    const [order] = await ownedOrders(tenantId, [body.order_id]);
+    const raw = parse(order.raw_json);
+    const nmId = positiveId(raw?.nmId);
+    const sku = `WB-${positiveId(raw?.chrtId)}`;
+    const [item] = await query('SELECT id,ozon_image_url FROM order_items WHERE order_id=? AND ozon_sku=?', [order.id, sku]);
+    if (!item || (body.item_id != null && positiveId(body.item_id) !== Number(item.id))) {
+      throw fail('当前 WB 订单商品已变化，请刷新订单后重试。', 404);
+    }
+    const a = await account(tenantId, order.shop_id);
+    const [cachedCard] = await query(
+      'SELECT raw_json FROM wb_product_cards WHERE tenant_id=? AND shop_id=? AND nm_id=?',
+      [a.tenant_id, a.shop_id, nmId]
+    );
+    const trash = Boolean(parse(cachedCard?.raw_json)?._wb_archived);
+    const card = await findWbCard(request, a, raw.article, { nmId, matchById: true, trash });
+    const { title, image } = wbCardMedia(card?.title, card?.photos);
+    if (title || image) {
+      const result = await query(`UPDATE order_items i JOIN orders o ON o.id=i.order_id
+        JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+        JOIN shops s ON s.id=o.shop_id AND s.tenant_id=w.tenant_id AND s.platform='wb' AND s.status='active'
+        SET i.ozon_name=COALESCE(?,i.ozon_name),i.ozon_image_url=COALESCE(?,i.ozon_image_url)
+        WHERE w.tenant_id=? AND w.shop_id=? AND o.id=? AND i.id=? AND i.ozon_sku=?`,
+      [title, image, a.tenant_id, a.shop_id, order.id, item.id, sku]);
+      if (!result.affectedRows) throw fail('当前 WB 订单商品已变化，请刷新订单后重试。', 409);
+      invalidate();
+    }
+    return {
+      order_id: order.id, updated_count: image && image !== item.ozon_image_url ? 1 : 0, failed_count: image ? 0 : 1,
+      items: [{ id: item.id, ozon_sku: sku, product_name: title, image_url: image, updated: Boolean(image),
+        error: image ? null : 'WB 商品卡暂无可用主图，请在 WB 商品卡核对图片后重试。' }]
+    };
   }
   async function prepare(tenantId, body) {
     const rows = await ownedOrders(tenantId, body.order_ids);
@@ -535,7 +574,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
   const stockManagement=createWbStockManagement({account,query,request});
   return { ...stockManagement, cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
-    syncOrders, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
+    syncOrders, syncOrderMedia, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
 export async function wbPlatform(session, permission = 'operations', signal) {

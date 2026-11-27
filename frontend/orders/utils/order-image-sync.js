@@ -14,6 +14,11 @@ export function orderImageDisplayUrl(value = '') {
 
 export function applyOrderImageSyncToRow(row, result) {
   if (Number(row.id) !== Number(result.order_id)) return row;
+  if (row.platform === 'wb') {
+    const [sku] = splitCsv(row.skus);
+    const title = sku && result.items?.find(item => item.ozon_sku === sku)?.product_name;
+    if (title) row = { ...row, sku_names: `${sku}:${title}` };
+  }
   const updates = new Map((result.items || []).filter(item => item.updated && item.image_url).map(item => [Number(item.id), item.image_url]));
   if (!updates.size) return row;
   const images = new Map(parseMappedPairs(row.sku_images).map(item => [item.key, item.value]));
@@ -35,5 +40,11 @@ export function applyOrderImageSyncToRow(row, result) {
 
 export function applyOrderImageSyncToItems(items, result) {
   const updates = new Map((result.items || []).filter(item => item.updated && item.image_url).map(item => [Number(item.id), item.image_url]));
-  return items.map(item => updates.has(Number(item.id)) ? { ...item, image_url: updates.get(Number(item.id)) } : item);
+  const titles = new Map((result.items || []).filter(item => item.product_name).map(item => [Number(item.id), item.product_name]));
+  return items.map(item => {
+    const id = Number(item.id);
+    if (!updates.has(id) && !titles.has(id)) return item;
+    return { ...item, ...(updates.has(id) ? { image_url: updates.get(id) } : {}),
+      ...(titles.has(id) ? { product_name: titles.get(id) } : {}) };
+  });
 }
