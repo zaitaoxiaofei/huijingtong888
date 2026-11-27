@@ -18,6 +18,7 @@ Options:
   --reviewed-ai-media-retention-manifest PATH  Reclaim reviewed unused AI media during offline maintenance
   --reviewed-inventory-consumables-manifest PATH  Apply individually reviewed consumable flags
   --reviewed-inventory-numbering-manifest PATH  Cut over reviewed inventory numbers during explicit maintenance
+  --skip-storage-lifecycle-setup  Leave existing storage workers, timers and flags unchanged
   --skip-build                Reuse an existing deployment artifact
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
@@ -83,6 +84,7 @@ reviewed_ai_material_manifest=""
 reviewed_ai_media_retention_manifest=""
 reviewed_inventory_consumables_manifest=""
 reviewed_inventory_numbering_manifest=""
+skip_storage_lifecycle_setup=0
 skip_build=0
 skip_database_init=0
 skip_database_maintenance=0
@@ -110,6 +112,7 @@ while (($#)); do
       esac
       shift 2
       ;;
+    --skip-storage-lifecycle-setup) skip_storage_lifecycle_setup=1; shift ;;
     --skip-build) skip_build=1; shift ;;
     --allow-dirty) allow_dirty=1; shift ;;
     --skip-database-init) skip_database_init=1; shift ;;
@@ -197,12 +200,14 @@ db_maintenance_flag=0
 ((run_database_maintenance)) && db_maintenance_flag=1
 ((skip_database_maintenance)) && db_maintenance_flag=0
 activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest' '$allow_service_interruption'"
-if [[ -n "$remote_ai_media_retention_manifest" || -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" ]]; then activation_command+=" '$remote_ai_media_retention_manifest'"; fi
-if [[ -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" ]]; then
+if [[ -n "$remote_ai_media_retention_manifest" || -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" || "$skip_storage_lifecycle_setup" == "1" ]]; then activation_command+=" '$remote_ai_media_retention_manifest'"; fi
+if [[ -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" || "$skip_storage_lifecycle_setup" == "1" ]]; then
   activation_command+=" '$expected_production_commit'"
 fi
-if [[ -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" ]]; then activation_command+=" '$remote_inventory_consumables_manifest'"; fi
-if [[ -n "$remote_inventory_numbering_manifest" ]]; then activation_command+=" '$remote_inventory_numbering_manifest'"; fi
+if [[ -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" || "$skip_storage_lifecycle_setup" == "1" ]]; then activation_command+=" '$remote_inventory_consumables_manifest'"; fi
+if [[ -n "$remote_inventory_numbering_manifest" || "$skip_storage_lifecycle_setup" == "1" ]]; then activation_command+=" '$remote_inventory_numbering_manifest'"; fi
+
+if ((skip_storage_lifecycle_setup)); then activation_command+=" '$skip_storage_lifecycle_setup'"; fi
 
 if ((dry_run)); then
   printf 'DryRun only: no build, upload, SSH command, database change, release switch, restart, or rollback will run.\n'
