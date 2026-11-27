@@ -17737,6 +17737,7 @@ async function prewarmPublishMediaUrls(urls = [], options = {}) {
   const imageUrls = remoteUrls.filter((url) => imageUrlSet.has(url) || isLikelyRemoteImageUrl(url));
   const otherUrls = remoteUrls.filter((url) => !imageUrlSet.has(url) && !isLikelyRemoteImageUrl(url));
   const imageReadiness = await verifyRemoteImagesReadyForOzon(imageUrls, {
+    beforeRequest: options.beforeRequest,
     attempts: 5,
     requiredConsecutiveSuccesses: 2,
     retryDelayMs: 1000,

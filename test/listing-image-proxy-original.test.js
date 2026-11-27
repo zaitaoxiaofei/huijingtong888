@@ -19,7 +19,7 @@ function sourceBetween(source, start, end) {
 const proxySource = [
   sourceBetween(serverSource, 'function sendImagePlaceholder(', 'function imageProxyCacheKey('),
   sourceBetween(serverSource, 'function sendRemoteImageBuffer(', 'async function fetchRemoteImagePayload('),
-  sourceBetween(serverSource, 'async function sendRemoteImage(', 'const server = http.createServer(')
+  sourceBetween(serverSource, 'async function sendRemoteImage(', '\nawait registerMediaCacheReader();')
 ].join('\n');
 const original = { buffer: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x42]), contentType: 'image/jpeg' };
 const target = 'https://images.example/product.jpg';

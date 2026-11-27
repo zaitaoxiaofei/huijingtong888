@@ -259,6 +259,79 @@ EOF
   fi
 }
 
+prepare_image_read_caches() {
+  local root="$shared_root/image-read-cache" name
+  [[ ! -L "$root" && ( ! -e "$root" || -d "$root" ) ]] || { echo "Unsafe shared image read cache root." >&2; return 1; }
+  [[ ! -L "$staging_dir/runtime" && ( ! -e "$staging_dir/runtime" || -d "$staging_dir/runtime" ) ]] || { echo "Unsafe release runtime path." >&2; return 1; }
+  install -d -m 700 -o ozon-erp -g ozon-erp "$root"
+  install -d -o ozon-erp -g ozon-erp "$staging_dir/runtime"
+  for name in image-proxy-cache product-thumbnail-cache; do
+    [[ ! -L "$root/$name" && ( ! -e "$root/$name" || -d "$root/$name" ) ]] || { echo "Unsafe shared image read cache directory." >&2; return 1; }
+    [[ ! -e "$staging_dir/runtime/$name" && ! -L "$staging_dir/runtime/$name" ]] || { echo "Deploy archives must not contain runtime image caches." >&2; return 1; }
+    install -d -m 700 -o ozon-erp -g ozon-erp "$root/$name"
+    ln -s "$root/$name" "$staging_dir/runtime/$name"
+  done
+}
+
+configure_nginx_response_compression() {
+  (
+    # Keep this configuration transaction separate from application rollback.
+    trap - ERR
+    set -Eeuo pipefail
+    local snippet="/etc/nginx/snippets/ozon-erp-response-compression.conf"
+    local source="$release_dir/deploy/linux/nginx-response-compression.conf"
+    local backup_dir changed=0 touched=0 snippet_existed=0 reload_attempted=0
+    local -a originals=()
+    local -A seen=()
+    [[ -f "$source" && ! -L "$source" ]] || { echo "Missing reviewed ERP compression policy." >&2; exit 1; }
+    [[ ! -L "$snippet" && ( ! -e "$snippet" || -f "$snippet" ) ]] || { echo "Unsafe ERP compression policy path." >&2; exit 1; }
+    backup_dir="$(mktemp -d /etc/nginx/.ozon-response-compression.XXXXXX)"
+    restore_nginx_response_compression() {
+      local status=$? index
+      trap - EXIT
+      if ((status != 0 && touched)); then
+        for index in "${!originals[@]}"; do cp -a "$backup_dir/config-$index" "${originals[$index]}"; done
+        if ((snippet_existed)); then cp -a "$backup_dir/snippet" "$snippet"; else rm -f -- "$snippet"; fi
+        if ((reload_attempted)); then nginx -t && systemctl reload nginx || true; fi
+        echo "ERP compression configuration failed; previous Nginx files restored." >&2
+      fi
+      rm -rf -- "$backup_dir"
+      exit "$status"
+    }
+    trap restore_nginx_response_compression EXIT
+    if [[ -f "$snippet" ]]; then
+      cp -a "$snippet" "$backup_dir/snippet"
+      snippet_existed=1
+    fi
+    while IFS= read -r enabled_file; do
+      local config_file index
+      config_file="$(readlink -f "$enabled_file")"
+      [[ -f "$config_file" && -z "${seen[$config_file]:-}" ]] || continue
+      seen[$config_file]=1
+      index=${#originals[@]}
+      cp -a "$config_file" "$backup_dir/config-$index"
+      originals+=("$config_file")
+      if ! grep -qF "include $snippet;" "$config_file"; then
+        touched=1
+        sed -i -E '/^[[:space:]]*proxy_pass[[:space:]]+http:\/\/(ozon_erp_backend|127\.0\.0\.1:3000);[[:space:]]*$/a\        include /etc/nginx/snippets/ozon-erp-response-compression.conf;' "$config_file"
+        changed=1
+      fi
+    done < <(grep -RIlE '^[[:space:]]*proxy_pass[[:space:]]+http://(ozon_erp_backend|127\.0\.0\.1:3000);[[:space:]]*$' /etc/nginx/sites-enabled 2>/dev/null || true)
+    ((${#originals[@]})) || { echo "No ERP Nginx proxy location found." >&2; exit 1; }
+    if ! cmp -s "$source" "$snippet"; then
+      touched=1
+      install -d -m 755 /etc/nginx/snippets
+      install -m 644 "$source" "$snippet"
+      changed=1
+    fi
+    if ((changed)); then
+      nginx -t
+      reload_attempted=1
+      systemctl reload nginx
+    fi
+  )
+}
+
 stop_existing_candidate() {
   if [[ -f "$candidate_pid_file" ]]; then
     local old_candidate_pid
@@ -809,6 +882,7 @@ if migration_pending migrate-order-profit-calculation-versions.mjs; then
 fi
 
 rm -rf "$staging_dir/public/uploads" "$staging_dir/uploads"
+prepare_image_read_caches
 ln -s "$shared_root/uploads/public" "$staging_dir/public/uploads"
 ln -s "$shared_root/uploads/runtime" "$staging_dir/uploads"
 install -d -o ozon-erp -g ozon-erp "$staging_dir/data"
@@ -832,6 +906,7 @@ if [[ -e "$release_dir" ]]; then
 fi
 mv "$staging_dir" "$release_dir"
 chown -hR ozon-erp:ozon-erp "$release_dir"
+configure_nginx_response_compression
 configure_nginx_failover
 if [[ -n "$reviewed_identity_manifest" ]]; then
   chmod 600 "$reviewed_identity_manifest"
