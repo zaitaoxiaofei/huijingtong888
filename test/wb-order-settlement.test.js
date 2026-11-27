@@ -38,6 +38,9 @@ test('WB report net handles returns and already-included payment fees, and waits
   assert.equal((await summarizeWbSettlement(rows, 20)).state, 'needs_fx');
   const result = await summarizeWbSettlement(rows, 20, lookup);
   assert.equal(result.amounts[0].net_settlement, 460);
+  assert.equal(result.amounts_cny.deliveryService, 4);
+  assert.equal(result.amounts_cny.acquiringFee, 1.5);
+  assert.equal(result.amounts_cny.penalty, null);
   assert.equal(result.actual_profit_cny, 26);
   assert.equal((await summarizeWbSettlement(rows, null, lookup)).actual_profit_cny, null);
   rows[2].payload_json.deduction = 50;

@@ -423,11 +423,36 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     const lines = await query(`SELECT report_id,row_id,payload_json FROM wb_order_settlement_lines
       WHERE tenant_id=? AND shop_id=? AND wb_order_id=? ORDER BY report_id,row_id`,
     [positiveId(tenantId), order.shop_id, order.wb_order_id]);
+    const raw = parse(order.raw_json);
+    const [input] = await query(`SELECT o.ordered_at, i.quantity, p.purchase_cost,p.domestic_shipping,p.handling_fee,
+      p.package_weight_g,p.length_cm,p.width_cm,p.height_cm,c.raw_json AS card_json
+      FROM orders o JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+      LEFT JOIN order_items i ON i.order_id=o.id
+      LEFT JOIN sku_mappings m ON m.id=i.sku_mapping_id AND m.shop_id=o.shop_id AND m.tenant_id=w.tenant_id AND m.active=1
+      LEFT JOIN products p ON p.id=m.product_id AND (p.tenant_id=w.tenant_id OR
+        (p.tenant_id IS NULL AND EXISTS (SELECT 1 FROM tenants t WHERE t.id=w.tenant_id AND t.slug='default'))) AND p.active=1
+      LEFT JOIN wb_product_cards c ON c.tenant_id=w.tenant_id AND c.shop_id=w.shop_id AND c.nm_id=?
+      WHERE w.tenant_id=? AND w.shop_id=? AND o.id=? LIMIT 1`,
+    [raw?.nmId ?? null,positiveId(tenantId),order.shop_id,order.id]);
+    const card = parse(input?.card_json);
+    const dimensions = card?.dimensions;
+    const positive = value => Number(value) > 0 ? Number(value) : null;
+    const oneParcel = Number(input?.quantity) === 1;
+    const purchaseCost = positive(input?.purchase_cost);
     return {
       order_id: order.id,
       wb_order_id: order.wb_order_id,
-      revenue_cny: wbOrderAmountCny(parse(order.raw_json)),
+      revenue_cny: wbOrderAmountCny(raw),
       posted_inventory_cost_cny: inventoryCost,
+      estimate_inputs: {
+        shop_id: order.shop_id, subject_id: positive(card?.subjectID), ordered_at: raw?.createdAt ?? input?.ordered_at ?? null,
+        purchaseCost: purchaseCost == null ? null : purchaseCost * Number(input.quantity),
+        domesticCost: purchaseCost == null ? null : (Number(input.domestic_shipping) + Number(input.handling_fee)) * Number(input.quantity),
+        weight: oneParcel ? (positive(dimensions?.weightBrutto) ? Number(dimensions.weightBrutto) * 1000 : positive(input.package_weight_g)) : null,
+        length: oneParcel ? positive(dimensions?.length) ?? positive(input.length_cm) : null,
+        width: oneParcel ? positive(dimensions?.width) ?? positive(input.width_cm) : null,
+        height: oneParcel ? positive(dimensions?.height) ?? positive(input.height_cm) : null
+      },
       settlement: await summarizeWbSettlement(lines, inventoryCost, day => getOrderProfitDailyFx({ query }, day))
     };
   }

@@ -249,6 +249,7 @@ test('WB financial evidence is tenant-scoped and unknown movement costs remain u
       assert.deepEqual(params, [2, 20, 30]);
       return [];
     }
+    if (sql.includes('SELECT o.ordered_at, i.quantity')) return [];
     assert.match(sql, /stock_location_source='wb_fbs'/);
     assert.deepEqual(params, [2, 20, 17]);
     return [cost];
