@@ -24,3 +24,9 @@ test('Cyrillic original names retain spaces and Unicode while path components an
  assert.equal(financeOriginalName('../Акт услуг\r\n.xlsx'),'Акт услуг.xlsx');
  assert.throws(()=>financeOriginalName('..'));assert.throws(()=>financeOriginalName('я'.repeat(256)+'.pdf'));
 });
+
+import {financeExpenseRecordQuery}from '../src/shared/company-finance-report.js';
+import {billingDateRange}from '../frontend/admin/utils/billing-period.js';
+test('expense evidence navigation retains its business month instead of falling back to the current month',()=>{
+ for(const [month,range]of [['2026-10',['2026-10-01','2026-10-31']],['2025-12',['2025-12-01','2025-12-31']],['2024-02',['2024-02-01','2024-02-29']]]){const query=financeExpenseRecordQuery(1,month);assert.equal(query.companyId,'1');assert.deepEqual(billingDateRange(query,'2026-11-27'),range);}
+});
