@@ -1,4 +1,5 @@
 import { mergeOrderPostingLogistics } from "./order-posting-logistics-merge.js";
+import { isDeepStrictEqual } from "node:util";
 
 function serializedPosting(serialize, posting) {
   const value = serialize(posting);
@@ -31,7 +32,7 @@ export async function saveOrderPostingLogistics({ transaction, shopId, posting, 
       storeId, postingNumber, posting.order_id || posting.order_number || "",
       posting.status || "", posting.substatus || posting.logistics_status || "", incomingJson
     ]);
-    const [rows] = await connection.query(`SELECT raw_json FROM ozon_orders_raw
+    const [rows] = await connection.query(`SELECT raw_json, order_id, status, substatus FROM ozon_orders_raw
       WHERE store_id = ? AND posting_number = ? FOR UPDATE`, [storeId, postingNumber]);
     if (!rows[0]) throw new Error("Order logistics row disappeared while locked");
     // Invalid stored JSON must fail the transaction, not silently erase evidence.
@@ -43,11 +44,25 @@ export async function saveOrderPostingLogistics({ transaction, shopId, posting, 
       ? mergeOrderPostingLogistics(supplement, previous)
       : mergeOrderPostingLogistics(previous, posting);
     if (String(merged?.posting_number || "").trim() !== postingNumber) throw new Error("Merged logistics belongs to a different posting");
-    await connection.execute(`UPDATE ozon_orders_raw SET order_id = ?, status = ?, substatus = ?,
-      raw_json = ?, fetched_at = CURRENT_TIMESTAMP WHERE store_id = ? AND posting_number = ?`, [
-      merged.order_id || merged.order_number || "", merged.status || "",
-      merged.substatus || merged.logistics_status || "", serializedPosting(serialize, merged), storeId, postingNumber
-    ]);
+    const orderId = merged.order_id || merged.order_number || "";
+    const status = merged.status || "";
+    const substatus = merged.substatus || merged.logistics_status || "";
+    // Validate the serializer even for unchanged facts. Keep every successful
+    // observation fresh, but do not mark a large TEXT column as written merely
+    // because it was observed again. Comparison stays under the existing lock.
+    const mergedJson = serializedPosting(serialize, merged);
+    if (String(rows[0].order_id || "") === String(orderId)
+      && String(rows[0].status || "") === String(status)
+      && String(rows[0].substatus || "") === String(substatus)
+      && isDeepStrictEqual(previous, JSON.parse(mergedJson))) {
+      await connection.execute(`UPDATE ozon_orders_raw SET fetched_at = CURRENT_TIMESTAMP
+        WHERE store_id = ? AND posting_number = ?`, [storeId, postingNumber]);
+    } else {
+      await connection.execute(`UPDATE ozon_orders_raw SET order_id = ?, status = ?, substatus = ?,
+        raw_json = ?, fetched_at = CURRENT_TIMESTAMP WHERE store_id = ? AND posting_number = ?`, [
+        orderId, status, substatus, mergedJson, storeId, postingNumber
+      ]);
+    }
     return merged;
   });
 }

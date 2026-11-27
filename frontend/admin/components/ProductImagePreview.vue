@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getAuthToken, currentApiCacheScope } from "../utils/api";
-import {loadProductThumbnail,productThumbnailUrl} from "../utils/product-thumbnail-cache.js";
+import {loadProductThumbnail,productThumbnailUrl,originalProductImageUrl} from "../utils/product-thumbnail-cache.js";
 
 const props = defineProps({
   src: { type: String, default: "" },
@@ -23,6 +23,7 @@ function revokeThumbnail(){if(thumbnailSrc.value)URL.revokeObjectURL(thumbnailSr
 function scopeChanged(){scope.value=currentApiCacheScope();revokeThumbnail();thumbnailError.value='';}
 function imageChanged(event){if(productThumbnailUrl(primarySrc.value)?.split('?')[0]===`/api/products/${Number(event.detail?.productId)}/image`)retry.value++;}
 const useProxyFallback = ref(false);
+const useOriginalThumbnailFallback = ref(false);
 const fallbackIndex = ref(0);
 const imageReady = ref(true);
 let imageDelayTimer = null;
@@ -119,6 +120,7 @@ watch(
   () => JSON.stringify([firstImageValue(props.src),(Array.isArray(props.previewList)?props.previewList:[]).map(firstImageValue),props.loadDelay,props.proxyRemote,scope.value]),
   () => {
     retry.value=0;
+    useOriginalThumbnailFallback.value = false;
     useProxyFallback.value = false;
     fallbackIndex.value = 0;
     scheduleImageLoad();
@@ -139,16 +141,19 @@ onBeforeUnmount(() => {
 const previewSrcList = computed(() => {
   scope.value;
   const list = Array.isArray(props.previewList) && props.previewList.length ? props.previewList : [props.src];
-  return list.map((item) => normalizeImageSrc(item, { forceProxy: props.proxyRemote || useProxyFallback.value })).filter(Boolean);
+  return list.map((item) => normalizeImageSrc(originalProductImageUrl(firstImageValue(item)), { forceProxy: props.proxyRemote || useProxyFallback.value })).filter(Boolean);
 });
 const primarySrc = computed(() => {scope.value;return normalizeImageSrc(props.src, { forceProxy: props.proxyRemote || useProxyFallback.value });});
-const managedUrl=computed(()=>productThumbnailUrl(primarySrc.value));
+const managedUrl=computed(()=>useOriginalThumbnailFallback.value ? '' : productThumbnailUrl(primarySrc.value));
 watch(()=>[managedUrl.value,visible.value,imageReady.value,scope.value,retry.value],async([url,shown,ready,current,attempt])=>{
  const version=++thumbnailVersion;if(!url||!shown||!ready){revokeThumbnail();thumbnailError.value="";return;}
  // Preview-array identity changes never reset this request or the decoded image.
  revokeThumbnail();thumbnailError.value="";
  try{const blob=await loadProductThumbnail(url,{force:attempt>0});if(version!==thumbnailVersion||current!==currentApiCacheScope())return;thumbnailSrc.value=URL.createObjectURL(blob);}
- catch(error){if(version===thumbnailVersion&&error.name!=="AbortError")thumbnailError.value=error.message||"图片加载失败";}
+ catch(error){if(version===thumbnailVersion&&current===currentApiCacheScope()&&error.name!=="AbortError"){
+  if(url.startsWith('/api/image-thumbnail?'))useOriginalThumbnailFallback.value=true;
+  else thumbnailError.value=error.message||"图片加载失败";
+ }}
 },{immediate:true});
 function retryThumbnail(){retry.value++;}
 const displaySrc = computed(() => {

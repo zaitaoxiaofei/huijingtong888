@@ -123,6 +123,7 @@ test('frontend publishes metrics before requesting optional ranking/stock panels
   const calls = [], ref = value => ({ value });
   const context = {
     dashboardRequestSeq: 0, selectedDate: ref('2026-10-30'), hasDashboardLoaded: ref(false),
+    dashboardReads: { canRead: () => true }, dashboardRevision: '', getAuthToken: () => 'fixture-session',
     dashboardSnapshotRefreshAttempts: 0, loading: ref(false), refreshing: ref(false), snapshotBuilding: ref(false),
     currentApiCacheScope: () => 'tenant2', readDashboardSessionCache: () => null,
     getDashboardWithRetry: url => { calls.push(url); return metrics.promise; },
@@ -143,6 +144,7 @@ test('slow ranking and FBP opportunities do not keep shop capacity loading', asy
   const limits = deferred(), ranking = deferred(), opportunities = deferred();
   const context = {
     overviewRequestSeq: 0, shopLimitsRefreshTimer: undefined, clearTimeout() {}, setTimeout,
+    dashboardReads: { canRead: () => true }, getAuthToken: () => 'fixture-session',
     selectedDate: { value: '2026-10-30' }, shopLimitsLoading: { value: false },
     shopProductLimits: { value: [] }, dashboard: { value: { summary: {} } }, currentApiCacheScope: () => 'tenant2',
     getDashboardWithRetry: url => url.includes('limits') ? limits.promise : opportunities.promise,
@@ -161,6 +163,7 @@ test('WB capacity census polls independently and stops on completion or changed 
     let scope = 'tenant2', calls = 0, scheduled;
     const context = {
       overviewRequestSeq: 0, shopLimitsRefreshTimer: undefined, clearTimeout() {},
+      dashboardReads: { canRead: () => true }, getAuthToken: () => 'fixture-session',
       setTimeout(callback) { scheduled = callback; return 1; },
       selectedDate: { value: '2026-10-30' }, shopLimitsLoading: { value: false },
       shopProductLimits: { value: [] }, dashboard: { value: { summary: {} } }, currentApiCacheScope: () => scope,

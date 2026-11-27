@@ -130,6 +130,7 @@ import {
 import { systemInfo } from "./server/maintenance.js";
 import { globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
 import * as systemNotificationServices from "./services/system-notifications.js";
+import { sendPublicImageThumbnail } from "./server/routes/imageThumbnail.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool, withMysqlTransaction } from "./mysql-pool.js";
 import { createEnterpriseMessagesService } from "./services/enterprise-messages.js";
@@ -2291,6 +2292,10 @@ const server = http.createServer(async (req, res) => {
     });
 
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === "GET" && url.pathname === "/api/image-thumbnail") {
+      req._sensitiveResponse = true;
+      res.setHeader("Cache-Control", "no-store");
+    }
     await protectMediaRequest(req,res);
     const parts = url.pathname.split("/").filter(Boolean);
     if (req.method === "GET" && url.pathname === "/api/ready") {
@@ -2464,6 +2469,10 @@ const server = http.createServer(async (req, res) => {
       }
       const subscription = subscriptionAccessDecision(session, parts, req.method);
       if (!subscription.allowed) return json(res, { error: subscription.error, code: subscription.code }, subscription.status);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/image-thumbnail") {
+      return await sendPublicImageThumbnail(req, res, url);
     }
 
     markRequestTiming(req, "before_rest");

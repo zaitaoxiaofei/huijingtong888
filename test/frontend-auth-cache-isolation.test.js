@@ -116,6 +116,21 @@ function rejectsStale(promise) {
   return assert.rejects(promise, (error) => error.name === "AbortError");
 }
 
+test("only a successful current-session auth verification wakes access-blocked displays", async () => {
+  const h = createHarness(); let verified = 0;
+  h.window.addEventListener("erp:auth-verified", () => verified++);
+  const success = h.apiClient.get("/api/auth/me", { noCache: true });
+  h.respond(0, { personId: 1 }); await success;
+  assert.equal(verified, 0, "the auth store applies the response before displays resume");
+  await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(verified, 1);
+  const denied = h.apiClient.get("/api/auth/me", { noCache: true, authExpiredRedirect: false });
+  h.respond(1, { error: "forbidden" }, 403); await assert.rejects(denied, error => error.status === 403);
+  await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(verified, 1);
+  const stale = h.apiClient.get("/api/auth/me", { noCache: true });
+  h.respond(2, { personId: 1 }); await stale; h.setUser({ tenantId: 2, personId: 2 });
+  await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(verified, 1);
+});
+
 test("cached and persisted GET results cannot cross tokens even while cached user identity remains stale", async () => {
   const h = createHarness();
   h.setAuthToken("session-token-A-private");

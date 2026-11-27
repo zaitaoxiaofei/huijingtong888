@@ -1,4 +1,5 @@
 import {PROCUREMENT_TRANSIT_WARNING_HOURS,PROCUREMENT_REQUEST_WARNING_HOURS} from '../shared/inventory-procurement-stage.js';
+import { createHash } from "node:crypto";
 import { resolveInventoryTenantScope, inventoryTenantSql } from './inventory-tenant-scope.js';
 import { authorizeBusinessTaskSession } from './business-task-tenant.js';
 import { effectiveTenantMembershipRole } from './tenant-membership-authority.js';
@@ -80,28 +81,29 @@ export async function listSystemNotifications(query = {}, session = {}) {
     params.push(status);
   }
   const whereSql = where.join(" AND ");
-  const [rows, totals] = await Promise.all([
-    mysqlQuery(`
+  const totals = await mysqlQuery(`
+    SELECT COUNT(*) total, SUM(status = 'unread') unread, SUM(status = 'resolved') resolved,
+      MAX(id) latest_id, MAX(created_at) created_at, MAX(read_at) read_at, MAX(resolved_at) resolved_at
+    FROM system_notifications sn
+    WHERE recipient_person_id = ? AND ${inventoryTenantSql(scope, "sn")}
+  `, [recipientId]);
+  const stats = totals[0] || {};
+  const revision = createHash("sha256").update(JSON.stringify([scope.id, recipientId, status, page, pageSize,
+    stats.total, stats.unread, stats.resolved, stats.latest_id, stats.created_at, stats.read_at, stats.resolved_at])).digest("hex");
+  const summary = { page, pageSize, total: Number(stats.total || 0), unread: Number(stats.unread || 0), revision };
+  if (["1", "true"].includes(String(query.summaryOnly || query.summary_only || ""))) {
+    return { ...summary, summary_only: true };
+  }
+  if (String(query.sinceRevision || query.since_revision || "") === revision) return { ...summary, unchanged: true };
+  const rows = await mysqlQuery(`
       SELECT id, notification_type, title, content, severity, route, entity_type, entity_id,
         status, created_at, read_at, resolved_at
       FROM system_notifications sn
       WHERE ${whereSql}
       ORDER BY CASE status WHEN 'unread' THEN 0 WHEN 'read' THEN 1 ELSE 2 END, created_at DESC, id DESC
       LIMIT ? OFFSET ?
-    `, [...params, pageSize, (page - 1) * pageSize]),
-    mysqlQuery(`
-      SELECT COUNT(*) total, SUM(status = 'unread') unread
-      FROM system_notifications sn
-      WHERE recipient_person_id = ? AND ${inventoryTenantSql(scope, "sn")}
-    `, [recipientId])
-  ]);
-  return {
-    rows,
-    page,
-    pageSize,
-    total: Number(totals[0]?.total || 0),
-    unread: Number(totals[0]?.unread || 0)
-  };
+    `, [...params, pageSize, (page - 1) * pageSize]);
+  return { rows, ...summary };
 }
 
 export async function markSystemNotificationRead(notificationId, session = {}) {

@@ -248,6 +248,11 @@ async function request(url, options = {}) {
   }
 
   endApiPerf(trace, { status: response.status });
+  if (String(url).split("?")[0] === "/api/auth/me") {
+    window.setTimeout(() => {
+      if (scope === currentApiCacheScope()) window.dispatchEvent(new CustomEvent("erp:auth-verified"));
+    }, 0);
+  }
   return data;
 }
 
