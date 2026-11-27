@@ -1,3 +1,5 @@
+import { getOrderProfitDailyFx } from './order-profit-daily-fx.js';
+import { pullWbSettlementPage, summarizeWbSettlement } from './wb-order-settlement.js';
 import { findWbCard } from './wb-find-card.js';
 import {createWbStockManagement} from './wb-stock-management.js';
 import {createWbProductWorkspace,saveWbProductCard,wbProductView} from './wb-product-workspace.js';
@@ -417,13 +419,24 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
         AND related_order_item_id IN (SELECT id FROM order_items WHERE order_id=?)`,
     [positiveId(tenantId), order.shop_id, order.id]);
     const hasCost = Number(cost?.posted_movements) > 0 && Number(cost?.unpriced_movements) === 0;
+    const inventoryCost = hasCost ? Number(cost.net_cost) : null;
+    const lines = await query(`SELECT report_id,row_id,payload_json FROM wb_order_settlement_lines
+      WHERE tenant_id=? AND shop_id=? AND wb_order_id=? ORDER BY report_id,row_id`,
+    [positiveId(tenantId), order.shop_id, order.wb_order_id]);
     return {
       order_id: order.id,
       wb_order_id: order.wb_order_id,
       revenue_cny: wbOrderAmountCny(parse(order.raw_json)),
-      posted_inventory_cost_cny: hasCost ? Number(cost.net_cost) : null
+      posted_inventory_cost_cny: inventoryCost,
+      settlement: await summarizeWbSettlement(lines, inventoryCost, day => getOrderProfitDailyFx({ query }, day))
     };
   }
+  async function syncOrderSettlement(tenantId, body) {
+    const [order] = await ownedOrders(tenantId, [body.order_id]);
+    const a = await account(tenantId, order.shop_id);
+    return pullWbSettlementPage({ account: a, request, transaction, body });
+  }
+
   async function prepare(tenantId, body) {
     const rows = await ownedOrders(tenantId, body.order_ids);
     if (new Set(rows.map(row => Number(row.shop_id))).size !== 1) throw fail('WB 供货批次必须来自同一店铺，请按店铺分别备货。');
@@ -435,7 +448,8 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     const unbound = await query(`SELECT o.id FROM orders o
       LEFT JOIN order_items oi ON oi.order_id=o.id
       LEFT JOIN sku_mappings sm ON sm.id=oi.sku_mapping_id AND sm.tenant_id=?
-        AND sm.shop_id=o.shop_id AND sm.ozon_sku=oi.ozon_sku AND sm.active=1
+        AND sm.shop_id=o.shop_id AND sm.active=1
+        AND sm.ozon_sku IN (oi.ozon_sku, CONCAT(oi.ozon_sku, ':retired:', sm.id))
       WHERE o.id IN (${orderIds.map(()=>'?').join(',')}) AND sm.id IS NULL`, [positiveId(tenantId), ...orderIds]);
     if (unbound.length) {
       throw fail('部分 WB 订单缺少商品明细或未绑定库存，请在订单页核对商品并完成库存绑定后重试。', 409);
@@ -607,6 +621,62 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       product_id: body.product_id, name: body.name, length_cm: body.length_cm,
       width_cm: body.width_cm, height_cm: body.height_cm, package_weight_g: body.package_weight_g
     };
+    if (!create && body.expected_product_id && positiveId(body.expected_product_id) !== positiveId(body.product_id)) {
+      const productId = positiveId(body.product_id);
+      const expected = positiveId(body.expected_product_id);
+      const a = await account(tenantId, order.shop_id);
+      const scope = await resolveInventoryTenantScope(a.tenant_id, query);
+      const result = await transaction(async connection => {
+        const [[product]] = await connection.execute(
+          `SELECT id FROM products WHERE id=? AND active=1 AND ${inventoryTenantSql(scope)} FOR UPDATE`, [productId]);
+        if (!product) throw fail('所选库存商品已停用或不属于当前企业。', 404);
+        const [[mapping]] = await connection.execute(
+          'SELECT id,product_id,active FROM sku_mappings WHERE tenant_id=? AND shop_id=? AND ozon_sku=? FOR UPDATE',
+          [a.tenant_id, a.shop_id, sku]);
+        const [[item]] = await connection.execute(`SELECT i.id, o.status, w.handover_at, sm.product_id,
+          b.id AS outbound_id FROM order_items i JOIN orders o ON o.id=i.order_id
+          JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+          JOIN sku_mappings sm ON sm.id=i.sku_mapping_id AND sm.shop_id=o.shop_id AND sm.tenant_id=w.tenant_id
+          LEFT JOIN outbound_records b ON b.order_item_id=i.id AND b.shop_id=o.shop_id
+          WHERE o.id=? AND w.tenant_id=? AND w.shop_id=? AND i.ozon_sku=? FOR UPDATE`,
+        [order.id, a.tenant_id, a.shop_id, sku]);
+        if (!item || !mapping?.active || Number(item.product_id) !== expected ||
+          (Number(mapping.product_id) !== expected && Number(mapping.product_id) !== productId)) {
+          throw fail('WB SKU 当前绑定已变化，请刷新订单后重新选择库存。', 409);
+        }
+        if (item.outbound_id && !item.handover_at && ['awaiting_packaging','awaiting_deliver'].includes(item.status)) {
+          const [ledger] = await connection.execute(`SELECT product_id,SUM(quantity_delta) AS net_quantity
+            FROM inventory_movements WHERE tenant_id=? AND shop_id=? AND related_order_item_id=?
+            AND stock_location='LOCAL' AND status='posted'
+            AND source_type IN ('order_outbound','order_outbound_adjustment') GROUP BY product_id`,
+          [a.tenant_id,a.shop_id,item.id]);
+          if (!ledger.length || ledger.some(line => Number(line.net_quantity) !== 0)) {
+            throw fail('该订单还有未冲正的本地库存占用，请先核对并冲正原库存流水，再修改绑定。', 409);
+          }
+        }
+        let mappingId = mapping.id;
+        if (Number(mapping.product_id) !== productId) {
+          await connection.execute('UPDATE sku_mappings SET ozon_sku=? WHERE id=?',
+            [`${sku}:retired:${mapping.id}`, mapping.id]);
+          const [inserted] = await connection.execute(`INSERT INTO sku_mappings
+            (tenant_id,shop_id,product_id,ozon_sku,offer_id,commission_low,commission_high)
+            VALUES (?,?,?,?,?,0,0)`, [a.tenant_id,a.shop_id,productId,sku,String(raw.article || '')]);
+          mappingId = inserted.insertId;
+          await connection.execute(`UPDATE order_items i JOIN orders o ON o.id=i.order_id
+            JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+            LEFT JOIN outbound_records b ON b.order_item_id=i.id AND b.shop_id=o.shop_id
+            SET i.sku_mapping_id=? WHERE w.tenant_id=? AND w.shop_id=? AND i.ozon_sku=?
+            AND (i.sku_mapping_id=? OR i.sku_mapping_id IS NULL) AND b.id IS NULL
+            AND o.status IN ('awaiting_packaging','awaiting_deliver','delivering')`,
+          [mappingId,a.tenant_id,a.shop_id,sku,mapping.id]);
+        }
+        await connection.execute('UPDATE order_items SET sku_mapping_id=? WHERE id=?', [mappingId, item.id]);
+        if (!item.outbound_id) await reconcileInventory(order.id, tenantId, connection, { explicitBinding: true });
+        return { ok:true, product_id:productId };
+      });
+      invalidate();
+      return result;
+    }
     const attach = async connection => {
       const [rows] = await connection.execute(`SELECT i.id,i.sku_mapping_id,m.id AS mapping_id,p.id AS product_id,b.product_id AS outbound_product_id
         FROM orders o JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
@@ -621,7 +691,18 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
         throw fail('订单已有不同库存关联或出库流水，请先核对，无法覆盖原绑定。',409);
       }
       await connection.execute('UPDATE order_items SET sku_mapping_id=? WHERE id=?', [link.mapping_id, link.id]);
-      await reconcileInventory(order.id, tenantId, connection);
+      await reconcileInventory(order.id, tenantId, connection, { explicitBinding: true });
+      // The selected order follows manual accounting; sibling orders only inherit the link.
+      await connection.execute(`UPDATE order_items i
+        JOIN orders o ON o.id=i.order_id
+        JOIN wb_order_details w ON w.order_id=o.id AND w.shop_id=o.shop_id
+        JOIN shops s ON s.id=o.shop_id AND s.tenant_id=w.tenant_id AND s.platform='wb'
+        LEFT JOIN outbound_records b ON b.order_item_id=i.id AND b.shop_id=o.shop_id
+        SET i.sku_mapping_id=?
+        WHERE w.tenant_id=? AND w.shop_id=? AND i.ozon_sku=? AND i.sku_mapping_id IS NULL
+          AND o.status IN ('awaiting_packaging','awaiting_deliver','delivering')
+          AND (b.id IS NULL OR b.product_id=?)`,
+      [link.mapping_id, tenantId, order.shop_id, sku, link.product_id]);
     };
     const result = create
       ? await workspace.createProductInventory(tenantId, target, attach)
@@ -632,7 +713,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
   const stockManagement=createWbStockManagement({account,query,request});
   return { ...stockManagement, cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
-    syncOrders, syncOrderMedia, orderFinancialEvidence, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
+    syncOrders, syncOrderMedia, orderFinancialEvidence, syncOrderSettlement, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
 export async function wbPlatform(session, permission = 'operations', signal) {
