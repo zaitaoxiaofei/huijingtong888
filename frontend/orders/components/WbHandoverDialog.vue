@@ -6,10 +6,13 @@ const props=defineProps({row:{type:Object,required:true}}),emit=defineEmits(['cl
 const loading=ref(false),context=ref(null),amount=ref(1),busy=ref(false);
 async function load(){const scope=currentApiCacheScope();loading.value=true;try{const value=await apiClient.get(`/api/wb/supply?order_id=${props.row.id}`,{noCache:true});if(scope===currentApiCacheScope())context.value=value;}catch(error){ElMessage.error(error.message);}finally{loading.value=false;}}
 async function act(action){
-  if(busy.value)return;
+  if(busy.value || !context.value)return;
+  const scope=currentApiCacheScope();
   if(action==='handover'){try{await ElMessageBox.confirm('请确认本批次所有订单已装箱，订单面单及运输箱标签已贴好。提交后无法继续向此批次加单；实际揽收以后续 WB 状态为准。','确认交接',{type:'warning'});}catch{return;}}
+  if(scope!==currentApiCacheScope()||busy.value)return;
   busy.value=true;
   try{const result=await apiClient.post('/api/wb/supply/action',{order_id:props.row.id,action,amount:amount.value});
+    if(scope!==currentApiCacheScope())return;
     if(action==='box-labels'||action==='supply-label'){
       const files=(result.stickers||[result]).map(item=>item.file).filter(Boolean);
       if(!files.length)throw new Error('WB 未返回可打印的标签，请刷新后核对。');

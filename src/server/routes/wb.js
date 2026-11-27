@@ -20,6 +20,7 @@ export function createWbRoutes({ readJson, platform = wbPlatform, authorize = au
   register('GET', 'shops', 'shops', 'orders.read');
   register('GET', 'pricing-commissions', 'pricingCommissions', 'orders.read');
   register('GET', 'inventory-usage', 'inventoryUsage', 'inventory.read');
+  register('GET', 'orders/financial-evidence', 'orderFinancialEvidence', 'orders.read');
   register('GET', 'supply', 'supply', 'orders.read');
   for (const [path, action] of [['shops/save','saveShop'],['check','check'],['warehouses/save','saveWarehouse']]) register('POST', path, action, 'enterprise.admin');
   register('POST','orders/sync-media','syncOrderMedia','orders.manage');

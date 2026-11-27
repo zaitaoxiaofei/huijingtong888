@@ -23540,7 +23540,7 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
       JOIN orders o ON o.id = oi.order_id
       JOIN shops tenant_shop ON tenant_shop.id = o.shop_id AND ${inventoryTenantSql(scope, 'tenant_shop')}
       JOIN sku_mappings sm ON (
-        (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+        (sm.id = oi.sku_mapping_id OR (COALESCE(tenant_shop.platform, 'ozon') <> 'wb' AND sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
         AND sm.active = 1 AND sm.shop_id = o.shop_id AND ${inventoryTenantSql(scope, 'sm')}
       )
       JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${inventoryTenantSql(scope, 'p')}
@@ -23569,12 +23569,12 @@ async function orderProcurementCandidateRowsMysql(orderId, connection = null, op
       JOIN orders o ON o.id = oi.order_id
       JOIN shops tenant_shop ON tenant_shop.id = o.shop_id AND ${inventoryTenantSql(scope, 'tenant_shop')}
       JOIN sku_mappings sm ON (
-        (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+        (sm.id = oi.sku_mapping_id OR (COALESCE(tenant_shop.platform, 'ozon') <> 'wb' AND sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
         AND sm.active = 1 AND sm.shop_id = o.shop_id AND ${inventoryTenantSql(scope, 'sm')}
       )
       JOIN source_products sp ON sp.product_id = sm.product_id
       JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${inventoryTenantSql(scope, 'p')}
-      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id
+      LEFT JOIN sku_inventory_recipes recipe ON COALESCE(tenant_shop.platform, 'ozon') <> 'wb' AND recipe.shop_id = o.shop_id
         AND recipe.ozon_sku = oi.ozon_sku AND recipe.mode = 'combo' AND recipe.active = 1
       LEFT JOIN sku_inventory_recipe_items recipe_item ON recipe_item.recipe_id = recipe.id
       LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL AND ${inventoryTenantSql(scope, 'pc')}
@@ -23715,8 +23715,9 @@ async function orderProcurementMissingItemsMysql(orderId, tenantId = "admin") {
       COALESCE(NULLIF(oi.ozon_image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, '')) AS image_url
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
+    JOIN shops tenant_shop ON tenant_shop.id = o.shop_id AND ${inventoryTenantSql(scope, 'tenant_shop')}
     LEFT JOIN sku_mappings sm ON (
-      (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+      (sm.id = oi.sku_mapping_id OR (COALESCE(tenant_shop.platform, 'ozon') <> 'wb' AND sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
       AND sm.active = 1 AND sm.shop_id = o.shop_id AND ${inventoryTenantSql(scope, 'sm')}
     )
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${inventoryTenantSql(scope, 'p')}

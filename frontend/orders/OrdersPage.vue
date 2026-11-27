@@ -1,5 +1,4 @@
 ﻿<script setup>
-import { WB_REMOTE_WRITES_ENABLED } from "../../src/shared/wb-capabilities.js";
 import { wbOrderState, wbOrderCapabilities } from "../../src/shared/wb-order-state.js";
 import {orderHasDispatchHold} from "../../src/shared/order-dispatch-hold.js";
 import {orderSelectionSummary,orderPrintPlan,currentPagePreparePlan} from "./utils/order-print-selection.js";
@@ -716,9 +715,10 @@ function rowRegistrationHint(row) {
 function rowAvailableActions(row) {
   if (row.platform === 'wb') {
     const caps = wbOrderCapabilities(row);
-    if(!WB_REMOTE_WRITES_ENABLED)return {...caps,prepare:false,handover:false,showPrepare:false,showPrint:caps.print,showSplitPrepare:false,showPurchase:false,profit:false};
-    return { ...caps, showPrepare: caps.prepare && !row.inventory_refresh_pending, showPrint: caps.print,
-      showSplitPrepare: false, showPurchase: ['awaiting_packaging','awaiting_deliver'].includes(row.status), profit: false };
+    const prepare = caps.prepare && row.availableActions?.prepare === true && !row.inventory_refresh_pending;
+    const handover = caps.handover && row.availableActions?.handover === true;
+    return { ...caps, prepare, handover, showPrepare: prepare, showPrint: caps.print,
+      showSplitPrepare: false, showPurchase: !row.inventory_refresh_pending && ['awaiting_packaging','awaiting_deliver'].includes(row.status), profit: false };
   }
   const displayStateKey = rowDisplayStateKey(row);
   const statusText = [
@@ -1951,6 +1951,14 @@ async function handleRecalculate(orderId) {
 }
 
 async function handlePrepareOrder(orderId) {
+  const row = tableRows.value.find(item => Number(item.id) === Number(orderId));
+  if (row?.platform === 'wb') {
+    const scope = currentApiCacheScope();
+    try {
+      await ElMessageBox.confirm(`确认将 WB 订单 ${row.posting_number} 提交备货？`, 'WB 备货', { type: 'warning' });
+    } catch { return; }
+    if (scope !== currentApiCacheScope()) return;
+  }
   await prepareSingleOrder(orderId);
   orderDetailCache.delete(Number(orderId));
 }
@@ -3010,6 +3018,7 @@ onBeforeUnmount(() => {
     <div class="orders-table-section">
       <OrdersTable
         :can-sync-order-images="canSyncOrderImages"
+        :can-prepare="canPreparePage"
         :can-update-inventory="canUpdateInventory"
         :can-receive-inventory="canReceiveInventory"
         :can-remind-procurement="canRemindProcurement"

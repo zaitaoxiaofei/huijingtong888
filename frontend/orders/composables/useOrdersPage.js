@@ -791,6 +791,11 @@ export function useOrdersPage() {
         status: incoming.status || "awaiting_deliver",
         tracking_stage: incoming.tracking_stage || incoming.status || "awaiting_deliver",
         logistics_status: incoming.logistics_status || incoming.tracking_stage || incoming.status || "awaiting_deliver",
+        ...(row.platform === 'wb' ? {
+          wb_supplier_status: incoming.wb_supplier_status ?? row.wb_supplier_status,
+          wb_status: incoming.wb_status ?? row.wb_status,
+          wb_supply_id: incoming.wb_supply_id ?? row.wb_supply_id
+        } : {}),
         ozon_available_actions: incoming.ozon_available_actions ?? row.ozon_available_actions ?? [],
         tracking_number: incoming.tracking_number || row?.tracking_number || row?.posting_number || row?.order_number || ""
       };
@@ -917,6 +922,11 @@ export function useOrdersPage() {
     }
     try {
       const result = await bulkPrepareOrders(ids);
+      if (result?.supply_id) {
+        await loadOrders({ forceRefresh: true, includeCounts: true });
+        ElMessage.success(`WB 已提交备货，供货批次 ${result.supply_id}`);
+        return result;
+      }
       applyPreparedOrdersLocally(ids, result);
       const alreadyShippedCount = Number(result?.already_shipped_count || 0);
       if (alreadyShippedCount > 0) {

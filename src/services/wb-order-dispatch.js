@@ -1,6 +1,5 @@
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
-import { WB_REMOTE_WRITES_ENABLED } from '../shared/wb-capabilities.js';
-import { wbPlatform } from './wb-platform.js';
+import { wbFulfillmentEnabled, wbPlatform } from './wb-platform.js';
 import { wbOrderCapabilities, wbOrderAmountCny } from '../shared/wb-order-state.js';
 
 export async function enrichWbOrders(result) {
@@ -19,7 +18,7 @@ export async function enrichWbOrders(result) {
     if (!detail) continue;
     const raw = typeof detail.raw_json === 'string' ? JSON.parse(detail.raw_json) : detail.raw_json;
     Object.assign(row, { wb_supplier_status: detail.wb_supplier_status, wb_status: detail.wb_status, wb_supply_id: detail.wb_supply_id,
-      availableActions: { ...wbOrderCapabilities(detail), ...(!WB_REMOTE_WRITES_ENABLED ? {prepare:false,handover:false}:{}), profit: false }, fulfillment_type_key: 'fbs', fulfillment_type_label: 'FBS',
+      availableActions: { ...wbOrderCapabilities(detail), ...(!wbFulfillmentEnabled() ? {prepare:false,handover:false}:{}), profit: false }, fulfillment_type_key: 'fbs', fulfillment_type_label: 'FBS',
       warehouse_name: raw?.warehouseId ? `WB 卖家仓 ${raw.warehouseId}` : '', sale_currency: raw?.currencyCode === 643 ? 'RUB' : '',
       wb_amount: Number(raw?.price || 0) / 100, wb_amount_cny: wbOrderAmountCny(raw) });
   }
@@ -43,14 +42,9 @@ export async function dispatchPrepare(body, userId, tenantId, options, ozonPrepa
   options = { ...options, session };
   const groups = await partitionWbOrders(body.order_ids, options.session);
   if (!groups.wb.length) return ozonPrepare(body, userId, tenantId, options);
-  // Validate the complete selection before submitting any platform operation.
+  if (groups.ozon.length) throw Object.assign(new Error('WB 和 Ozon 订单请分开备货。'), { statusCode: 400 });
   const wb = await wbPlatform(options.session, 'packing');
-  const rows = await wb.ownedOrders(options.session.tenant.id, groups.wb);
-  const shops = [...new Set(rows.map(row=>Number(row.shop_id)))];
-  const results = [];
-  for (const shopId of shops) results.push(await wb.prepare(options.session.tenant.id, { order_ids: rows.filter(row=>Number(row.shop_id)===shopId).map(row=>Number(row.id)) }));
-  if (groups.ozon.length) results.push(await ozonPrepare({ ...body, order_ids: groups.ozon }, userId, tenantId, options));
-  return { ok: true, count: results.reduce((sum,row)=>sum+Number(row.count||0),0), order_ids: results.flatMap(row=>row.order_ids||[]), updated_orders: results.flatMap(row=>row.updated_orders||[]) };
+  return wb.prepare(options.session.tenant.id, { order_ids: groups.wb });
 }
 
 export async function dispatchLabels(body, userId, tenantId, options, ozonLabels) {

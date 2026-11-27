@@ -13,10 +13,14 @@ import { resolveInventoryTenantScope, inventoryTenantSql } from "./inventory-ten
 import { WB_REMOTE_WRITES_ENABLED, WB_REMOTE_WRITE_ACTIONS } from '../shared/wb-capabilities.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { wbRequest } from './wb-client.js';
-import { wbOrderState, wbOrderAmountCny } from '../shared/wb-order-state.js';
+import { wbOrderState, wbOrderAmountCny, wbOrderCapabilities } from '../shared/wb-order-state.js';
 import { assertTenantQuotaAvailable } from './tenant-quotas.js';
 
 const pricingCommissionCache = new Map();
+const fulfillmentActions = new Set(['prepare', 'supplyAction']);
+export function wbFulfillmentEnabled(env = process.env) {
+  return env.WB_ORDER_FULFILLMENT_ENABLED === 'true';
+}
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const positiveId = value => {
@@ -402,15 +406,56 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
         error: image ? null : 'WB 商品卡暂无可用主图，请在 WB 商品卡核对图片后重试。' }]
     };
   }
+  async function orderFinancialEvidence(tenantId, body) {
+    const [order] = await ownedOrders(tenantId, [body.order_id]);
+    const [cost] = await query(`SELECT COUNT(*) AS posted_movements,
+      SUM(CASE WHEN unit_cost > 0 THEN 0 ELSE 1 END) AS unpriced_movements,
+      SUM(CASE WHEN quantity_delta < 0 THEN amount ELSE -amount END) AS net_cost
+      FROM inventory_movements
+      WHERE tenant_id=? AND shop_id=? AND stock_location='LOCAL' AND stock_location_source='wb_fbs'
+        AND status='posted' AND source_type IN ('order_outbound','order_outbound_adjustment')
+        AND related_order_item_id IN (SELECT id FROM order_items WHERE order_id=?)`,
+    [positiveId(tenantId), order.shop_id, order.id]);
+    const hasCost = Number(cost?.posted_movements) > 0 && Number(cost?.unpriced_movements) === 0;
+    return {
+      order_id: order.id,
+      wb_order_id: order.wb_order_id,
+      revenue_cny: wbOrderAmountCny(parse(order.raw_json)),
+      posted_inventory_cost_cny: hasCost ? Number(cost.net_cost) : null
+    };
+  }
   async function prepare(tenantId, body) {
     const rows = await ownedOrders(tenantId, body.order_ids);
     if (new Set(rows.map(row => Number(row.shop_id))).size !== 1) throw fail('WB 供货批次必须来自同一店铺，请按店铺分别备货。');
-    if (rows.some(row => row.supplier_status !== 'new')) throw fail('部分 WB 订单已备货或状态变化，请先同步核对。', 409);
-    const bindings = await query(`SELECT oi.id FROM order_items oi JOIN orders o ON o.id=oi.order_id LEFT JOIN sku_mappings sm ON sm.id=oi.sku_mapping_id AND sm.tenant_id=? AND sm.shop_id=o.shop_id AND sm.active=1 WHERE oi.order_id IN (${rows.map(()=>'?').join(',')}) AND sm.id IS NULL`, [positiveId(tenantId), ...rows.map(row=>row.id)]);
-    if (bindings.length) throw fail('部分 WB 商品尚未绑定本地库存，请在 WB 在线商品中完成规格与基础商品的绑定，再备货。', 409);
-    const cargos = new Set(rows.map(row => parse(row.raw_json).cargoType));
-    if (cargos.size !== 1) throw fail('WB 要求同一供货批次的货物类型一致，请分批备货。');
+    const canPrepare = (supplier, status) => wbOrderState(supplier, status).status === 'awaiting_packaging';
+    if (rows.some(row => row.supply_id || !canPrepare(row.supplier_status, row.wb_status))) {
+      throw fail('部分 WB 订单已加入供货批次或不再待备货，请先同步订单核对。', 409);
+    }
+    const orderIds = rows.map(row => row.id);
+    const unbound = await query(`SELECT o.id FROM orders o
+      LEFT JOIN order_items oi ON oi.order_id=o.id
+      LEFT JOIN sku_mappings sm ON sm.id=oi.sku_mapping_id AND sm.tenant_id=?
+        AND sm.shop_id=o.shop_id AND sm.ozon_sku=oi.ozon_sku AND sm.active=1
+      WHERE o.id IN (${orderIds.map(()=>'?').join(',')}) AND sm.id IS NULL`, [positiveId(tenantId), ...orderIds]);
+    if (unbound.length) {
+      throw fail('部分 WB 订单缺少商品明细或未绑定库存，请在订单页核对商品并完成库存绑定后重试。', 409);
+    }
+    const cargos = new Set(rows.map(row => parse(row.raw_json)?.cargoType));
+    if (cargos.size !== 1 || ![...cargos].every(value => Number.isSafeInteger(value) && value > 0)) {
+      throw fail('WB 货物类型缺失或不一致，请先同步订单，并按货物类型分批备货。', 409);
+    }
     const a = await account(tenantId, rows[0].shop_id);
+    const wbOrderIds = rows.map(row => positiveId(row.wb_order_id));
+    const { orders: latest } = await request(a, 'marketplace', '/api/v3/orders/status', {
+      method: 'POST', body: { orders: wbOrderIds }
+    });
+    const states = new Map((Array.isArray(latest) ? latest : []).map(row => [Number(row.id), row]));
+    if (wbOrderIds.some(id => {
+      const state = states.get(id);
+      return !state || !canPrepare(state.supplierStatus, state.wbStatus);
+    })) {
+      throw fail('WB 未确认全部订单仍待备货，请先同步订单核对最新状态，再重试。', 409);
+    }
     // A durable operation prevents blind retries after an ambiguous create response.
     const key = `prepare:${a.shop_id}:${createHash('sha256').update(rows.map(row=>row.id).sort((x,y)=>x-y).join('-')).digest('hex')}`;
     const [operation] = await query('SELECT * FROM wb_supplies WHERE tenant_id=? AND operation_key=?', [a.tenant_id, key]);
@@ -423,11 +468,16 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       supplyId = String(created.id);
       await query(`UPDATE wb_supplies SET supply_id=?,status='created' WHERE tenant_id=? AND operation_key=?`, [supplyId, a.tenant_id, key]);
     }
-    await request(a, 'marketplace', `/api/marketplace/v3/supplies/${encodeURIComponent(supplyId)}/orders`, { method: 'PATCH', body: { orders: rows.map(row => Number(row.wb_order_id)) } });
+    await request(a, 'marketplace', `/api/marketplace/v3/supplies/${encodeURIComponent(supplyId)}/orders`, { method: 'PATCH', body: { orders: wbOrderIds } });
     await query(`UPDATE wb_order_details SET supply_id=? WHERE tenant_id=? AND order_id IN (${rows.map(()=>'?').join(',')})`, [supplyId, a.tenant_id, ...rows.map(row=>row.id)]);
     await query(`UPDATE wb_supplies SET status='assembled' WHERE tenant_id=? AND operation_key=?`, [a.tenant_id, key]);
     await syncOrders(tenantId, { shop_id: a.shop_id });
-    return { ok: true, count: rows.length, order_ids: rows.map(row=>row.id), supply_id: supplyId };
+    const updatedOrders = await ownedOrders(tenantId, orderIds);
+    return { ok: true, count: rows.length, order_ids: orderIds, supply_id: supplyId, updated_orders: updatedOrders.map(row => {
+      const state = wbOrderState(row.supplier_status, row.wb_status);
+      return { id: row.id, status: state.status, logistics_status: state.stage, tracking_stage: state.status,
+        wb_supplier_status: row.supplier_status, wb_status: row.wb_status, wb_supply_id: row.supply_id };
+    }) };
   }
   async function stickers(tenantId, body) {
     const rows = await ownedOrders(tenantId, body.order_ids);
@@ -474,6 +524,14 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     const rows = await ownedOrders(tenantId, [body.order_id]), row = rows[0], a = await account(tenantId, row.shop_id);
     if (!row.supply_id) throw fail('请先备货并创建 WB 供货批次。', 409);
     const path = `/api/v3/supplies/${encodeURIComponent(row.supply_id)}`;
+    if (['boxes', 'handover'].includes(body.action)) {
+      const { handover } = wbOrderCapabilities({
+        wb_supplier_status: row.supplier_status, wb_status: row.wb_status, wb_supply_id: row.supply_id
+      });
+      if (!handover) throw fail('这笔 WB 订单当前不属于待交接状态，请先同步订单。', 409);
+      const details = await request(a, 'marketplace', path);
+      if (details?.done !== false) throw fail('WB 未确认批次仍可编辑，请刷新批次状态。', 409);
+    }
     if(['boxes','box-labels'].includes(body.action)&&a.handover_mode!=='shipping_units')throw fail('当前店铺未确认需要 WB 运输箱标签，请按实际揽收要求在企业店铺中配置。',409);
     if (body.action === 'boxes') {
       const amount = Number(body.amount);
@@ -488,7 +546,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       return request(a, 'marketplace', `${path}/trbx/stickers`, { method: 'POST', query: { type: 'png' }, body: { trbxIds: ids } });
     }
     if (body.action === 'handover') {
-      if(a.handover_mode==='unverified')throw fail('尚未核对揽收点交接要求，请在企业店铺选择已确认的交接方式后重试；不能把中国揽收点默认当作 WB 运输箱交货点。',409);
+      if(!['shipping_units','collection_point'].includes(a.handover_mode))throw fail('尚未核对揽收点交接要求，请在企业店铺选择已确认的交接方式后重试；不能把中国揽收点默认当作 WB 运输箱交货点。',409);
       if(a.handover_mode==='shipping_units'){const boxes=await request(a,'marketplace',`${path}/trbx`);if(!boxes.trbxes?.length)throw fail('该交接方式需要运输箱标签，请先创建运输箱并打印贴标。',409);}
       await request(a, 'marketplace', `${path}/deliver`, { method: 'PATCH' });
       await syncOrders(tenantId, { shop_id: a.shop_id });
@@ -574,7 +632,7 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
   const stockManagement=createWbStockManagement({account,query,request});
   return { ...stockManagement, cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
-    syncOrders, syncOrderMedia, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
+    syncOrders, syncOrderMedia, orderFinancialEvidence, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
 export async function wbPlatform(session, permission = 'operations', signal) {
@@ -599,7 +657,10 @@ export async function wbPlatform(session, permission = 'operations', signal) {
         &&(!current[0].checked_at||current[0].seller_id!==a.seller_id))throw fail('WB 授权已变更，操作已停止；请先检查店铺授权再继续。',409);
       const stockWrite=options?.method==='PUT'&&/^\/api\/v3\/stocks\/\d+$/.test(path);
       const publishingWrite=options?.method==='POST'&&['/content/v2/cards/upload','/content/v3/media/save','/content/v2/barcodes','/api/v2/upload/task','/api/v2/upload/task/size'].includes(path);
-      const beforeRequest=(publishingWrite||stockWrite)?async()=>{await authorize();const [latest]=await mysqlQuery("SELECT c.token,c.environment,c.seller_id,c.checked_at FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.shop_id=? AND s.status='active'",[session.tenant.id,a.shop_id]);if(!latest||latest.token!==current[0].token||latest.environment!==current[0].environment||latest.seller_id!==current[0].seller_id||(latest.environment==='production'&&!latest.checked_at))throw fail('WB 授权在等待期间已变化，未发送写入请求，请核对后继续。',409);}:undefined;
+      const fulfillmentWrite=['POST','PATCH'].includes(options?.method) &&
+        (/^\/api\/v3\/supplies(?:$|\/[^/]+\/(?:deliver|trbx)$)/.test(path) ||
+          /^\/api\/marketplace\/v3\/supplies\/[^/]+\/orders$/.test(path));
+      const beforeRequest=(publishingWrite||stockWrite||fulfillmentWrite)?async()=>{await authorize();const [latest]=await mysqlQuery("SELECT c.token,c.environment,c.seller_id,c.checked_at FROM wb_shop_credentials c JOIN shops s ON s.id=c.shop_id AND s.tenant_id=c.tenant_id WHERE c.tenant_id=? AND c.shop_id=? AND s.status='active'",[session.tenant.id,a.shop_id]);if(!latest||latest.token!==current[0].token||latest.environment!==current[0].environment||latest.seller_id!==current[0].seller_id||(latest.environment==='production'&&!latest.checked_at))throw fail('WB 授权在等待期间已变化，未发送写入请求，请核对后继续。',409);}:undefined;
       return wbRequest(current[0],service,path,{...options,beforeRequest,signal:options?.signal||signal});
     },invalidate:invalidateWbOrderCachesMysql,
     prepareInventoryProduct:async()=>{await authorize();await prepareInventoryProductCreationMysql();},
@@ -613,6 +674,13 @@ export async function wbPlatform(session, permission = 'operations', signal) {
     }});
   const readCardLimits = platform.cardLimits;
   platform.cardLimits = async (...args) => { await authorize(); return readCardLimits(...args); };
-  if(!WB_REMOTE_WRITES_ENABLED)for(const action of WB_REMOTE_WRITE_ACTIONS)platform[action]=async()=>{throw fail('当前先开放 WB 授权和数据拉取；上架、改价、平台库存及履约写操作需完成真实店铺联调后开放。',409);};
+  if (!WB_REMOTE_WRITES_ENABLED) {
+    for (const action of WB_REMOTE_WRITE_ACTIONS) {
+      if (fulfillmentActions.has(action) && wbFulfillmentEnabled()) continue;
+      platform[action] = async () => {
+        throw fail('当前 WB 操作尚未开放，请核对店铺联调及服务配置。', 409);
+      };
+    }
+  }
   return platform;
 }

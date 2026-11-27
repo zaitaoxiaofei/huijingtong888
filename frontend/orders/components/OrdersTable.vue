@@ -17,12 +17,15 @@ import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js"
 
 const WbHandoverDialog = defineAsyncComponent(() => import("./WbHandoverDialog.vue"));
 const wbHandoverRow = ref(null);
+const WbOrderFinancialDialog = defineAsyncComponent(() => import('./WbOrderFinancialDialog.vue'));
+const wbFinancialRow = ref(null);
 const OzonAftersaleDialog = defineAsyncComponent(() => import("./OzonAftersaleDialog.vue"));
 const aftersaleRow = ref(null);
 const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/components/procurement/ProcurementLedgerDialog.vue"));
 
 const props = defineProps({
   canSyncOrderImages: { type: Boolean, default: false },
+  canPrepare: { type: Boolean, default: false },
   canRemindProcurement: { type: Boolean, default: false },
   canUpdateInventory: { type: Boolean, default: false },
   canReceiveInventory: { type: Boolean, default: false },
@@ -654,7 +657,7 @@ function canEditCollaborationNote(row) {
 
       <el-table-column label="利润" min-width="188" align="left">
         <template #default="{ row }">
-          <div v-if="row.platform === 'wb'" class="orders-cell-stack orders-money-cell"><div class="orders-cell-meta-line">金额: {{ row.amountText }}</div><small>WB 利润待接入</small></div>
+          <div v-if="row.platform === 'wb'" class="orders-cell-stack orders-money-cell"><div class="orders-cell-meta-line">金额: {{ row.amountText }}</div><small>真实利润待结算</small><el-button link type="primary" size="small" :icon="Document" @click="wbFinancialRow=row">查看明细</el-button></div>
           <div v-else class="orders-cell-stack orders-money-cell">
             <div class="orders-cell-meta-line">金额: {{ row.amountText }}</div>
             <div
@@ -799,7 +802,7 @@ function canEditCollaborationNote(row) {
             </template>
             <el-tag v-if="isFbpOrder(row)" type="success" size="small">官方仓履约 · 无需采购</el-tag>
             <el-button
-              v-if="row.availableActions.showPurchase && !isFbpOrder(row) && !row.procurement_coverage?.entered_transport"
+              v-if="row.availableActions.showPurchase && (row.platform !== 'wb' || canRemindProcurement) && !isFbpOrder(row) && !row.procurement_coverage?.entered_transport"
               size="small"
               class="orders-inline-accent-button"
               :class="procurementActionClass(row)"
@@ -807,9 +810,9 @@ function canEditCollaborationNote(row) {
             >
               {{ procurementActionLabel(row) }}
             </el-button>
-            <el-button v-if="WB_REMOTE_WRITES_ENABLED && row.platform === 'wb' && row.wb_supply_id && row.wb_supplier_status === 'confirm'" size="small" @click="wbHandoverRow=row">交接</el-button>
+            <el-button v-if="canPrepare && row.platform === 'wb' && row.availableActions.handover" size="small" @click="wbHandoverRow=row">交接</el-button>
             <el-button
-              v-if="row.availableActions.showPrepare"
+              v-if="row.availableActions.showPrepare && (row.platform !== 'wb' || canPrepare)"
               size="small"
               class="orders-inline-accent-button orders-inline-accent-button-primary"
               @click="emit('prepare-order', row.id)"
@@ -878,6 +881,7 @@ function canEditCollaborationNote(row) {
     </Teleport>
 
     <OzonAftersaleDialog v-if="aftersaleRow" :row="aftersaleRow" @close="aftersaleRow=null" @open-profit="id => { aftersaleRow=null; emit('open-profit', id); }" />
+    <WbOrderFinancialDialog v-if="wbFinancialRow" :row="wbFinancialRow" @close="wbFinancialRow=null" />
     <WbHandoverDialog v-if="wbHandoverRow" :row="wbHandoverRow" @close="wbHandoverRow=null" @changed="emit('inventory-saved')" />
     <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved', $event)">
       <template #management>
