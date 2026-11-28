@@ -436,9 +436,13 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     [raw?.nmId ?? null,positiveId(tenantId),order.shop_id,order.id]);
     const card = parse(input?.card_json);
     const dimensions = card?.dimensions;
-    const positive = value => Number(value) > 0 ? Number(value) : null;
-    const oneParcel = Number(input?.quantity) === 1;
+    const nonnegative = value => value == null || value === '' || !Number.isFinite(Number(value)) || Number(value) < 0 ? null : Number(value);
+    const positive = value => nonnegative(value) > 0 ? Number(value) : null;
+    const quantity = Number.isSafeInteger(Number(input?.quantity)) && Number(input.quantity) > 0 ? Number(input.quantity) : null;
+    const oneParcel = quantity === 1;
     const purchaseCost = positive(input?.purchase_cost);
+    const domesticShipping = nonnegative(input?.domestic_shipping);
+    const handlingFee = nonnegative(input?.handling_fee);
     return {
       order_id: order.id,
       wb_order_id: order.wb_order_id,
@@ -446,8 +450,8 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
       posted_inventory_cost_cny: inventoryCost,
       estimate_inputs: {
         shop_id: order.shop_id, subject_id: positive(card?.subjectID), ordered_at: raw?.createdAt ?? input?.ordered_at ?? null,
-        purchaseCost: purchaseCost == null ? null : purchaseCost * Number(input.quantity),
-        domesticCost: purchaseCost == null ? null : (Number(input.domestic_shipping) + Number(input.handling_fee)) * Number(input.quantity),
+        purchaseCost: purchaseCost == null || quantity == null ? null : purchaseCost * quantity,
+        domesticCost: domesticShipping == null || handlingFee == null || quantity == null ? null : (domesticShipping + handlingFee) * quantity,
         weight: oneParcel ? (positive(dimensions?.weightBrutto) ? Number(dimensions.weightBrutto) * 1000 : positive(input.package_weight_g)) : null,
         length: oneParcel ? positive(dimensions?.length) ?? positive(input.length_cm) : null,
         width: oneParcel ? positive(dimensions?.width) ?? positive(input.width_cm) : null,
