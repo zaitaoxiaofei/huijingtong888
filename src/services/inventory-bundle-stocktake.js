@@ -1,3 +1,4 @@
+import {mapBundleReads} from './bundle-read-map.js';
 import {mysqlQuery,withMysqlTransaction} from '../mysql-pool.js';
 import {authorizeBusinessTaskSession} from './business-task-tenant.js';
 import {resolveInventoryTenantScope,assertInventoryRecord,inventoryTenantSql} from './inventory-tenant-scope.js';
@@ -34,12 +35,12 @@ export function createInventoryBundleStocktake({ledger,query=mysqlQuery,transact
  }
  async function context(params,session){
   const {scope}=await access(session,query,'inventory.read'),id=positive(params.product_id),g=await graph(id,scope,query);
-  const components=[];let incomplete=[...g.products.values()].some(p=>Number(p.active)===0);
-  for(const part of g.components){
+  let incomplete=[...g.products.values()].some(p=>Number(p.active)===0);
+  const components=await mapBundleReads(g.components,async part=>{
    const item={...identity(part),product_id:Number(part.id),per_set_quantity:part.per_set_quantity};
    if(item.active){const snapshot=await ledger.read({product_id:part.id,include_fbp:false},scope.id);Object.assign(item,{physical_stock:snapshot.physical_estimate,open_order_demand:snapshot.open_order_demand,fbp_reserved:snapshot.fbp_reserved,revision:snapshot.revision});}
-   components.push(item);
-  }
+   return item;
+  });
   return{product:identity(g.products.get(id)),revision:g.revision,incomplete,
    structure:g.edges.map(edge=>({parent_product_id:Number(edge.product_id),...identity(g.products.get(Number(edge.component_product_id))),quantity:Number(edge.quantity),is_bundle:g.edges.some(e=>Number(e.product_id)===Number(edge.component_product_id))})),components};
  }

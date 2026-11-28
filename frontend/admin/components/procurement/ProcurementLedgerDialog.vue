@@ -10,9 +10,7 @@ import { hasPermission } from '../../../../src/shared/permissions.js';
 import InventoryCompositionBadge from '../inventory/InventoryCompositionBadge.vue';
 const BundleDetails=defineAsyncComponent(()=>import('../inventory/InventoryBundleDetails.vue'));
 const BundleDialog=defineAsyncComponent(()=>import('../inventory/InventoryBundleDialog.vue'));
-const bundleUpdateVisible=ref(false),bundleConversionVisible=ref(false);
-const BundleConversionDialog=defineAsyncComponent(()=>import('../inventory/InventoryBundleConversionDialog.vue'));
-const canConvertBundles=computed(()=>props.stocktakeEnabled&&hasPermission(auth.user,'inventory.write'));
+const bundleUpdateVisible=ref(false);
 import InventoryProductEditAction from '../inventory/InventoryProductEditAction.vue';
 import InventoryProductHistoryAction from '../inventory/InventoryProductHistoryAction.vue';
 import InventoryWorkflowPanel from './InventoryWorkflowPanel.vue';
@@ -47,7 +45,7 @@ let fbpVersion = 0;
 let pollTimer, finishPoll;
 function stopFbpPoll() { clearTimeout(pollTimer); finishPoll?.(); finishPoll = null; }
 function waitFbpPoll() { return new Promise(resolve => { finishPoll = resolve; pollTimer = setTimeout(() => { finishPoll = null; resolve(); }, 1200); }); }
-function clearSessionView(){bundleConversionVisible.value=false;++loadVersion;++fbpVersion;stopFbpPoll();data.value=null;workflow.value=null;visible.value=false;formVisible.value=false;}
+function clearSessionView(){++loadVersion;++fbpVersion;stopFbpPoll();data.value=null;workflow.value=null;visible.value=false;formVisible.value=false;}
 onMounted(()=>{currentApiCacheScope();window.addEventListener('erp:auth-scope-changed',clearSessionView);});
 onBeforeUnmount(()=>window.removeEventListener('erp:auth-scope-changed',clearSessionView));
 onBeforeUnmount(() => { ++loadVersion; ++fbpVersion; stopFbpPoll(); });
@@ -429,8 +427,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=props
         <div class="ledger-top-actions"><el-button v-if="orderOverview" @click="showOrderBreakdown=!showOrderBreakdown">本单商品与分配（{{orderItems.length}}）</el-button>
           <InventoryProductHistoryAction v-if="data&&!loading" :product-id="Number(productId)"/>
           <el-button v-if="stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
-          <el-button v-if="Number(data?.product?.component_count)>0&&canConvertBundles" :disabled="loading" @click="bundleConversionVisible=true">库存转换</el-button>
-          <el-button v-else-if="!inventoryOnly&&!Number(data?.product?.component_count)" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
+          <el-button v-if="!inventoryOnly&&!Number(data?.product?.component_count)" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
           <el-dropdown v-if="!inventoryOnly" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
             <el-dropdown-item v-if="$slots.management" command="management">绑定管理</el-dropdown-item>
             <el-dropdown-item command="damage" :disabled="!data || loading">货损报废</el-dropdown-item>
@@ -635,7 +632,6 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=props
       <template #footer><el-button :disabled="saving" @click="historyLinkVisible = false">取消</el-button><el-button type="primary" :loading="saving" :disabled="!historySelection.length || !selectedHistoryBatch || selectedHistoryQuantity > selectedHistoryBatch.available_history_quantity" @click="saveHistoryLink">确认关联所选订单</el-button></template>
     </el-dialog>
   </el-dialog>
-  <BundleConversionDialog v-if="bundleConversionVisible" v-model="bundleConversionVisible" :product-id="productId" @saved="load(productId,{syncFbpOnLoad:false});notifySaved()"/>
   <BundleDialog v-if="bundleUpdateVisible" v-model="bundleUpdateVisible" :product-id="productId" editable @saved="load(productId,{syncFbpOnLoad:false});notifySaved()"/>
   <el-dialog v-if="(formVisible || (directStocktake && visible)) && !(Number(data?.product?.component_count)>0)" v-model="stockFormVisible" :title="directStocktake ? labels.stocktake : labels[form.action_type]" width="min(720px, 94vw)" append-to-body :close-on-click-modal="false" :before-close="closeForm" class="stocktake-form-dialog">
       <div v-if="loading" v-loading="loading" class="stocktake-loading">正在读取库存与待发订单数量…</div>
