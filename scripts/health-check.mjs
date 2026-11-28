@@ -61,6 +61,7 @@ const endpoints = [
   ["/api/inbound-records?paged=1&page=1&pageSize=30", "inbound_records_paged"],
   ["/api/outbound-records?paged=1&page=1&pageSize=30&dateFrom=&dateTo=&shopId=all&status=all&query=", "outbound_records_paged"],
   ["/api/procurement/requests?grouped=1&paged=1&page=1&pageSize=30", "procurement_grouped_paged"],
+  ["/api/inventory-workflow/alerts?task=required&scope=all&page=1&pageSize=50&view=workspace&compact=1", "procurement_workspace_paged"],
   ["/api/procurement/purchase-orders?paged=1&page=1&pageSize=30", "purchase_orders_paged"],
   ["/api/orders?paged=1&page=1&pageSize=30&status=all&shopId=all&dateFrom=&dateTo=&searchType=order&searchQuery=&markFilter=all&printFilter=all&printView=all&sortMode=ordered", "orders_paged"],
   ["/api/profit-ranking?dimension=sku&page=1&pageSize=10", "profit_ranking_sku"],
@@ -68,10 +69,21 @@ const endpoints = [
   ["/api/profits/historical-review?limit=10", "historical_profit_review"]
 ];
 
+const requestedLabels = String(process.env.HEALTH_CHECK_LABELS || "").split(",").map(value => value.trim()).filter(Boolean);
+if (requestedLabels.some(label => !endpoints.some(([, known]) => known === label))) {
+  throw new Error("HEALTH_CHECK_LABELS contains an unknown endpoint label");
+}
+const selectedEndpoints = requestedLabels.length ? endpoints.filter(([, label]) => requestedLabels.includes(label)) : endpoints;
+const durationBudgetMs = Number(process.env.HEALTH_CHECK_MAX_DURATION_MS || 0);
+if (!Number.isFinite(durationBudgetMs) || durationBudgetMs < 0) throw new Error("Invalid HEALTH_CHECK_MAX_DURATION_MS");
+const requireFreshSnapshot = process.env.HEALTH_CHECK_REQUIRE_FRESH_SNAPSHOT === "1";
+
 function summarizePayload(payload) {
   if (Array.isArray(payload)) return { kind: "array", count: payload.length };
   if (!payload || typeof payload !== "object") return { kind: typeof payload };
-  if (Array.isArray(payload.rows)) return { kind: "paged", rows: payload.rows.length, total: Number(payload.total || 0) };
+  if (Array.isArray(payload.rows)) return { kind: "paged", rows: payload.rows.length, total: payload.total == null ? null : Number(payload.total),
+    ...(payload.snapshot ? { snapshot: { available: payload.snapshot.available === true, stale: payload.snapshot.stale === true,
+      refreshing: payload.snapshot.refreshing === true, status: String(payload.snapshot.status || "") } } : {}) };
   if (payload.ranges && Array.isArray(payload.dailyTrend14)) {
     return {
       kind: "profit_dashboard",
@@ -132,25 +144,30 @@ async function checkEndpoint(path, label, token) {
   const { response, payload } = await fetchJson(path, {
     headers: { Authorization: `Bearer ${token}` }
   });
-  const durationMs = Math.round(performance.now() - startedAt);
+  const elapsedMs = performance.now() - startedAt;
+  const durationMs = Math.round(elapsedMs);
   const summary = summarizePayload(payload);
   const expectsPaged = label.endsWith("_paged") || path.includes("paged=1");
   const contractOk = !expectsPaged || summary.kind === "paged" || summary.kind === "profit_ranking";
+  const durationOk = !durationBudgetMs || elapsedMs <= durationBudgetMs;
+  const snapshotOk = !requireFreshSnapshot || label !== "procurement_workspace_paged"
+    || (summary.snapshot?.available === true && !summary.snapshot.stale && !summary.snapshot.refreshing && summary.snapshot.status === "ready");
 
   return {
     label,
     path,
     status: response.status,
-    ok: response.ok && contractOk,
+    ok: response.ok && contractOk && durationOk && snapshotOk,
     durationMs,
     summary,
-    error: payload?.error || (contractOk ? null : "Expected paged response contract")
+    error: payload?.error || (!contractOk ? "Expected paged response contract" : !snapshotOk ? "Expected an available fresh ready snapshot"
+      : !durationOk ? `Response exceeded ${durationBudgetMs}ms budget` : null)
   };
 }
 
 const loginPayload = await login();
 const results = [];
-for (const [path, label] of endpoints) {
+for (const [path, label] of selectedEndpoints) {
   try {
     results.push(await checkEndpoint(path, label, loginPayload.token));
   } catch (error) {

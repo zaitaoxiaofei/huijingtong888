@@ -17490,6 +17490,10 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin", {
       mode: "grouped"
     };
   }
+  const requestedProductId = Number(query.productId || query.product_id || 0);
+  const detailProductIds = groupedPage?.productIds
+    || (String(query.grouped || "") !== "1" && Number.isSafeInteger(requestedProductId) && requestedProductId > 0
+      ? [requestedProductId] : null);
   const groupedWhereSql = `WHERE (p.id IS NULL OR ${inventoryTenantSql(scope, 'p')}) AND (pr.id IS NULL OR ${inventoryTenantSql(scope, 'pr')})
     AND (pr.product_id IS NULL OR p.id IS NOT NULL) AND (pr.supplier_id IS NULL OR s.id IS NOT NULL)
     AND (pr.purchase_order_id IS NULL OR po.id IS NOT NULL)
@@ -17497,21 +17501,44 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin", {
       SELECT 1 FROM fbp_replenishment_orders fbp_source JOIN shops fbp_shop ON fbp_shop.id = fbp_source.shop_id
       WHERE fbp_source.id = pr.source_order_id AND ${inventoryTenantSql(scope, 'fbp_shop')}
         AND (pr.source_order_item_id IS NULL OR EXISTS (SELECT 1 FROM fbp_replenishment_order_items fi WHERE fi.id = pr.source_order_item_id AND fi.order_id = fbp_source.id AND fi.shop_id = fbp_source.shop_id)))))
-    ${groupedPage ? `AND p.id IN (${groupedPage.productIds.map(() => '?').join(', ')})` : ''}`;
-  const groupedProductPlaceholders = groupedPage
-    ? groupedPage.productIds.map(() => "?").join(", ")
+    ${detailProductIds ? `AND p.id IN (${detailProductIds.map(() => '?').join(', ')})` : ''}`;
+  const groupedProductPlaceholders = detailProductIds
+    ? detailProductIds.map(() => "?").join(", ")
     : "";
   const groupedProductFilter = (column, tenantOwned = true) => `${tenantOwned ? `AND ${inventoryTenantSql(scope, column.includes('.') ? column.split('.')[0] : '')}` : ''}
-    ${groupedPage ? `AND ${column} IN (${groupedProductPlaceholders})` : ''}`;
-  const groupedComponentFilter = (column) => groupedPage ? `AND ${column} IN (
+    ${detailProductIds ? `AND ${column} IN (${groupedProductPlaceholders})` : ''}`;
+  const groupedComponentFilter = (column) => detailProductIds ? `AND ${column} IN (
     SELECT page_component.component_product_id FROM product_components page_component
     WHERE ${inventoryTenantSql(scope, 'page_component')}
       AND page_component.product_id IN (${groupedProductPlaceholders})
   )` : '';
-  const groupedQueryParams = groupedPage
-    ? Array.from({ length: 13 }, () => groupedPage.productIds).flat()
+  // Split the mapping OR into indexed matches. A direct and SKU match for the
+  // same mapping contributes once, while different mappings retain their rows.
+  // The bounded facts are shared by recent sales and full lifetime history.
+  const selectedOrderItemsSql = detailProductIds ? `WITH procurement_page_mappings AS (
+    SELECT id, product_id, shop_id, ozon_sku FROM sku_mappings
+    WHERE active = 1 ${groupedProductFilter("product_id")}
+  ), procurement_page_order_items AS (
+    SELECT page_mapping.product_id, page_item.order_id, page_item.quantity
+    FROM procurement_page_mappings page_mapping
+    JOIN order_items page_item ON page_item.sku_mapping_id = page_mapping.id
+    JOIN orders page_order ON page_order.id = page_item.order_id AND page_order.shop_id = page_mapping.shop_id
+    WHERE EXISTS (SELECT 1 FROM shops page_shop WHERE page_shop.id = page_order.shop_id AND ${inventoryTenantSql(scope, 'page_shop')})
+    UNION ALL
+    SELECT page_mapping.product_id, page_item.order_id, page_item.quantity
+    FROM procurement_page_mappings page_mapping
+    JOIN order_items page_item ON page_item.ozon_sku = page_mapping.ozon_sku
+      AND NOT (page_mapping.id <=> page_item.sku_mapping_id)
+    JOIN orders page_order ON page_order.id = page_item.order_id AND page_order.shop_id = page_mapping.shop_id
+    WHERE EXISTS (SELECT 1 FROM shops page_shop WHERE page_shop.id = page_order.shop_id AND ${inventoryTenantSql(scope, 'page_shop')})
+  )` : "";
+  const salesProductColumn = detailProductIds ? "sales_item.product_id" : "sales_mapping.product_id";
+  const historyProductColumn = detailProductIds ? "history_item.product_id" : "history_mapping.product_id";
+  const groupedQueryParams = detailProductIds
+    ? Array.from({ length: 12 }, () => detailProductIds).flat()
     : [];
   const rows = await mysqlQuery(`
+    ${selectedOrderItemsSql}
     SELECT ${requestColumns}, ${workflowFbpCandidateMysql(scope)} AS workflow_candidate, ${queueCoverage ? 'p.id' : 'pr.product_id'} AS product_id,
       COALESCE(NULLIF(p.inventory_number, ''),
         CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END
@@ -17640,25 +17667,25 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin", {
       GROUP BY pc.product_id
     ) component_supply ON component_supply.product_id = p.id
     LEFT JOIN (
-      SELECT sales_mapping.product_id,
+      SELECT ${salesProductColumn},
         SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN sales_item.quantity ELSE 0 END) AS recent_7d_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 14 DAY) THEN sales_item.quantity ELSE 0 END) AS recent_15d_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY) THEN sales_item.quantity ELSE 0 END) AS recent_30d_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN sales_item.quantity ELSE 0 END) AS week1_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 13 DAY) AND ${chinaDateSqlMysql("sales_order.ordered_at")} < DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN sales_item.quantity ELSE 0 END) AS week2_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("sales_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 20 DAY) AND ${chinaDateSqlMysql("sales_order.ordered_at")} < DATE_SUB(CURRENT_DATE, INTERVAL 13 DAY) THEN sales_item.quantity ELSE 0 END) AS week3_qty
-      FROM order_items sales_item
+      FROM ${detailProductIds ? "procurement_page_order_items" : "order_items"} sales_item
       JOIN orders sales_order ON sales_order.id = sales_item.order_id
-      JOIN sku_mappings sales_mapping ON (
+      ${detailProductIds ? "" : `JOIN sku_mappings sales_mapping ON (
         (sales_mapping.id = sales_item.sku_mapping_id OR (sales_mapping.shop_id = sales_order.shop_id AND sales_mapping.ozon_sku = sales_item.ozon_sku))
         AND sales_mapping.active = 1 AND sales_mapping.shop_id = sales_order.shop_id
-      )
+      )`}
       WHERE LOWER(sales_order.status) NOT LIKE '%cancel%'
         AND EXISTS (SELECT 1 FROM shops sales_shop WHERE sales_shop.id = sales_order.shop_id AND ${inventoryTenantSql(scope, 'sales_shop')})
         AND LOWER(COALESCE(sales_order.tracking_stage, '')) NOT LIKE '%cancel%'
         AND sales_order.ordered_at >= CONVERT_TZ(DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY), '+08:00', '+00:00')
-        ${groupedProductFilter("sales_mapping.product_id")}
-      GROUP BY sales_mapping.product_id
+        ${detailProductIds ? "" : groupedProductFilter("sales_mapping.product_id")}
+      GROUP BY ${salesProductColumn}
     ) sales ON sales.product_id = p.id
     LEFT JOIN (
       SELECT product_id, COUNT(*) AS fbp_snapshot_count,
@@ -17701,21 +17728,21 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin", {
       GROUP BY im.product_id
     ) outbound_history ON outbound_history.product_id = p.id
     LEFT JOIN (
-      SELECT history_mapping.product_id,
+      SELECT ${historyProductColumn},
         COUNT(DISTINCT history_order.id) AS historical_total_order_count,
         SUM(history_item.quantity) AS historical_total_quantity,
         SUM(CASE WHEN ${buildOrderOutcomeSql("history_order", "mysql").cancelledPreFulfillment} THEN history_item.quantity ELSE 0 END) AS historical_cancelled_quantity,
         SUM(CASE WHEN ${buildOrderOutcomeSql("history_order", "mysql").rejectedUnclaimed} OR ${buildOrderOutcomeSql("history_order", "mysql").afterDeliveryReturn} THEN history_item.quantity ELSE 0 END) AS historical_returned_quantity
-      FROM order_items history_item
+      FROM ${detailProductIds ? "procurement_page_order_items" : "order_items"} history_item
       JOIN orders history_order ON history_order.id = history_item.order_id
-      JOIN sku_mappings history_mapping ON (
+      ${detailProductIds ? "" : `JOIN sku_mappings history_mapping ON (
         (history_mapping.id = history_item.sku_mapping_id OR (history_mapping.shop_id = history_order.shop_id AND history_mapping.ozon_sku = history_item.ozon_sku))
         AND history_mapping.active = 1 AND history_mapping.shop_id = history_order.shop_id
-      )
+      )`}
       WHERE 1 = 1
         AND EXISTS (SELECT 1 FROM shops history_shop WHERE history_shop.id = history_order.shop_id AND ${inventoryTenantSql(scope, 'history_shop')})
-        ${groupedProductFilter("history_mapping.product_id")}
-      GROUP BY history_mapping.product_id
+        ${detailProductIds ? "" : groupedProductFilter("history_mapping.product_id")}
+      GROUP BY ${historyProductColumn}
     ) order_history ON order_history.product_id = p.id
     LEFT JOIN (
       SELECT product_id, GROUP_CONCAT(ozon_sku SEPARATOR ', ') AS skus
