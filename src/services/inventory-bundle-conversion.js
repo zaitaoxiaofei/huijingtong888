@@ -1,3 +1,4 @@
+import {bundleReadQuery} from './bundle-read-query.js';
 import {mapBundleReads} from './bundle-read-map.js';
 import {mysqlQuery,withMysqlTransaction} from '../mysql-pool.js';
 import {authorizeBusinessTaskSession,assertBusinessTaskPermission} from './business-task-tenant.js';
@@ -22,20 +23,22 @@ export function createInventoryBundleConversion({ledger,postMovement,reconcile,q
   await assertInventoryRecord(scope,'product',id,q);
   const graph=await loadInventoryComposition(q,scope);
   if(!graph.isBundle(id))throw fail('此商品没有套装组成，请先在商品资料中设置配件和每套数量');
-  const parts=graph.components(id);
-  const snapshots=await mapBundleReads([id,...parts.map(p=>p.id)],product_id=>ledger.read({product_id,include_fbp:false},scope.id,connection),connection?1:2);
+  const parts=graph.components(id),displayQuery=connection?null:bundleReadQuery(q);
+  const snapshots=await mapBundleReads([id,...parts.map(p=>p.id)],product_id=>ledger.read({product_id,include_fbp:false},scope.id,connection,displayQuery),connection?1:2);
   const root=snapshots[0];
   const components=[];
   for(const [index,part] of parts.entries()){
    const stock=snapshots[index+1];
-   components.push({product_id:Number(part.id),name:part.name,inventory_number:part.inventory_number,stock_unit:part.stock_unit,per_set_quantity:part.per_set_quantity,physical_stock:stock.physical_estimate,available_stock:stock.available_estimate,reserved_for_bundle:stock.orders.filter(o=>o.needs_fulfillment&&o.assembly_required&&Number(o.root_product_id)===id&&o.stock_location!=='FBP').reduce((n,o)=>n+Number(o.stock_quantity||0),0),revision:stock.revision,unit_cost:Number(stock.product.purchase_cost)||0});
+   components.push({product_id:Number(part.id),name:part.name,inventory_number:part.inventory_number,stock_unit:part.stock_unit,per_set_quantity:part.per_set_quantity,active:Number(part.active)!==0,open_order_demand:stock.open_order_demand,fbp_reserved:stock.fbp_reserved,physical_stock:stock.physical_estimate,available_stock:stock.available_estimate,reserved_for_bundle:stock.orders.filter(o=>o.needs_fulfillment&&o.assembly_required&&Number(o.root_product_id)===id&&o.stock_location!=='FBP').reduce((n,o)=>n+Number(o.stock_quantity||0),0),revision:stock.revision,unit_cost:Number(stock.product.purchase_cost)||0});
   }
   const events=await q("SELECT id,action,detail_json,created_at FROM inventory_flow_events WHERE tenant_id=? AND product_id=? AND action IN ('bundle_assembly','bundle_disassembly') ORDER BY id",[scope.id,id]);
   const batches=remainingAssemblyBatches(events,root.physical_estimate);
   const assemblable=Math.max(0,Math.min(...components.map(c=>Math.floor(c.available_stock/c.per_set_quantity))));
   const assemblyCapacity=Math.max(0,Math.min(...components.map(c=>Math.floor((c.available_stock+c.reserved_for_bundle)/c.per_set_quantity))));
+  const structure=[],visited=new Set(),frontier=[id];
+  while(frontier.length){const parent=frontier.shift();if(visited.has(parent))continue;visited.add(parent);for(const edge of graph.edges.filter(e=>Number(e.product_id)===parent)){const product=graph.products.get(Number(edge.component_product_id));structure.push({parent_product_id:parent,id:Number(product.id),name:product.name,inventory_number:product.inventory_number,stock_unit:product.stock_unit,quantity:Number(edge.quantity),is_bundle:graph.isBundle(Number(product.id))});frontier.push(Number(product.id));}}
   const revision=ledgerRevision({root:root.revision,components,edges:graph.edges.filter(e=>Number(e.product_id)===id),events});
-  return{product:root.product,revision,finished_physical:root.physical_estimate,finished_available:root.available_estimate,finished_reserved:root.open_order_demand+root.fbp_reserved,assemblable,assembly_capacity:assemblyCapacity,maximum_available:root.available_estimate+assemblable,components,batches,history:events.slice(-30).reverse().map(e=>{const d=parse(e.detail_json);return{id:Number(e.id),action:e.action,quantity:d.quantity,batch_id:d.batch_id||null,note:d.note||'',created_at:e.created_at};})};
+  return{product:root.product,structure,revision,finished_physical:root.physical_estimate,finished_available:root.available_estimate,finished_reserved:root.open_order_demand+root.fbp_reserved,assemblable,assembly_capacity:assemblyCapacity,maximum_available:root.available_estimate+assemblable,components,batches,history:events.slice(-30).reverse().map(e=>{const d=parse(e.detail_json);return{id:Number(e.id),action:e.action,quantity:d.quantity,batch_id:d.batch_id||null,note:d.note||'',created_at:e.created_at};})};
  }
  function publicView(value){return{...value,product:{id:value.product.id,name:value.product.name,inventory_number:value.product.inventory_number,stock_unit:value.product.stock_unit},components:value.components.map(({unit_cost,...c})=>c),batches:value.batches.map(b=>({id:b.id,created_at:b.created_at,remaining:b.remaining,components:b.components.map(({unit_cost,...c})=>c)}))};}
  async function context(params,session){await ledger.prepare();const {scope}=await access(session,query);return publicView(await read(integer(params.product_id,'套装库存 ID'),scope,query));}

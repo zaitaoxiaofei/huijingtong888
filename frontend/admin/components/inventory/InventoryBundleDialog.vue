@@ -9,7 +9,7 @@ const state=ref({canSave:false,busy:false,retrying:false}),panel=ref(null);
 function saved(result){emit('saved',result);if(!result?.keepOpen)emit('update:modelValue',false);}
 </script>
 <template>
- <component :is="mobile?MobileDialog:ElDialog" :model-value="modelValue" :title="editable?'更新套装子库存':'套装库存明细'" width="min(800px,94vw)" class="inventory-bundle-dialog" append-to-body :close-on-click-modal="false" :show-close="!state.busy" :close-on-press-escape="!state.busy" @update:model-value="emit('update:modelValue',$event)">
+ <component :is="mobile?MobileDialog:ElDialog" :model-value="modelValue" :title="editable?'更新套装子库存':'套装库存明细'" width="min(1280px,96vw)" class="inventory-bundle-dialog" append-to-body :close-on-click-modal="false" :show-close="!state.busy" :close-on-press-escape="!state.busy" @update:model-value="emit('update:modelValue',$event)">
   <InventoryBundleDetails v-if="modelValue" ref="panel" :product-id="productId" :editable="editable" :mobile="mobile" external-actions @state="state=$event" @busy="state.busy=$event" @saved="saved" @cancel="emit('update:modelValue',false)"/>
   <template #footer><el-button :disabled="state.busy" @click="emit('update:modelValue',false)">{{editable?'取消':'关闭'}}</el-button><el-button v-if="editable||state.label" type="primary" :disabled="!state.canSave&&!state.retrying" :loading="state.busy" @click="panel?.save()">{{state.label||(state.retrying?'重试确认':'一次确认更新所有子库存')}}</el-button></template>
  </component>
