@@ -7,6 +7,14 @@ const costFields=['purchase_cost_cny','domestic_shipping_cny','international_shi
 const journalKey=j=>JSON.stringify([Number(j.company_id),Number(j.shop_id),j.month_key,j.posting_number,j.sku]);
 function latestRecords(records){const grouped=new Map();for(const j of records.filter(isApprovedH1)){const key=journalKey(j);if(!grouped.has(key)||Number(grouped.get(key).id)<Number(j.id))grouped.set(key,j);}return grouped;}
 export const isApprovedH1=j=>Number(j.tenant_id)===1&&Number(j.company_id)===1&&[4,5,6].includes(Number(j.shop_id))&&/^2026-0[1-6]$/.test(j.month_key)&&H1_POLICIES.includes(parse(j.after_json)?.policy);
+export function approvedH1ProjectionRanges({tenantId,companyId,from,to}){
+ if(Number(tenantId)!==1||(companyId&&Number(companyId)!==1)||from>'2026-06-30'||to<'2026-01-01')return [{from,to,approvedH1:false}];
+ const ranges=[];
+ if(from<'2026-01-01')ranges.push({from,to:'2025-12-31',approvedH1:false});
+ ranges.push({from:from<'2026-01-01'?'2026-01-01':from,to:to>'2026-06-30'?'2026-06-30':to,approvedH1:true});
+ if(to>'2026-06-30')ranges.push({from:'2026-07-01',to,approvedH1:false});
+ return ranges;
+}
 export async function readApprovedH1(query,{tenantId,companyId,from,to,shopId}){
  if(Number(tenantId)!==1||(companyId&&Number(companyId)!==1)||from>'2026-06'||to<'2026-01')return [];
  const params=[tenantId,from<'2026-01'?'2026-01':from,to>'2026-06'?'2026-06':to];
