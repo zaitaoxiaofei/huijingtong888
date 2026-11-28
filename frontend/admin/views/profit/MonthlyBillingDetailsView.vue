@@ -7,6 +7,7 @@ import { Delete, Edit, Plus, View } from "@element-plus/icons-vue";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
 import { shanghaiDateKey, shanghaiDateText } from "../../utils/shanghai-date.js";
 import { billingDateRange, billingCalendarRange, billingCalendarSelection } from "../../utils/billing-period.js";
+import FinanceAdjustmentDetail from "../../components/finance/FinanceAdjustmentDetail.vue";
 import BillingSourceRecords from "./BillingSourceRecords.vue";
 import { buildBillingGroups } from "./billing-groups.js";
 import BillingMetricLabel from "./BillingMetricLabel.vue";
@@ -44,6 +45,7 @@ const parseAmountInput=value=>String(value??'').replace(/,/g,'');
 const entryProgress=computed(()=>Number(selectedSummary.value.order_count)>0?Number(selectedSummary.value.accrued_order_count||0)/Number(selectedSummary.value.order_count):0);
 const expenseDialog = ref(false);
 const expenseDrawer = ref(false);
+const adjustmentOpen=ref(false),adjustmentRecords=ref([]);
 const evidenceOpen=ref(false),evidenceRows=ref([]),evidenceLoading=ref(false),evidenceError=ref(''),evidencePage=ref(1),evidencePageSize=ref(20);
 let evidenceController;
 async function showEvidence(row){evidenceController?.abort();evidenceController=new AbortController();const signal=evidenceController.signal,scope=currentApiCacheScope();evidenceRows.value=row.fee_evidence||[];evidenceError.value='';evidencePage.value=1;evidenceLoading.value=false;evidenceOpen.value=true;if(evidenceRows.value.length)return;evidenceLoading.value=true;
@@ -415,7 +417,7 @@ watch(
   }
 );
 watch(sourceFilters, () => { if (orderRecordDrawer.value) { orderRecords.page = 1; loadOrderRecords(); } });
-watch(()=>currentApiCacheScope(),()=>{recordCache.clear();evidenceController?.abort();evidenceRows.value=[];evidenceOpen.value=false;recordController?.abort();abortController?.abort();Object.assign(orderRecords,{rows:[],summary:{},total:0,productId:"",sku:"",skuShopId:""});payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';state.shopId='all';loadData();});
+watch(()=>currentApiCacheScope(),()=>{recordCache.clear();evidenceController?.abort();evidenceRows.value=[];evidenceOpen.value=false;adjustmentOpen.value=false;adjustmentRecords.value=[];recordController?.abort();abortController?.abort();Object.assign(orderRecords,{rows:[],summary:{},total:0,productId:"",sku:"",skuShopId:""});payrollRows.value=[];state.month={summary:{},shops:[],expenses:[]};state.companyId='all';state.shopId='all';loadData();});
 window.addEventListener("erp:finance-changed",loadData);
 onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData);evidenceController?.abort(); abortController?.abort(); appendixController?.abort(); recordController?.abort(); recordCache.clear(); });
 </script>
@@ -656,12 +658,13 @@ onBeforeUnmount(() => {window.removeEventListener("erp:finance-changed",loadData
           <el-table-column v-if="orderRecords.outcomeType==='returns'" label="退货处理" min-width="110"><template #default="{row}">{{row.disposed_return?'已退货·销毁':'退货 / 拒收'}}</template></el-table-column>
           <el-table-column v-if="recordItem?.key==='revenue'||recordItem?.key==='compensation_income'" label="平台赔付（CNY）" min-width="130" align="right"><template #default="{row}">{{formatMoney(row.compensation_income)}}</template></el-table-column>
           <el-table-column :label="orderRecords.outcomeType?'分摊净损失（负数为收益）':'账单金额（CNY）'" min-width="150" align="right"><template #default="{row}">{{formatMoney(orderRecords.groupBy==='order'&&editableOrderField?orderCost(row):row.amount)}}</template></el-table-column>
-          <el-table-column label="操作" min-width="160" fixed="right"><template #default="{row}"><el-button v-if="orderRecords.groupBy!=='order'" link type="primary" @click="drillOrders(row)">看订单</el-button><template v-else><el-button v-if="orderRecords.recordSource!=='procurement'" link type="primary" @click="showEvidence(row)">核对账单</el-button><template v-if="editableOrderField&&!orderRecords.outcomeType"><el-button link type="primary" @click="openCostCorrection(row)">编辑</el-button><el-button link type="danger" @click="openCostCorrection(row,true)">删除</el-button></template></template></template></el-table-column>
+          <el-table-column label="操作" min-width="160" fixed="right"><template #default="{row}"><el-button v-if="orderRecords.groupBy!=='order'" link type="primary" @click="drillOrders(row)">看订单</el-button><template v-else><el-button v-if="row.approved_adjustments?.length" link type="primary" @click="adjustmentRecords=row.approved_adjustments;adjustmentOpen=true">原账与调整</el-button><el-button v-if="orderRecords.recordSource!=='procurement'" link type="primary" @click="showEvidence(row)">核对账单</el-button><template v-if="editableOrderField&&!orderRecords.outcomeType"><el-button link type="primary" @click="openCostCorrection(row)">编辑</el-button><el-button link type="danger" @click="openCostCorrection(row,true)">删除</el-button></template></template></template></el-table-column>
         </el-table>
         <el-pagination v-model:current-page="orderRecords.page" v-model:page-size="orderRecords.pageSize" :page-sizes="[20,50,100]" :total="orderRecords.total" layout="total, sizes, prev, pager, next" @size-change="orderRecords.page=1;loadOrderRecords()" @current-change="loadOrderRecords" />
       </div>
     </el-drawer>
 
+    <el-dialog v-model="adjustmentOpen" title="原账与调整依据" width="min(96vw,1000px)" destroy-on-close @closed="adjustmentRecords=[]"><FinanceAdjustmentDetail :records="adjustmentRecords"/></el-dialog>
     <el-dialog v-model="evidenceOpen" @closed="evidenceController?.abort()" title="官方账单依据" width="min(96vw,1200px)" destroy-on-close>
       <p>Ozon原始账单按操作日保留正负：负数是扣款，正数是冲回或入账。母单费用按原订单权重分摊；缺少其他项目不代表其费用为0。</p>
       <el-alert v-if="evidenceError" :title="evidenceError" type="warning" :closable="false"/><el-table v-loading="evidenceLoading" :data="evidenceRows.slice((evidencePage-1)*evidencePageSize,evidencePage*evidencePageSize)" border><el-table-column prop="operation_date" label="账单日期" width="115"><template #default="{row}">{{shanghaiDateText(row.operation_date)}}</template></el-table-column><el-table-column prop="service_name" label="Ozon原始项目" min-width="150"/><el-table-column prop="operation_id" label="账单流水号" min-width="220"/><el-table-column prop="posting_number" label="关联货件 / 母单" min-width="170"/><el-table-column label="原币金额" min-width="130"><template #default="{row}">{{formatMoney(row.amount)}} {{row.currency_code}}</template></el-table-column><el-table-column label="人民币净额" min-width="120"><template #default="{row}">{{row.amount_cny==null?'未换算':formatMoney(row.amount_cny)}}</template></el-table-column><el-table-column prop="source_endpoint" label="来源接口" min-width="240"/></el-table><el-pagination v-model:current-page="evidencePage" v-model:page-size="evidencePageSize" :page-sizes="[20,50,100]" :total="evidenceRows.length" layout="total, sizes, prev, pager, next"/>
