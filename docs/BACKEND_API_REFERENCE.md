@@ -2612,6 +2612,14 @@ Return ranking rows for the selected profit dimension. inventory=1 groups bound 
 - Responses:
   - `200` `application/json` -> `array<object>`
 
+#### `GET /api/finance-center/document-adjustments`
+
+Read the owned company's approved H1 2026 adjustment ledger. Returns original and adjusted CNY amounts, validated source links, baseline freshness, totals and fifty rows per page. Applies only the two approved H1 policies; excludes Q3 and later, other tenants and companies. Does not rewrite original order profit or add adjustments to official-document totals.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+
 #### `GET /api/finance-center/document-reconciliation`
 
 Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history. settlement_links identifies order SKUs absent from this report only when scoped raw order products match quantity and platform financial payout/commission are explicitly zero, with another SKU settled on the same shipment. These are not aliases or new zero-income sales; amounts and costs remain separate and require review. Missing evidence and conflicts remain unmatched.

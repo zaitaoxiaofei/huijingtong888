@@ -1,3 +1,4 @@
+import {approvedH1Report} from './billing-approved-h1.js';
 import {readCompanyPurchaseCosts,summarizePurchaseCostLines} from './company-purchase-costs.js';
 import {financeDocumentLocation,normalizeFinanceSourceLocation} from '../shared/finance-document-locations.js';
 import { recordedExpenseLines } from './finance-recorded-expenses.js';
@@ -156,6 +157,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const parsed=parseOrderSalesJson(bytes,{month});if(!ctx.c.tax_number||parsed.buyer_tax_number!==ctx.c.tax_number)fail('官方报告税号与公司不符或公司税号未配置，请核对公司设置',409);
    return {data,filename:`Ozon_order_sales_${parsed.document_number}_${month}.json`,source:'Ozon /v1/finance/realization/posting',note:'仅仅读取官方原件，尚未上传、确认或调整账簿'};
   },
+  async adjustments(input,session){const ctx=await company(input,session),period=range(input);return approvedH1Report(query,{tenantId:ctx.tenantId,companyId:ctx.companyId,...period,shopId:input.shop_id},input);},
   async reconcile(input,session){return reconciler.report(input,await company(input,session));},
   async calibrationPreview(input,session){return reconciler.preview(input,await company(input,session));},
   async calibrationConfirm(input,session){return reconciler.confirm(input,await company(input,session));},

@@ -56,7 +56,7 @@ test('new reconciliation UI compiles and exposes explicit confirmation, source l
 });
 test('new finance endpoints retain membership and finance role gates',()=>{
  const s={personId:10,role:'admin',roles:['admin'],tenant:{id:2,slug:'customer',role:'owner',plan_code:'pro',subscription_status:'active'}};
- for(const [method,path]of [['GET','document-reconciliation'],['POST','document-calibration'],['POST','order-sales-source']]){
+ for(const [method,path]of [['GET','document-adjustments'],['GET','document-reconciliation'],['POST','document-calibration'],['POST','order-sales-source']]){
   const parts=['api','finance-center',path];assert.equal(authorizeApiRequest({method,_session:s},parts).allowed,true);assert.equal(tenantIsolationDecision(s,parts,method).allowed,true);
   const member={...s,role:'operations',roles:['operations'],tenant:{...s.tenant,role:'member'}};assert.equal(authorizeApiRequest({method,_session:member},parts).allowed,false);
  }

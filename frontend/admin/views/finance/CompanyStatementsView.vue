@@ -11,12 +11,13 @@ import { useAuthStore } from '../../stores/auth';
 import { canAccessPage } from '../../../../src/shared/permissions.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 
+const ApprovedH1Adjustments=defineAsyncComponent(()=>import('../../components/finance/ApprovedH1Adjustments.vue'));
 const FinanceReconciliation=defineAsyncComponent(()=>import('./FinanceReconciliation.vue'));
 const auth=useAuthStore(),router=useRouter(),route=useRoute();
 const allowed=computed(()=>canAccessPage(auth.user,'/finance/company-statements'));
 const initialMonth=/^20\d{2}-(0[1-9]|1[0-2])$/.test(String(route.query.month||''))?String(route.query.month):shanghaiDateKey().slice(0,7);
 const companies=ref([]),assignments=ref([]),allShops=ref([]),companyId=ref(''),shopId=ref(0),month=ref(initialMonth),period=ref('month');
-const report=ref(null),error=ref(''),loading=ref(false),busy=ref(false),tab=ref(route.query.tab==='documents'?'documents':'summary'),preview=ref(null),editManual=ref(null),review=ref(null),fileInput=ref(null),uploads=ref([]);
+const report=ref(null),error=ref(''),loading=ref(false),busy=ref(false),tab=ref(['documents','adjustments'].includes(route.query.tab)?route.query.tab:'summary'),preview=ref(null),editManual=ref(null),review=ref(null),fileInput=ref(null),uploads=ref([]);
 const helpOpen=ref(false),costDetail=ref(null),costSyncOpen=ref(false),costSyncResults=ref([]);
 let costGeneration=0;
 const fileCategory=ref('all'),guideOpen=ref(false),documentMonth=ref(route.query.tab==='documents'?initialMonth:'');
@@ -211,6 +212,9 @@ onBeforeUnmount(()=>{costGeneration++;generation++;controller?.abort();});
      <el-table v-if="uploads.length" :data="uploads"><el-table-column prop="name" label="本批文件"/><el-table-column prop="status" label="结果"/><el-table-column prop="note" label="提示" min-width="240"/></el-table>
      </details>
      <el-table :data="filteredDocuments"><el-table-column label="店铺" min-width="150"><template #default="{row}">{{shopName(row.shop_key)}}</template></el-table-column><el-table-column prop="month_key" label="归档月份" width="110"/><el-table-column label="显示名称 / 原始文件名" min-width="300"><template #default="{row}"><span>{{row.payload_json.display_name||row.original_name}}</span><small v-if="row.payload_json.display_name">{{row.original_name}}</small></template></el-table-column><el-table-column label="平台目录 / 原件来源" min-width="350"><template #default="{row}"><FinanceDocumentSource :document="row"/></template></el-table-column><el-table-column label="文件分类" min-width="190"><template #default="{row}"><el-tag v-for="c in row.categories" :key="c" size="small" class="category-tag">{{categoryName(c)}}</el-tag></template></el-table-column><el-table-column label="用途" min-width="150"><template #default="{row}">{{UPLOAD_TYPES.find(t=>t.value===row.payload_json.upload_type)?.label||'平台自动识别'}}<small v-if="row.payload_json.archive_source">插件同步 · {{row.payload_json.archive_source.folder_name}}</small><small v-if="row.payload_json.related_document_id">关联业务 #{{row.payload_json.related_document_id}}</small></template></el-table-column><el-table-column label="解析状态" width="140"><template #default="{row}">{{ statuses[row.parse_status] }}</template></el-table-column><el-table-column label="操作" width="240"><template #default="{row}"><el-button link :aria-label="`预览 ${row.original_name}`" @click="openPreview(row)">预览</el-button><el-button link @click="openFile(row.attachment_url)">原件</el-button><el-button v-if="row.parse_status==='preview'" link type="primary" :disabled="busy" :aria-label="`确认归档 ${row.original_name}`" @click="confirm(row)">确认归档</el-button></template></el-table-column></el-table>
+    </el-tab-pane>
+    <el-tab-pane label="调整账簿" name="adjustments" lazy>
+     <ApprovedH1Adjustments v-if="tab==='adjustments'" :key="companyId" :company-id="companyId" :from="windowRange.from" :to="windowRange.to" :shops="allShops.filter(s=>assignments.some(a=>Number(a.company_id)===Number(companyId)&&Number(a.shop_id)===Number(s.id)))"/>
     </el-tab-pane>
     <el-tab-pane label="订单对账" name="reconciliation" lazy>
      <FinanceReconciliation v-if="tab==='reconciliation'" :key="companyId" :company-id="companyId" :shops="allShops.filter(s=>assignments.some(a=>Number(a.company_id)===Number(companyId)&&Number(a.shop_id)===Number(s.id)))" :initial-month="month" @documents-changed="refreshDocuments"/>
