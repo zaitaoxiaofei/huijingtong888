@@ -18,14 +18,14 @@ onBeforeUnmount(()=>{generation++;controller?.abort();});
   <div class="adjustment-toolbar"><el-select v-model="shop" aria-label="调整店铺" clearable placeholder="全部店铺"><el-option v-for="s in shops" :key="s.id" :value="String(s.id)" :label="s.name"/></el-select><el-input v-model="keyword" aria-label="搜索调整记录" placeholder="货件号 / SKU / 调整编号" clearable @keyup.enter="page=1;load()" @clear="page=1;load()"/><el-button @click="page=1;load()">查询</el-button><el-button @click="load">刷新</el-button></div>
   <el-alert v-if="error" :title="error" type="error" :closable="false"/>
   <template v-if="data">
-   <p>2026年一、二季度已应用 {{data.summary.applied}} 项 · 收入变化 {{money(data.summary.revenue_delta)}} 元 · 佣金变化 {{money(data.summary.commission_delta)}} 元<span v-if="data.summary.stale"> · {{data.summary.stale}} 项待重新核对</span></p>
+   <p>已应用 {{data.summary.applied}} 项 · 收入变化 {{money(data.summary.revenue_delta)}} 元 · 佣金变化 {{money(data.summary.commission_delta)}} 元<span v-if="data.summary.stale"> · {{data.summary.stale}} 项待重新核对</span></p>
    <p>调整后金额用于ERP月度账单；官方文件汇总不重复加计调整额。其他费用仍待核对。</p>
    <el-table :data="data.rows" border>
     <el-table-column label="店铺 / 月份" min-width="175"><template #default="{row}">{{shops.find(s=>Number(s.id)===row.shop_id)?.name||'店铺 #'+row.shop_id}}<small>{{row.month}}</small></template></el-table-column>
     <el-table-column label="货件 / SKU" min-width="205"><template #default="{row}">{{row.posting_number}}<small>{{row.sku}}</small></template></el-table-column>
-    <el-table-column label="原收入 CNY" align="center" min-width="135"><template #default="{row}">{{money(row.before?.revenue)}}</template></el-table-column>
+    <el-table-column label="调整前收入 CNY" align="center" min-width="135"><template #default="{row}">{{money(row.before?.revenue)}}</template></el-table-column>
     <el-table-column label="调整收入 CNY" align="center" min-width="135"><template #default="{row}">{{money(row.after.net_revenue)}}</template></el-table-column>
-    <el-table-column label="原佣金 CNY" align="center" min-width="135"><template #default="{row}">{{money(row.before?.commission)}}</template></el-table-column>
+    <el-table-column label="调整前佣金 CNY" align="center" min-width="135"><template #default="{row}">{{money(row.before?.commission)}}</template></el-table-column>
     <el-table-column label="调整佣金 CNY" align="center" min-width="135"><template #default="{row}">{{money(row.after.commission_fee)}}</template></el-table-column>
     <el-table-column label="状态" min-width="120"><template #default="{row}">{{row.status==='applied'?'已应用 · 待核对':row.status==='superseded'?'已被后续调整替代':'未应用 · 原账变化'}}</template></el-table-column>
     <el-table-column label="" width="155"><template #default="{row}"><el-button link type="primary" @click="detail=row">原账与调整依据</el-button></template></el-table-column>
