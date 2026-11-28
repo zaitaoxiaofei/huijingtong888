@@ -117,6 +117,7 @@ test("one failed feed cannot suppress orders from the other feed", async () => {
     chinaDateKeyMysql: () => "2026-10-20",
     markInventoryAlertSkuDailyDirtyMysql: async () => {},
     fetchOzonPostings: async () => failFbp ? { postings: [{ posting_number: "FBS-1", ordered_at: "2026-10-20T01:00:00Z" }], requests: 1 } : Promise.reject(new Error("FBS unavailable")),
+    fetchOzonFboPostings: async () => ({postings:[],requests:1}),
     fetchOzonFbpPostings: async () => failFbp ? Promise.reject(new Error("FBP unavailable")) : { postings: [{ posting_number: "FBP-1", ordered_at: "2026-10-20T01:00:00Z" }], requests: 1 },
     upsertPostingMysql: async (_shop, posting) => { written.push(posting.posting_number); return { inserted: 1, updated: 0, insertedItems: 1 }; },
     mysqlExecute: async () => {},

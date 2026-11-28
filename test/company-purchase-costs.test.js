@@ -38,6 +38,10 @@ test('unknown cost poisons its own summary cell, real zero remains zero, referen
 });
 test('SQL reader scopes legacy access, shop and original posting independently of order creation month',async()=>{
  const ctx={tenantId:2,companyId:10,s:{tenant:{slug:'tenant-a'}}};const calls=[];
- const query=async(sql,params)=>{calls.push({sql,params});if(sql.includes('FROM finance_import_documents'))return[];if(sql.startsWith('SELECT shop_id'))return[{shop_id:7,effective_from:'2026-01-01',effective_to:null}];assert.match(sql,/s\.tenant_id=\?/);assert.match(sql,/a\.company_id=\?/);assert.match(sql,/o\.posting_number IN/);assert.ok(!sql.includes('o.ordered_at>='));assert.equal(params[1],2);assert.equal(params[2],0);assert.ok(params.includes(10));return[item()];};
+ const query=async(sql,params)=>{calls.push({sql,params});if(sql.includes('FROM ozon_orders_raw'))return[];if(sql.includes('FROM finance_import_documents'))return[];if(sql.startsWith('SELECT shop_id'))return[{shop_id:7,effective_from:'2026-01-01',effective_to:null}];assert.match(sql,/s\.tenant_id=\?/);assert.match(sql,/a\.company_id=\?/);assert.match(sql,/o\.posting_number IN/);assert.ok(!sql.includes('o.ordered_at>='));assert.equal(params[1],2);assert.equal(params[2],0);assert.ok(params.includes(10));return[item()];};
  const r=await readCompanyPurchaseCosts({query,documents:[doc()],ctx,period});assert.equal(r.reference.known_amount_cny,12);assert.equal(calls.length,3);
+});
+test('unlisted financial SKU keeps its cost unresolved rather than silently dropping or moving it',()=>{
+ const r=buildCompanyPurchaseCosts({documents:[doc()],items:[item(),item({item_id:21,ozon_sku:'10',purchase_cost_cny:8})],period,rawPostings:[{shop_id:7,posting_number:'123-456-1',raw_json:{raw:{posting_number:'123-456-1',products:[{sku:9,quantity:1},{sku:10,quantity:1}],financial_data:{products:[{product_id:9,payout:20,commission_amount:-2},{product_id:10,payout:0,commission_amount:0}]}}}}]});
+ assert.equal(r.known_amount_cny,12);assert.equal(r.complete,false);assert.equal(r.issues[0].code,'unlisted-sku-cost');assert.equal(r.lines.find(l=>l.sku==='10').amount,null);
 });

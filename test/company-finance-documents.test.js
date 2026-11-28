@@ -24,6 +24,7 @@ function database(options={}){
   if(sql.includes('FROM orders o JOIN shops s')){assert.match(sql,/s.tenant_id=\?/);return options.items||[];}
   if(sql.includes('FROM finance_shop_company_assignments'))return p[0]===p[1]?[{id:p[0]*10,name:'Example Z'}]:[];
   if(sql.includes('FROM finance_reconciliation_adjustments'))return [];
+  if(sql.includes('FROM ozon_orders_raw'))return [];
   if(sql.includes('FROM finance_periods'))return closed.has(`${p[0]}:${p[1]}`)?[{id:1}]:[];
   if(sql.includes('FROM finance_import_documents')){
    if(options.failJsonSort&&/ORDER BY month_key,id/.test(sql))throw Error('Out of sort memory');

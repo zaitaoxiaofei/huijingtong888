@@ -151,7 +151,8 @@ export async function fetchOzonPostingByNumber(shop, postingNumber, options = {}
     const demoMatch = demoPostings(shop, options.since || options.from).find((item) => String(item.posting_number || "") === posting);
     return demoMatch || null;
   }
-  const data = await ozonRequest(shop, "/v3/posting/fbs/get", {
+  let data;
+  try { data = await ozonRequest(shop, "/v3/posting/fbs/get", {
     posting_number: posting,
     with: {
       analytics_data: true,
@@ -159,10 +160,42 @@ export async function fetchOzonPostingByNumber(shop, postingNumber, options = {}
       financial_data: true,
       translit: true
     }
-  }, options);
+  }, options); } catch(error) {
+    if(error.statusCode!==404||!String(error.message).includes("Unknown posting number"))throw error;
+    return fetchOzonFboPostingByNumber(shop,posting,options);
+  }
   const rawPosting = data.result?.posting || data.result || data.posting || data;
   const normalized = normalizeOzonPosting(rawPosting);
   return normalized?.posting_number ? normalized : null;
+}
+
+export async function fetchOzonFboPostingByNumber(shop, postingNumber, options={}) {
+ const data=await ozonRequest(shop,'/v2/posting/fbo/get',{posting_number:postingNumber,with:{financial_data:true,analytics_data:false}},options);
+ const raw=data.result||data;
+ if(String(raw.posting_number)!==String(postingNumber))throw Error('FBO货件号与请求不一致');
+ return normalizeOzonFboPosting(raw);
+}
+export function normalizeOzonFboPosting(raw) {
+ const posting=normalizeOzonPosting({...raw,in_process_at:raw.created_at||raw.in_process_at});
+ return {...posting,fulfillment_schema:'FBO',raw:{...raw,fulfillment_schema:'FBO',delivery_method:{...raw.delivery_method,name:'FBO'}}};
+}
+export async function fetchOzonFboPostings(shop,options={}) {
+ if(!hasRealOzonCredentials(shop))return {postings:[],fetched:0,requests:0,ranges:0};
+ const postings=new Map();let requests=0,ranges=0;
+ const statuses=normalizeStatusList(options.statuses||options.status);
+ for(const [since,to]of splitDateRange(normalizeIsoStart(options.from||options.since,30),normalizeIsoEnd(options.to,new Date()),31)) {
+  ranges++;let cursor='';const seen=new Set();
+  while(true){
+   throwIfAborted(options.signal);
+   const data=await ozonRequest(shop,'/v3/posting/fbo/list',{filter:{since,to},limit:100,cursor,with:{financial_data:true,analytics_data:false}},options);requests++;
+   if(!Array.isArray(data.postings)||typeof data.has_next!=='boolean'||typeof data.cursor!=='string')throw Error('FBO订单列表格式无效');
+   for(const raw of data.postings){const posting=normalizeOzonFboPosting(raw);if(!posting.posting_number)throw Error('FBO列表缺少货件号');if(!statuses.length||statuses.includes(posting.status))postings.set(posting.posting_number,posting);}
+   if(!data.has_next)break;
+   if(!data.cursor||data.cursor===cursor||seen.has(data.cursor))throw Error('FBO订单列表游标未前进，不能认定同步完整');
+   seen.add(data.cursor);cursor=data.cursor;
+  }
+ }
+ return {postings:[...postings.values()],fetched:postings.size,requests,ranges};
 }
 
 export async function fetchOzonProducts(shop, options = {}) {

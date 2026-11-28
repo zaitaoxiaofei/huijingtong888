@@ -1318,6 +1318,8 @@ Date-range sync payload.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
+| `posting_numbers` | `array<string>` | No |  |
+| `dry_run` | `boolean` | No | With posting_numbers: preview only; no order, finance or stock writes. |
 | `from` | `string` | No | Inclusive start date in YYYY-MM-DD. |
 | `to` | `string` | No | Inclusive end date in YYYY-MM-DD. |
 | `shop_id` | `number` | No | Optional target shop identifier. |
@@ -2612,7 +2614,7 @@ Return ranking rows for the selected profit dimension. inventory=1 groups bound 
 
 #### `GET /api/finance-center/document-reconciliation`
 
-Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history.
+Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history. settlement_links identifies order SKUs absent from this report only when scoped raw order products match quantity and platform financial payout/commission are explicitly zero, with another SKU settled on the same shipment. These are not aliases or new zero-income sales; amounts and costs remain separate and require review. Missing evidence and conflicts remain unmatched.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Query parameters:
@@ -2665,7 +2667,7 @@ Preview, explicitly confirm or review enterprise finance originals. Plugin looku
 
 #### `GET /api/finance-center/document-report`
 
-Read scoped company finance originals, registered expenses and historical procurement costs matched by official posting/SKU and sales-report month. Preview originals contribute only to the reference projection; confirmed amounts remain separate. Procurement uses saved item CNY cost, falling back to frozen unit cost; no current catalog price, purchase payment or order-date substitution. Repeated reports deduplicate; conflicts, unmatched orders, missing history and excess quantities remain unknown, not zero. Refunds alone never reverse goods cost into stock. Summaries group cost rows by shop/month; purchase_cost_details=1 returns fifty rows per cost_page, optionally filtered by cost_shop_id. Raw official order_rows are omitted from the listing, retaining order_row_count and the original attachment. No source order, inventory or accounting expense is changed.
+Read scoped company finance originals, registered expenses and historical procurement costs matched by official posting/SKU and sales-report month. Preview originals contribute only to the reference projection; confirmed amounts remain separate. Procurement uses saved item CNY cost, falling back to frozen unit cost; no current catalog price, purchase payment or order-date substitution. Repeated reports deduplicate; conflicts, unmatched orders, missing history and excess quantities remain unknown, not zero. Refunds alone never reverse goods cost into stock. Summaries group cost rows by shop/month; purchase_cost_details=1 returns fifty rows per cost_page, optionally filtered by cost_shop_id. Unlisted settlement SKUs retain their own identity and unresolved procurement-cost timing rather than being replaced by another SKU or zeroed. Raw official order_rows are omitted from the listing, retaining order_row_count and the original attachment. No source order, inventory or accounting expense is changed.
 
 - Auth: `authenticated; current-enterprise finance authority`
 - Query parameters:
@@ -4786,7 +4788,7 @@ Run the CEL FBS pricing calculator for a single input payload.
 
 #### `POST /api/sync/ozon`
 
-Run a full Ozon order synchronization for a requested date window.
+Run an enterprise-scoped FBS, FBP and cursor-paged FBO order synchronization. FBO identity/items are imported transactionally and idempotently, preserving platform fulfillment; no local outbound, procurement, profit calculation or finance accrual is created. Missing historical costs remain pending. Exact posting lookup falls back to FBO only for an unknown-posting FBS 404. With posting_numbers, dry_run=true returns a read-only recovery preview before any writes.
 
 - Auth: `authenticated`
 - Request body: optional

@@ -1,3 +1,4 @@
+import {importFboOrder,fboInventoryExclusionSql} from './ozon-fbo-order-import.js';
 import { postFbpPhysicalShipment } from "./fbp-physical-shipment.js";
 import { writeOnlineProductSync, writeStockSnapshotSync } from "./online-product-sync-write.js";
 import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
@@ -89,7 +90,7 @@ import { fxSettlementInputFingerprint, planOrderFxSettlement } from "./order-pro
 import { getOrderProfitFxPolicy, orderFxSalePrice, pendingOrderFxEstimate, prepareOrderProfitFx, readOrderProfitFxState } from "./order-profit-fx-policy.js";
 import { ensureOrderProfitDailyFx, orderProfitFxBusinessDate } from "./order-profit-daily-fx.js";
 import { writeOrderFinanceAccrual } from "./order-finance-accrual-write.js";
-import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, splitOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
+import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonFboPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, splitOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { matchesCancellationRule } from "./order-cancellation-review.js";
@@ -18483,7 +18484,7 @@ async function syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement, co
 }
 
 function orderOutboundSyncScopeMysql(options = {}, tenantScope) {
-  const where = ["oi.quantity > 0", `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND COALESCE(owned_shop.platform, 'ozon') <> 'wb' AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`];
+  const where = ["oi.quantity > 0", fboInventoryExclusionSql, `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND COALESCE(owned_shop.platform, 'ozon') <> 'wb' AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`];
   const params = [];
   const shopId = Number(options.shop_id || options.shopId || 0);
   const ozonSku = String(options.ozon_sku || options.ozonSku || "").trim();
@@ -20070,6 +20071,7 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
   const tenantScope = await orderListTenantScopeMysql(options.tenantId || shop.tenant_id || "admin");
   await assertOrderTaskAccessMysql(tenantScope, options);
   shop = await activeShopForTenantMysql(shop.id, tenantScope.id);
+  if(posting.fulfillment_schema==='FBO')return importFboOrder({transaction:callback=>withMysqlTransaction(connection=>callback(profitCalculationDatabase(connection))),shop,posting,tenantId:tenantScope.id,allowLegacy:tenantScope.defaultTenant});
   if (!options.salesDatesMarked) await markInventoryAlertSkuDailyDirtyMysql(posting.ordered_at, shop.tenant_id || "admin");
   posting = await saveRawPostingMysql(shop, posting);
   if (Number(options.logisticsDetailBudget?.remaining || 0) > 0
@@ -20450,7 +20452,8 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
       let successfulFeeds = 0;
       for (const [name, fetch, feedFrom] of [
         ["FBS", fetchOzonPostings, fetchFrom],
-        ["FBP", fetchOzonFbpPostings, fbpFetchFrom]
+        ["FBP", fetchOzonFbpPostings, fbpFetchFrom],
+        ["FBO", fetchOzonFboPostings, fetchFrom]
       ]) {
         try {
           const result = await fetch(shop, { from: feedFrom, to: fetchTo, statuses, chunkDays: 31, signal: options.signal });
@@ -20744,6 +20747,7 @@ export async function syncOzonPostingsByNumberMysql(body = {}, options = {}) {
       if(detail?.posting_number===parent)pending.set(`${shop.id}:${parent}`,{shop:current,posting:detail});
     } catch(error) { errors.push(`${shop.name} ${parent}: ${error.message}`); }
   }
+  if(body.dry_run===true)return {dry_run:true,financial_writes:false,inventory_writes:false,rows:[...rows,...[...pending.values()].map(({shop,posting})=>({shop_id:shop.id,posting_number:posting.posting_number,fulfillment_schema:posting.fulfillment_schema||'FBS',status:posting.status,items:posting.items,action:posting.fulfillment_schema==='FBO'?'补齐平台履约订单；不追加财务流水、不扣库存':'预览；尚未同步'}))],errors};
   for (const {shop,posting} of [...pending.values()].sort((a,b)=>Number(Boolean(b.posting.raw?.parent_posting_number))-Number(Boolean(a.posting.raw?.parent_posting_number)))) {
     await assertOrderTaskAccessMysql(tenantScope,options);
     const current=await activeShopForTenantMysql(shop.id,tenantScope.id);
