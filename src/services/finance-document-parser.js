@@ -67,8 +67,9 @@ function documentMonth(text) {
   if(m)return {from:`${m[3]}-${m[2]}`,to:`${m[3]}-${m[2]}`};
   return null;
 }
-export async function parseFinanceDocument(buffer,name,{month}={}) {
-  validateMonth(month);
+export async function parseFinanceDocument(buffer,name,{month,crossMonthCash=false}={}) {
+  if(!crossMonthCash)validateMonth(month);
+  if(crossMonthCash&&!/\.xlsx$/i.test(name))fail("连连跨月流水请上传原始 XLSX");
   if(!Buffer.isBuffer(buffer)||!buffer.length||buffer.length>20*1024*1024)fail('文件为空或超过20MB，请检查上传原件');
   if(/\.json$/i.test(name))return parseOrderSalesJson(buffer,{month});
   const {text:original,rows,scanned}=await extract(buffer,name);const text=original.replace(/\u00a0/g,' '),flat=text.replace(/\s+/g,' ');
@@ -96,6 +97,12 @@ export async function parseFinanceDocument(buffer,name,{month}={}) {
       result.cash.push({type:isEntry?'entry':'withdrawal',date,currency:get(r,isEntry?'币种':'提现币种'),amount:rounded(amount(get(r,isEntry?'金额':'提现金额'))),reference:String(get(r,isEntry?'交易单号':'批次单号')),fee:isEntry?null:rounded(amount(get(r,'实收基础服务费'))+amount(get(r,'提前宝服务费'))+amount(get(r,'小额服务费'))),listed_bank_currency:isEntry?null:get(r,'到账币种'),listed_bank_amount:isEntry?null:rounded(amount(get(r,'到账金额'))),source:`第${i}行`});
     }
     result.warnings.push('公司共用收款流水；按交易日期筛选，不自动认作店铺收入或银行实际到账，提现费用保留原币');
+    if(crossMonthCash){
+      const dates=result.cash.map(row=>row.date.slice(0,10)).sort();
+      if(!dates.length)fail('连连原件没有可统计的交易');
+      result.transaction_period={from:dates[0],to:dates.at(-1)};
+      result.month=validateMonth(dates.at(-1).slice(0,7));
+    }
   }else if(/Sales Report\s*[№#]/i.test(flat)&&rows.length){
     result.kind='sales'; result.document_number=flat.match(/Sales Report\s*[№#]\s*(\d+)/i)?.[1];
     if(!flat.includes('Sold for the amount, CNY')||!flat.includes('Returned for the amount, CNY'))fail('销售报告列结构变化，需核实币种及销售/退货列');
@@ -141,6 +148,7 @@ export async function parseFinanceDocument(buffer,name,{month}={}) {
   }else if(/СЧЕТ-ФАКТУРА/i.test(flat)){
     result.kind='foreign-invoice';result.document_number=flat.match(/ЗВ\s*-\s*\d+/)?.[0]?.replace(/\s/g,'');result.warnings.push('境外发票仅补证；与同号服务书对应，RUB和CNY不得重复累加，汇率及VAT口径待核');
   }
+  if(crossMonthCash&&result.kind!=='collection-cash')fail('请选择连连入账或提现原始文件');
   if(result.facts.length&&result.period&&(result.period.from!==month||result.period.to!==month))fail(`文件正文期间为${result.period.from}至${result.period.to}，与所选业务月份${month}不同，请切换正确月份`);
   if(result.facts.length&&!result.period)fail('无法识别正文业务期间（month），请提供完整原始文件，不能只按文件名入账');
   if(!result.document_number&&result.facts.length)fail('无法识别业务单据编号，停止自动入账，避免重复计费');

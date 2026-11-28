@@ -72,7 +72,28 @@ export function reconcileImportedCash(documents,{from,to}){
   if(candidates.length!==1)return {payment,status:candidates.length?'ambiguous':'unmatched',entry:null};
   const entry=candidates[0];used.add(entries.indexOf(entry));return {payment,entry,status:'amount_date_candidate',note:'仅金额和日期候选匹配，需确认账户及店铺归属；不据此认定汇兑为零'};
  });
- return {matches,duplicates:cash_duplicates,conflicts:cash_conflicts,currencies:currencies.map(currency=>{
+ const monthly=[];
+ for(const month of [...new Set(rows.map(row=>row.date.slice(0,7)))].sort()){
+  const events=rows.filter(row=>row.date.startsWith(month));
+  for(const currency of new Set(events.map(row=>row.currency))){
+   const incoming=events.filter(row=>row.type==='entry'&&row.currency===currency);
+   const outgoing=events.filter(row=>row.type==='withdrawal'&&row.currency===currency);
+   const sum=(list,field)=>list.length&&list.every(row=>row[field]!=null)?rounded(list.reduce((n,row)=>n+row[field],0)):null;
+   const conflicted=cash_conflicts.some(c=>c.sources.some(row=>row.currency===currency&&row.date.startsWith(month)));
+   monthly.push({month,currency,entry_count:incoming.length,withdrawal_count:outgoing.length,
+    entries:conflicted?null:sum(incoming,'amount'),withdrawals:conflicted?null:sum(outgoing,'amount'),fees:conflicted?null:sum(outgoing,'fee'),
+    listed_arrivals:[...new Set(outgoing.map(row=>row.listed_bank_currency).filter(Boolean))].map(bankCurrency=>({currency:bankCurrency,amount:conflicted?null:sum(outgoing.filter(row=>row.listed_bank_currency===bankCurrency),'listed_bank_amount')}))});
+  }
+ }
+ const shopPayments=[];
+ for(const shopId of new Set(payments.map(row=>Number(row.shop_id)).filter(Boolean))){
+  const own=matches.filter(row=>Number(row.payment.shop_id)===shopId);
+  for(const currency of new Set(own.map(row=>row.payment.currency))){
+   const selected=own.filter(row=>row.payment.currency===currency);
+   shopPayments.push({shop_id:shopId,currency,payment_count:selected.length,amount:rounded(selected.reduce((n,row)=>n+row.payment.amount,0)),candidate_count:selected.filter(row=>row.entry).length});
+  }
+ }
+ return {monthly,shop_payments:shopPayments,matches,duplicates:cash_duplicates,conflicts:cash_conflicts,currencies:currencies.map(currency=>{
   const selected=rows.filter(r=>r.currency===currency),entries=selected.filter(r=>r.type==='entry'),withdrawals=selected.filter(r=>r.type==='withdrawal');
   const conflict=cash_conflicts.some(c=>c.sources.some(s=>s.currency===currency));
   const unknownFees=withdrawals.some(r=>r.fee==null);
@@ -107,9 +128,11 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
   return transaction(async db=>{
    // Reserve the existing company/month key. Closing uses the same period row,
    // so close and confirmation cannot pass each other between check and write.
-   await db.execute("INSERT IGNORE INTO finance_periods(tenant_id,company_id,month_key,status) VALUES(?,?,?,'preparing')",[ctx.s.tenant.slug==='default'?null:ctx.tenantId,ctx.companyId,month]);
-   const [period]=await db.query('SELECT status FROM finance_periods WHERE company_id=? AND month_key=? FOR UPDATE',[ctx.companyId,month]);
-   if(period?.status==='closed')fail(`公司${month}已关账，请先由会计按既有流程处理关账状态`,409);
+   for(const key of [...new Set([month,...(ctx.cashMonths||[])])].sort()){
+   await db.execute("INSERT IGNORE INTO finance_periods(tenant_id,company_id,month_key,status) VALUES(?,?,?,'preparing')",[ctx.s.tenant.slug==='default'?null:ctx.tenantId,ctx.companyId,key]);
+   const [period]=await db.query('SELECT status FROM finance_periods WHERE company_id=? AND month_key=? FOR UPDATE',[ctx.companyId,key]);
+   if(period?.status==='closed')fail(`公司${key}已关账，请先由会计按既有流程处理关账状态`,409);
+   }
    if(ctx.archiveInput)await validateSource(ctx.archiveInput,ctx,ctx.archiveHash);
    return worker(db);
   });
@@ -144,14 +167,17 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const doc=rows[0];return {document:doc?{id:doc.id,month_key:doc.month_key,parse_status:doc.parse_status,attachment_url:doc.attachment_url,payload_json:payload(doc)}:null,duplicate:Boolean(doc)};
   },
   async preview(input,session){
-   const ctx=await company(input,session),month=validateMonth(input.month),shop=Number(input.shop_id||0);
+   const ctx=await company(input,session),shop=Number(input.shop_id||0);
+   const uploadType=String(input.upload_type||'auto'),crossMonthCash=uploadType==='collection-cash'&&!input.month;
+   let month=crossMonthCash?undefined:validateMonth(input.month);
+   if(crossMonthCash&&(shop||input.related_document_id||input.archive_source))fail('连连跨月流水请选择公司共用并上传独立原件');
    if(!Number.isSafeInteger(shop)||shop<0)fail('店铺shop_id无效，请重新选择店铺或公司共用');
-   const shops=await shopsFor(ctx,{from:month,to:month});if(shop&&!shops.some(s=>Number(s.id)===shop))fail('所选店铺在该月不属于当前公司，请先检查公司与店铺归属',403);
-   await locked(ctx,month);await ready();
+   if(shop&&!(await shopsFor(ctx,{from:month,to:month})).some(s=>Number(s.id)===shop))fail('所选店铺在该月不属于当前公司，请先检查公司与店铺归属',403);
+   if(month)await locked(ctx,month);await ready();
    await files.owned(input.attachment_url,ctx.s,'finance');const file=await files.read(input.attachment_url,ctx.s);
    const source=await validateSource(input,ctx,crypto.createHash('sha256').update(file.buffer).digest('hex'));
    if(source){ctx.archiveInput=input;ctx.archiveHash=source.sha256;}
-   const uploadType=String(input.upload_type||'auto'),type=UPLOAD_TYPES.find(t=>t.value===uploadType);
+   const type=UPLOAD_TYPES.find(t=>t.value===uploadType);
    if(!type)fail('请选择有效上传类型（upload_type），再选择对应原件');
    if(type.shop&&!shop)fail('此类平台文件必须选择实际店铺（shop_id），不能归公司共用');
    if(type.shared&&shop)fail('连连流水请选择公司共用（shop_id=0），避免多个店铺重复入账');
@@ -177,7 +203,8 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
       p.warnings.push('仅记录本次业务一次；后补发票选择“仅归档”并关联本单。采购支出、设备购置、预付押金不直接算费用。');
      }
     }else{
-     p=await parse(file.buffer,file.row.original_name,{month});
+     p=await parse(file.buffer,file.row.original_name,{month,crossMonthCash});
+     if(crossMonthCash)month=validateMonth(p.month);
      if(type.kinds&&!type.kinds.includes(p.kind))fail('所选上传类型与文件正文不匹配，请按预览结果重新选择类型；不按文件名猜测金额');
     }
     if(p.kind==='order-sales'&&!ctx.c.tax_number)fail('公司税号尚未配置，请在公司与店铺设置中补齐后上传逐单销售凭证');
@@ -185,7 +212,8 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
     if(p.kind==='collection-cash'&&shop)fail('连连流水属于公司共用账户，请选择“公司共用”上传，避免三店重复导入');
     if((p.facts.length||p.kind==='order-sales')&&!shop&&uploadType!=='manual-expense')fail('平台销售与费用需要明确店铺（shop_id），请选择实际店铺后重试');
     if(p.buyer_tax_number&&ctx.c.tax_number&&p.buyer_tax_number!==ctx.c.tax_number)fail('文件购买方税号与所选公司不符，请核对公司主体');
-   }catch(e){status='error';p={facts:[],cash:[],controls:[],warnings:[e.message],kind:'unparsed',month};}
+   }catch(e){if(crossMonthCash)throw e;status='error';p={facts:[],cash:[],controls:[],warnings:[e.message],kind:'unparsed',month};}
+   if(crossMonthCash)ctx.cashMonths=p.cash.map(row=>row.date.slice(0,7));
    if(source)p.archive_source=source;
    if(sourceLocation)p.source_location=sourceLocation;
    p.upload_type=uploadType;p.display_name=displayName;p.related_document_id=linked?.id||null;
@@ -240,6 +268,8 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const [doc]=await query('SELECT * FROM finance_import_documents WHERE id=? AND tenant_id=? AND company_id=?',[id(input.document_id,'单据'),ctx.tenantId,ctx.companyId]);
    if(!doc)fail('单据不存在或不属于当前公司',404);await locked(ctx,doc.month_key);
    if(doc.parse_status==='error')fail('文件解析失败或归属/期间不符，请按预览提示补正后重新上传');
+   const cash=payload(doc);
+   if(cash.kind==='collection-cash'&&cash.transaction_period)ctx.cashMonths=cash.cash.map(row=>row.date.slice(0,7));
    const revision=Number(doc.revision||0);
    if(payload(doc).kind==='manual-expense'&&Number(input.expected_revision||0)!==revision)fail('手工费用草稿已经修改，请刷新、重新预览后再确认',409);
    const saved=await writePeriod(ctx,doc.month_key,db=>db.execute("UPDATE finance_import_documents SET parse_status='confirmed',confirmed_by=?,confirmed_at=UTC_TIMESTAMP() WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='preview' AND revision=?",[ctx.s.personId,doc.id,ctx.tenantId,ctx.companyId,revision]));
