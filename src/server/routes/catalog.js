@@ -7,6 +7,14 @@ function readProductSaveJson(readJson, req) {
   return readJson(req, { limitBytes: PRODUCT_SAVE_BODY_LIMIT_BYTES });
 }
 
+function inventoryWriteOptions(req) {
+  return {
+    session: req._session,
+    signal: req._abortSignal,
+    markTiming: label => req._timingMarks?.push({ label, at: performance.now() })
+  };
+}
+
 export function createCatalogRoutes({ services, readJson }) {
   return {
     "GET /api/inventory-product-requests": (req, url) => services.inventoryProductRequests(Object.fromEntries(url.searchParams.entries()), req._session),
@@ -58,15 +66,15 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/products/import-preview": async (req) => services.previewProductCsvImport(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/products/import-commit": async (req) => services.commitProductCsvImport(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/online-products": async (req) => services.createOnlineProduct(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
-    "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }) || { ok: true },
+    "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req), tenantIdFromRequest(req), inventoryWriteOptions(req)) || { ok: true },
     "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req), { tenantId: tenantIdFromRequest(req) }) || { ok: true },
     "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { signal: req._abortSignal, session: req._session }),
     "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/online-products/create-product": async (req) => {
       const body = await readProductSaveJson(readJson, req);
       return (body.structured_naming || body.structuredNaming)
-        ? services.submitInventoryProductRequest(body, req._session)
-        : services.createProductFromOnlineProduct({ ...body, created_by_person_id: req._session?.personId }, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal });
+        ? services.submitInventoryProductRequest(body, req._session, inventoryWriteOptions(req))
+        : services.createProductFromOnlineProduct({ ...body, created_by_person_id: req._session?.personId }, tenantIdFromRequest(req), inventoryWriteOptions(req));
     }
   };
 }

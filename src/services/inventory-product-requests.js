@@ -120,7 +120,7 @@ function requestResult(row) {
   return { status: row.status, request_id: Number(row.id), product_id: row.product_id ? Number(row.product_id) : null, binding_status: row.binding_status, binding_error: row.binding_error || "" };
 }
 
-export async function submitInventoryProductRequest(body = {}, session = {}) {
+export async function submitInventoryProductRequest(body = {}, session = {}, { markTiming } = {}) {
   session = {...(await authorizeBusinessTaskSession(session)),name:session.name||''};
   await ensureSchema();
   const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
@@ -133,8 +133,9 @@ export async function submitInventoryProductRequest(body = {}, session = {}) {
   if (previous[0]) return requestResult(previous[0]);
   const { payload, naming } = normalizeInventoryRequestPayload(body, session);
   const options = await newOptions(naming, tenant);
+  markTiming?.("inventory_create_dictionary");
   if (!options.length) {
-    const created = payload.online_product_id ? await createProductFromOnlineProductMysql(payload, String(tenant.id)) : await createProductMysql(payload, null, String(tenant.id));
+    const created = payload.online_product_id ? await createProductFromOnlineProductMysql(payload, String(tenant.id), { markTiming }) : await createProductMysql(payload, null, String(tenant.id));
     return created;
   }
   const saved = await withMysqlTransaction(async connection => {
