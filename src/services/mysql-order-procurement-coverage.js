@@ -40,7 +40,7 @@ const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
 export function invalidateOrderProcurementCoverage(change) { invalidateInventoryWorkflow(change); generation += 1; cached = null; pending = null; }
 
-export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false, queuesOnly = false, targetedDemands = false } = {}) {
+export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false, queuesOnly = false, targetedDemands = false, outboundOnly = false } = {}) {
   if (includeTrace) fresh = true;
   if (productId !== null && (!Number.isSafeInteger(Number(productId)) || Number(productId) <= 0)) throw new Error('库存商品 ID 无效');
   const ownerScope = await resolveInventoryTenantScope(tenantId ?? 'admin', query);
@@ -67,24 +67,25 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     : ` AND (${column} = ${tenantPk}${includeLegacyTenantNull ? ` OR ${column} IS NULL` : ''})`;
   // Small product-scoped saves need only their own history. Full queue loads
   // aggregate once; a correlated lookup here avoids aggregating unrelated orders.
-  const smallProductScope = localStateOnly || (requestedIds.length > 0 && scopedIds.length <= 32);
+  const smallProductScope = outboundOnly || localStateOnly || (requestedIds.length > 0 && scopedIds.length <= 32);
   const localBatchScope = localStateOnly && scopedIds.length > 32;
-  const transportAt = localBatchScope ? 'transport.transport_at' : smallProductScope
+  const transportAt = outboundOnly ? 'NULL' : localBatchScope ? 'transport.transport_at' : smallProductScope
     ? `(SELECT MIN(h.last_status_changed_at) FROM order_status_history h WHERE h.order_id = o.id
         AND h.status IN ${transportStatusesSql} AND h.last_status_changed_at IS NOT NULL)`
     : 'NULL';
-  const hasTransportHistory = localBatchScope ? 'transport.order_id IS NOT NULL' : smallProductScope
+  const hasTransportHistory = outboundOnly ? '0' : localBatchScope ? 'transport.order_id IS NOT NULL' : smallProductScope
     ? `EXISTS (SELECT 1 FROM order_status_history h WHERE h.order_id = o.id AND h.status IN ${transportStatusesSql})`
     : '0';
   const physicalDispatch = localBatchScope ? 'physical_dispatch.order_id IS NOT NULL' : smallProductScope ? oglPhysicalDispatchSql('o') : '0';
   if (!fresh && cached && cached.expires > Date.now()) return cached.value;
   if (!fresh && pending) return pending;
-  // Used only for local physical/safety display, never a purchase decision.
-  const allocationQuery=localStateOnly?async()=>[]:query;
+  // Physical stock display and outbound reconciliation do not require purchase records.
+  const allocationQuery=localStateOnly||outboundOnly?async()=>[]:query;
   const end=Date.parse(`${shanghaiDateKey()}T00:00:00+08:00`),start=end-7*86400000;
   const utc=value=>new Date(value).toISOString().slice(0,19).replace('T',' ');
-  const needsFulfillmentSql = `CASE WHEN (o.status IN ('awaiting_packaging','awaiting_approve','acceptance_in_progress','posting_created','posting_acceptance_in_progress','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
-    OR o.tracking_stage IN ('awaiting_packaging','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered'))
+  const openOrderStatusSql = `(o.status IN ('awaiting_packaging','awaiting_approve','acceptance_in_progress','posting_created','posting_acceptance_in_progress','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
+    OR o.tracking_stage IN ('awaiting_packaging','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered'))`;
+  const needsFulfillmentSql = `CASE WHEN ${openOrderStatusSql}
     AND LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) NOT REGEXP 'cancel|return|reject|delivered|dispute|arbitration'
     AND NOT (${physicalDispatch}) THEN 1 ELSE 0 END`;
   const enteredTransportSql = `CASE WHEN COALESCE(o.cancelled_after_ship, 0) > 0 OR o.delivered_at IS NOT NULL
@@ -123,7 +124,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const candidates=targetedDemands&&requestedIds.length&&!localBatchScope?procurementDemandCandidates({demandIds:demandIdSql,stockIds:scopedIdSql,tenantScope}):null;
   const version = generation;
   const work = (async () => {
-    const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources, fbpReservations, priorities, transportRows, dispatchRows] = await Promise.all([
+    const [demandRows, stocks, allocations, inbounds, requests, marks, historicalDeductions, sources, stockSources, fbpReservations, priorities, transportRows, dispatchRows] = await Promise.all([
       loadDemands(demandQuery, `SELECT STRAIGHT_JOIN o.id AS order_id, oi.id AS order_item_id, o.ordered_at, o.posting_number,
         o.status AS source_order_status, o.tracking_stage AS source_order_tracking_stage,
         o.logistics_status AS source_order_logistics_status,
@@ -152,12 +153,12 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         JOIN products cp ON cp.id = COALESCE(ri.product_id, pc.component_product_id, p.id)${tenantScope('cp.tenant_id')}
         LEFT JOIN ozon_orders_raw raw FORCE INDEX (idx_order_procurement_location)
           ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-        ${requestedIds.length ? `WHERE (COALESCE(ri.product_id, pc.component_product_id, p.id, 0) IN (${demandIdSql})
+        ${outboundOnly ? `WHERE ${openOrderStatusSql}` : requestedIds.length ? `WHERE (COALESCE(ri.product_id, pc.component_product_id, p.id, 0) IN (${demandIdSql})
           OR oi.id IN (SELECT related_order_item_id FROM inventory_movements WHERE product_id IN (${scopedIdSql})${tenantScope()}
             AND status = 'posted' AND source_type = 'order_outbound'))` : ''}
 `, fresh),
       // Match the order/inventory display: legacy UNKNOWN movements belong to the non-FBP ledger.
-      query(`SELECT product_id,
+      outboundOnly ? [] : query(`SELECT product_id,
         SUM(CASE WHEN movement_type IN ('ORDER_RESERVED', 'CANCEL_RESTORE') THEN 0 ELSE quantity_delta END) AS ledger,
         MAX(CASE WHEN source_type = 'reconciliation_stocktake' THEN id ELSE NULL END) AS stocktake_id,
         SUM(CASE WHEN movement_type = 'ORDER_RESERVED' THEN ABS(quantity_delta)
@@ -192,7 +193,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       allocationQuery(`SELECT marks.order_item_id, marks.product_id, marks.handling_type, marks.status FROM order_item_procurement_marks marks
         JOIN order_items mi ON mi.id = marks.order_item_id AND mi.quantity > 0 JOIN orders mo ON mo.id = mi.order_id AND mo.id = marks.order_id
         JOIN shops ms ON ms.id = mo.shop_id${tenantScope('ms.tenant_id')} WHERE marks.status = 'handled'${scope('marks.product_id')}`),
-      query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit, MAX(im.stock_location_source) AS stock_location_source
+      outboundOnly ? [] : query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit, MAX(im.stock_location_source) AS stock_location_source
         FROM inventory_movements im LEFT JOIN products p ON p.id = im.product_id WHERE im.status = 'posted' AND im.source_type = 'order_outbound'
           AND UPPER(COALESCE(NULLIF(im.stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')
           ${scope('im.product_id')}${tenantScope('im.tenant_id')}
@@ -207,8 +208,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
           AND source_type IN ('return_in', 'initial_stock', 'opening_stock')
           AND (source_type != 'return_in' OR source_ref IS NULL OR source_ref NOT LIKE 'cancel_%')
           AND UPPER(COALESCE(NULLIF(stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')${scope()}${tenantScope()}`),
-      loadFbpReservations(query,scopedIds,ownerScope),
-      allocationQuery(`SELECT ip.product_id, ip.order_item_id, ip.priority FROM inventory_order_priorities ip
+      outboundOnly ? [] : loadFbpReservations(query,scopedIds,ownerScope),
+      (outboundOnly ? query : allocationQuery)(`SELECT ip.product_id, ip.order_item_id, ip.priority FROM inventory_order_priorities ip
         JOIN order_items pi ON pi.id = ip.order_item_id JOIN orders po ON po.id = pi.order_id
         JOIN shops ps ON ps.id = po.shop_id${tenantScope('ps.tenant_id')} WHERE ip.priority > 0${scope('ip.product_id')}`),
       smallProductScope ? [] : query(`SELECT transport.order_id, transport.transport_at
@@ -226,6 +227,9 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
           AND (physical_shop.tenant_id = m.tenant_id OR (physical_shop.tenant_id IS NULL AND physical_tenant.slug = 'default'))
         GROUP BY m.order_id`)
     ]);
+    const demands = outboundOnly
+      ? demandRows.filter(row => Number(row.needs_fulfillment) && !Number(row.entered_transport))
+      : demandRows;
     // Keep one row per demand before attaching order-level history. Combining
     // these grouped reads into the recipe/component join produces a very large
     // optimizer search space and repeatedly blocks ordinary order paging.
@@ -242,6 +246,21 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     let currentDemands;
     const rawLiveItems = new Set(demands.filter(d=>Number(d.needs_fulfillment)&&d.stock_location==='LOCAL').map(d=>Number(d.order_item_id)));
     const liveItems = rawLiveItems;
+    const deductions = historicalDeductions;
+    if (outboundOnly && finishedStocks.length) {
+      const itemIds = [...liveItems];
+      for (let offset = 0; offset < itemIds.length; offset += 500) {
+        const batch = itemIds.slice(offset, offset + 500);
+        deductions.push(...await query(`SELECT im.related_order_item_id AS order_item_id, im.product_id,
+          SUM(-im.quantity_delta) AS quantity, MAX(im.stock_location_source) AS stock_location_source
+          FROM inventory_movements im
+          WHERE im.related_order_item_id IN (${batch.map(() => '?').join(',')})
+            AND im.status = 'posted' AND im.source_type = 'order_outbound'
+            AND UPPER(COALESCE(NULLIF(im.stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')
+            ${scope('im.product_id')}${tenantScope('im.tenant_id')}
+          GROUP BY im.related_order_item_id, im.product_id`, batch));
+      }
+    }
     const byProduct = new Map(stocks.map(row => [Number(row.product_id), { ...row, open_deducted: 0 }]));
     for (const row of fbpReservations) {
       const id = Number(row.product_id);
@@ -262,6 +281,10 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     const priorityForBundle=new Map(priorities.map(p=>[`${p.product_id}:${p.order_item_id}`,Number(p.priority)]));
     const bundleDemands=allocateBundleFinishedDemands(demands.map(d=>({...d,allocation_priority:priorityForBundle.get(`${d.root_product_id}:${d.order_item_id}`)||0})),composition,[...byProduct.values()]);
     currentDemands=expandCurrentProcurementDemands(bundleDemands,composition);
+    if (outboundOnly) return calculateOrderProcurementCoverageAsync({
+      demands: currentDemands.filter(row => scopedIdSet.has(Number(row.product_id))),
+      stocks: [...byProduct.values()]
+    });
     const historicItems = new Map(demands.filter(d => Number(d.entered_transport) && d.stock_location === 'LOCAL').map(d => [Number(d.order_item_id), d]));
     // A recorded physical shipment pins the whole historical item, even when
     // its recorded components are outside this product-filtered view. Otherwise

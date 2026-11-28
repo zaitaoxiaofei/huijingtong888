@@ -10851,6 +10851,7 @@ export function onlineProductMatchesStatusForTest(row = {}, status = "all") {
 }
 
 export async function bindOnlineProductMysql(body = {}, tenantId = "admin", options = {}) {
+  options.markTiming?.("inventory_bind_start");
   ensureMysqlCutoverEnabled();
   await ensureMysqlColumns("sku_mappings", ["ALTER TABLE sku_mappings ADD COLUMN person_id BIGINT UNSIGNED NULL"]);
   const scope = await resolveInventoryTenantScope(tenantId);
@@ -10900,6 +10901,7 @@ export async function bindOnlineProductMysql(body = {}, tenantId = "admin", opti
     [Number(online.shop_id), bindSku, normalizedTenantId]
   );
 
+  options.markTiming?.("inventory_bind_validation");
   await mysqlExecute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND shop_id = ?", [productId, onlineProductId, Number(online.shop_id)]);
 
 
@@ -10961,15 +10963,18 @@ export async function bindOnlineProductMysql(body = {}, tenantId = "admin", opti
     }, { syncOutbound: false, tenantId: normalizedTenantId });
   }
 
+  options.markTiming?.("inventory_bind_write");
   invalidateOrderProcurementCoverage();
   await assertOrderTaskAccessMysql({ id: scope.id }, options, ["inventory.write"]);
   const outboundSync = await syncOutboundForOpenOrdersMysql({ ...options, shop_id: Number(online.shop_id), ozon_sku: bindSku, tenantId: normalizedTenantId });
+  options.markTiming?.("inventory_bind_outbound");
   invalidateInventoryAlertSalesBindingMysql();
   const variantBinding = productId ? await propagateListingVariantInventory({
     tenantKey: defaultTenant ? "admin" : String(normalizedTenantId),
     tenantPk: normalizedTenantId,
     shopId: Number(online.shop_id), ozonSku: bindSku, offerId: online.offer_id, productId
   }) : null;
+  options.markTiming?.("inventory_bind_variants");
   for (const id of new Set([mappingId, ...(variantBinding?.mapping_ids || [])].filter(Boolean))) scheduleBindingProfitRecalculationMysql(id, normalizedTenantId, options);
   invalidateOrderProcurementCoverage();
 
@@ -16554,6 +16559,7 @@ export async function restoreProductMysql(id, tenantId = "admin") {
 }
 
 export async function createProductFromOnlineProductMysql(body = {}, tenantId = "admin", options = {}) {
+  options.markTiming?.("inventory_create_start");
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
   await assertOrderTaskAccessMysql({ id: scope.id }, options, ["inventory.write"]);
@@ -16570,6 +16576,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
     LIMIT 1
   `, [online.shop_id, bindSku || online.ozon_sku]);
   if (existingMapping?.id && existingMapping?.active_product_id) {
+    options.markTiming?.("inventory_create_reuse_lookup");
     await bindOnlineProductMysql({
       online_product_id: online.id,
       order_item_id: body.order_item_id || body.orderItemId,
@@ -16590,6 +16597,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
   if (online.product_id) {
     const product = await mysqlQueryOne(`SELECT id, code, is_consumable FROM products WHERE id = ? AND active = 1 AND ${inventoryTenantSql(scope)}`, [online.product_id]);
     if (product) {
+      options.markTiming?.("inventory_create_reuse_lookup");
       await bindOnlineProductMysql({
         online_product_id: online.id,
         order_item_id: body.order_item_id || body.orderItemId,
@@ -16617,6 +16625,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
   const supplierNote = body.supplier_note || `From Ozon SKU ${online.ozon_sku}${online.offer_id ? ` / Offer ${online.offer_id}` : ""}`;
   const shouldCreateProcurement = ["1", "true", "yes"].includes(String(body.create_procurement_request || "").toLowerCase());
   const logisticsRuleId = nullableInteger(body.logistics_rule_id);
+  options.markTiming?.("inventory_create_validation");
   const product = await createProductMysql({
     ...body,
     name: body.name || online.name,
@@ -16655,6 +16664,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
     logistics_rule_id: logisticsRuleId,
     structured_naming: body.structured_naming || body.structuredNaming
   }, null, scope.id);
+  options.markTiming?.("inventory_create_write");
   await bindOnlineProductMysql({
     online_product_id: online.id,
     order_item_id: body.order_item_id || body.orderItemId,
@@ -18627,6 +18637,7 @@ export async function revokeShippedCancellationReturnsMysql(orderItemId, tenantI
 }
 
 async function syncOutboundForOpenOrdersMysql(options = {}) {
+  options.markTiming?.("inventory_outbound_start");
   const tenantScope = await orderListTenantScopeMysql(options.tenantId || "admin");
   await assertOrderTaskAccessMysql(tenantScope, options, ["packing", "orders.manage", "inventory.write", "procurement"]);
   const inventoryScope = { id: tenantScope.id, isDefault: tenantScope.defaultTenant };
@@ -18813,6 +18824,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
       ${options.open_only ? `AND (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")}) AND NOT (${orderStatusSqlMysql("cancelled")})` : ""}
       ${scope.sql}
   `, scope.params);
+  options.markTiming?.("inventory_outbound_candidates");
   let deducted = 0;
   let pending = 0;
   let outboundRecordsSynced = 0;
@@ -18943,9 +18955,12 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     `, [row.shop_id, row.posting_number, row.ozon_sku]);
     deducted += 1;
   }
+  options.markTiming?.("inventory_outbound_orders");
   if((await loadBundleFinishedStocks(mysqlQuery,inventoryScope)).length)await withMysqlTransaction(async connection=>{
     await mysqlConnectionQuery(connection,`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p',tenantScope)} ORDER BY p.id FOR UPDATE`);
-    await reconcileBundleOrders(connection,inventoryScope);
+    options.markTiming?.("inventory_outbound_product_locks");
+    await reconcileBundleOrders(connection,inventoryScope,options.markTiming);
+    options.markTiming?.("inventory_outbound_reconcile");
   });
   if (cancelledRows.length || outboundRecordsSynced || deducted || componentMigrations) invalidateOrderProcurementCoverage();
   return {

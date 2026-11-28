@@ -4,9 +4,10 @@ import {inventoryTenantSql} from './inventory-tenant-scope.js';
 const ORDER_ITEM_BATCH_SIZE = 500;
 
 export function createBundleOrderReconciliation({postMovement,rebuild}){
- return async function reconcile(connection,scope){
+ return async function reconcile(connection,scope,markTiming){
   const q=async(sql,args=[])=>(await connection.query(sql,args))[0];
-  const coverage=await loadOrderProcurementCoverage(q,'',{tenantId:scope.id,fresh:true});
+  const coverage=await loadOrderProcurementCoverage(q,'',{tenantId:scope.id,fresh:true,outboundOnly:true});
+  markTiming?.("inventory_outbound_demand_projection");
   const pendingItems=[];
   for(const order of coverage.values()){
    if(!Number(order.needs_fulfillment)||order.stock_location==='FBP')continue;

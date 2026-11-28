@@ -52,6 +52,12 @@ test('bundle conversion conserves parts, starts at zero, rejects occupied stock 
    assert.equal(await stock(210),40);assert.equal(await stock(211),50);
    projection=await loadOrderProcurementCoverage(q,'',{tenantId:2});
    assert.deepEqual(projection.get(500).items.map(i=>[i.product_id,i.quantity]),[[200,25],[210,10],[211,5]]);
+   const liveOnly=await loadOrderProcurementCoverage(q,'',{tenantId:2,outboundOnly:true});
+   const outboundUnits=coverage=>[...coverage.values()]
+     .filter(order=>order.needs_fulfillment&&order.stock_location!=='FBP')
+     .flatMap(order=>order.items.map(item=>[order.order_id,item.order_item_id,item.product_id,item.quantity,item.finished_bundle]));
+   assert.deepEqual(outboundUnits(liveOnly),outboundUnits(projection));
+
    await q("UPDATE orders SET status='cancelled',tracking_stage='cancelled' WHERE id=500");
    const repair=await legacy.repairOrderOutboundMysql(2);assert.deepEqual(repair.cancellation_review_required,[]);
    c=await context();assert.equal(c.finished_physical,25);assert.equal(c.finished_available,25);assert.equal(await stock(210),50);assert.equal(await stock(211),55);
