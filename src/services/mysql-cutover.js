@@ -1,4 +1,4 @@
-import {readApprovedH1,withApprovedH1,adjustmentBaseline} from './billing-approved-h1.js';
+import {readApprovedH1,withApprovedH1,adjustmentBaseline,approvedH1ProjectionRanges} from './billing-approved-h1.js';
 import {importFboOrder,fboInventoryExclusionSql} from './ozon-fbo-order-import.js';
 import { postFbpPhysicalShipment } from "./fbp-physical-shipment.js";
 import { writeOnlineProductSync, writeStockSnapshotSync } from "./online-product-sync-write.js";
@@ -28392,14 +28392,23 @@ function monthlyBillingOrderSettlementHavingMysql(settlementState = "") {
 }
 
 async function monthlyBillingProjectionMysql(from,to,shopId,scope,companyId,includeAll=false){
+ // Keep all periods outside the approved half-year on the existing reader.
+ // Annual views combine disjoint cohorts rather than recalculating Q3/Q4.
+ const ranges=approvedH1ProjectionRanges({tenantId:scope.id,companyId,from,to}),parts=[];
+ for(const part of ranges)parts.push(await monthlyBillingProjectionSliceMysql(part.from,part.to,shopId,scope,companyId,includeAll,part.approvedH1));
+ const projection=parts.flat();projection.advertising=parts.flatMap(p=>p.advertising||[]);return projection;
+}
+async function monthlyBillingProjectionSliceMysql(from,to,shopId,scope,companyId,includeAll=false,approvedH1=false){
  const date=profitOrderedAtUtcRangeMysql('o',from,to);
  const orderScope=`EXISTS(SELECT 1 FROM shops owned_shop WHERE owned_shop.id=o.shop_id AND ${orderTenantPredicateMysql('owned_shop',scope)})${companyId?' AND '+billingCompanyOrderPredicateMysql('o',companyId,scope):''}${Number(shopId)>0?' AND o.shop_id='+Number(shopId):''}`;
  const outcomeCte=orderReportOutcomeCtesSql(orderScope,date.whereSql,true);
- const where=[orderTenantPredicateMysql('s',scope)];const params=[];
+ const where=[orderTenantPredicateMysql('s',scope)];const params=approvedH1?[]:[...date.params];
  if(Number(shopId)>0){where.push('o.shop_id=?');params.push(Number(shopId));}
  if(companyId)where.push(billingCompanyOrderPredicateMysql('o',companyId,scope));
  return withMysqlReadSnapshot(async read=>{
-  const journals=await readApprovedH1(read,{tenantId:scope.id,companyId,from:from.slice(0,7),to:to.slice(0,7),shopId});
+  const journals=approvedH1?await readApprovedH1(read,{tenantId:scope.id,companyId,from:from.slice(0,7),to:to.slice(0,7),shopId}):[];
+  const useApproved=approvedH1&&journals.length>0;
+  if(approvedH1&&!useApproved)params.unshift(...date.params);
   const approvedItems=[...new Set(journals.flatMap(j=>{const before=typeof j.before_json==='string'?JSON.parse(j.before_json):j.before_json;return before.baseline?.item_ids||[];}))].map(Number).filter(id=>Number.isSafeInteger(id)&&id>0);
   const approvedPredicate=!includeAll&&approvedItems.length?`o.id IN (SELECT approved_item.order_id FROM order_items approved_item WHERE approved_item.id IN (${approvedItems.map(()=>'?').join(',')})) OR `:'';
   if(!includeAll){where.push(`(${approvedPredicate}outcomes.after_delivery_return=1 OR outcomes.rejected_unclaimed=1 OR outcomes.cancelled_pre_fulfillment=1 OR outcomes.cargo_lost=1 OR (COALESCE(opi.profit_status,oi.settlement_state,'')<>'accrued' AND (COALESCE(opi.other_fee_cny,0)<>0 OR COALESCE(opi.ozon_service_fee_cny,oi.platform_fee_actual,0)<>0)) OR (opi.profit_status='accrued' AND COALESCE(opi.return_loss_cny,0)<>0) OR ${ozonReturnFilterSql({id:scope.id},'aftersale','o')})`);
@@ -28430,7 +28439,7 @@ async function monthlyBillingProjectionMysql(from,to,shopId,scope,companyId,incl
    LEFT JOIN order_profit_fx_state fx ON fx.order_id=o.id AND fx.tenant_key=(CASE WHEN s.tenant_id>0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
    LEFT JOIN order_profit_daily_fx_rates order_quote ON order_quote.id=fx.order_fx_id
    LEFT JOIN order_profit_calc_revisions rev ON rev.id=st.current_estimate_revision_id AND rev.order_item_id=oi.id AND rev.tenant_key=st.tenant_key
-   WHERE ${where.join(' AND ')} ${date.whereSql} ORDER BY o.id,oi.id`,[...date.params,...params,...date.params]);
+   WHERE ${where.join(' AND ')} ${date.whereSql} ORDER BY o.id,oi.id`,useApproved?[...date.params,...params,...date.params]:[...date.params,...params]);
   const returnRows=await read(`SELECT r.order_id,r.state_json,r.observed_at FROM ozon_return_observations r JOIN orders o ON o.id=r.order_id AND o.shop_id=r.shop_id AND BINARY o.posting_number=BINARY r.posting_number JOIN shops s ON s.id=o.shop_id WHERE r.tenant_id=? AND ${where[0]} ${date.whereSql}${Number(shopId)>0?' AND o.shop_id='+Number(shopId):''}${companyId?' AND '+billingCompanyOrderPredicateMysql('o',companyId,scope):''}`,[scope.id,...date.params]);
   const enriched=await enrichOrdersWithOzonReturns(itemRows,{id:scope.id,isDefault:scope.defaultTenant},async(_sql,args)=>{const ids=new Set(args.slice(1).map(Number));return returnRows.filter(r=>ids.has(Number(r.order_id)));});
   itemRows=enriched.map(item=>{
