@@ -63,7 +63,7 @@ test("real FBP replenishment, transfers and PDF imports keep A/B/default invento
         await service.updateFbpReplenishmentOrderStatusMysql({ id: orderId, status: "pending_review" }, 7, tenant);
         const approved = await service.updateFbpReplenishmentOrderStatusMysql({ id: orderId, status: "approved" }, 8, tenant);
         assert.equal(approved.reservedQuantity, 5);
-        await service.updateFbpReplenishmentOrderStatusMysql({ id: orderId, status: "sent" }, 8, tenant);
+        await service.updateFbpReplenishmentOrderStatusMysql({ id: orderId, status: "sent", confirm_without_tracking: true }, 8, tenant);
         const [transfer] = await query("SELECT * FROM fbp_transfer_records WHERE source_type='fbp_replenishment' AND shop_id=?", [entry.shop]);
         assert.equal(Number(transfer.quantity), 5);
         await assert.rejects(service.confirmFbpTransferReceivedMysql({ id: transfer.id, confirm_all:true }, 8, entry.tenant===3?2:3), { statusCode:404 });

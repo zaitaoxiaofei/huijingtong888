@@ -48,6 +48,7 @@ const barcodePrintDialog = reactive({ visible: false, row: null, quantity: 1, re
 const barcodePrintResultDialog = reactive({ visible: false, row: null, quantity: 0, confirming: false });
 const fbpFillResultDialog = reactive({ visible: false, summary: "", successCount: 0, durationSeconds: 0, failures: [], requiresReload: false });
 const barcodeLoadingKeys = reactive({});
+const shipmentDialog = reactive({ visible: false, orders: [], submitting: false });
 const receiptDialog = reactive({ visible: false, loading: false, submitting: false, orders: [], rows: [] });
 const allocationDialog = reactive({ visible: false, saving: false, inventory: null, items: [], reason: "" });
 const procurementDraftPagedItems = computed(() => {
@@ -501,8 +502,8 @@ async function refreshOrderViews(order) {
   if (!batchDetailDialog.visible || Number(batchDetailDialog.batch?.batch_id) !== Number(order.batch_id)) return;
   const params = new URLSearchParams({ batchId: String(order.batch_id), status: "all", page: "1", pageSize: "100" });
   const payload = await apiClient.get(`/api/fbp-replenishment-orders?${params.toString()}`);
-  const updatedOrder = (payload?.rows || []).find((item) => Number(item.id) === Number(order.id));
-  batchDetailDialog.orders = batchDetailDialog.orders.map((item) => Number(item.id) === Number(order.id) ? (updatedOrder || item) : item);
+  const updatedOrders = new Map((payload?.rows || []).map((item) => [Number(item.id), item]));
+  batchDetailDialog.orders = batchDetailDialog.orders.map((item) => updatedOrders.get(Number(item.id)) || item);
 }
 
 function isOrderSelected(order) {
@@ -837,8 +838,54 @@ async function loadPageData() {
   }
 }
 
+function shipmentOrders(order) {
+  return (order._isBatchSummary ? order._sourceOrders : [order]).filter((item) => item.shipment_confirmed_at);
+}
+
+function openShipmentDialog(orders) {
+  shipmentDialog.orders = orders.map((order) => ({ order, trackingNumber: "" }));
+  shipmentDialog.visible = true;
+}
+
+async function submitShipment() {
+  if (shipmentDialog.submitting) return;
+  shipmentDialog.submitting = true;
+  try {
+    const missingCount = shipmentDialog.orders.filter((item) => !item.trackingNumber.trim()).length;
+    if (missingCount) {
+      try {
+        await ElMessageBox.confirm(
+          `有 ${missingCount} 张备货单未填写快递单号，是否确认发货？`,
+          "未填写快递单号",
+          { type: "warning", confirmButtonText: "仍然确认发货", cancelButtonText: "返回填写" }
+        );
+      } catch (error) {
+        if (error === "cancel" || error === "close") return;
+        throw error;
+      }
+    }
+    const orders = shipmentDialog.orders.map((item) => ({ ...item, trackingNumber: item.trackingNumber.trim() }));
+    const results = await Promise.allSettled(orders.map(({ order, trackingNumber }) => apiClient.post(
+      "/api/fbp-replenishment-orders/status",
+      { id: order.id, status: "sent", express_tracking_number: trackingNumber, confirm_without_tracking: !trackingNumber }
+    )));
+    shipmentDialog.orders = orders.filter((_, index) => results[index].status === "rejected");
+    const sentCount = orders.length - shipmentDialog.orders.length;
+    if (sentCount) ElMessage.success(`已确认发货 ${sentCount} 张备货单`);
+    if (!shipmentDialog.orders.length) shipmentDialog.visible = false;
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure) ElMessage.error(failure.reason?.message || "确认发货失败，请重试");
+    if (sentCount) await refreshOrderViews(orders[0].order);
+  } catch (error) {
+    ElMessage.error(error.message || "发货页面刷新失败");
+  } finally {
+    shipmentDialog.submitting = false;
+  }
+}
+
 async function updateStatus(row, status) {
   if (status === "completed") return openReceiptDialog(row);
+  if (status === "sent") return openShipmentDialog([row]);
   const disabledReason = status === "approved" ? approveDisabledReason(row) : "";
   if (disabledReason) {
     ElMessage.warning(disabledReason);
@@ -856,25 +903,9 @@ async function updateStatus(row, status) {
   }
 }
 
-async function markBatchSent(row) {
-  const approvedOrders = (row?._sourceOrders || []).filter((order) => canMarkSent(order));
-  if (!approvedOrders.length) {
-    ElMessage.info("该关联汇总中没有待标记发送的已通过备货单");
-    return;
-  }
-  actionLoadingId.value = `batch-sent-${row.batch_id}`;
-  try {
-    await Promise.all(approvedOrders.map((order) => apiClient.post("/api/fbp-replenishment-orders/status", {
-      id: order.id,
-      status: "sent"
-    })));
-    ElMessage.success(`已将关联汇总中的 ${approvedOrders.length} 张备货单确认发货`);
-    await loadPageData();
-  } catch (error) {
-    ElMessage.error(error.message || "关联汇总标记发送失败");
-  } finally {
-    actionLoadingId.value = "";
-  }
+function markBatchSent(row) {
+  const approvedOrders = row._sourceOrders.filter(canMarkSent);
+  if (approvedOrders.length) openShipmentDialog(approvedOrders);
 }
 
 async function markBatchCompleted(row) {
@@ -1311,6 +1342,19 @@ onActivated(() => void loadPageData());
                   {{ row.order._isBatchSummary ? row.order.status_summary : statusTagText(row.order.status, row.order.received_quantity) }}
                 </el-tag>
               </div>
+              <div v-for="shipment in shipmentOrders(row.order)" :key="shipment.id" class="order-line">
+                <span class="order-label">{{ row.order._isBatchSummary ? orderDisplayName(shipment) : '快递单号' }}</span>
+                <div class="order-value">
+                  <template v-if="shipment.express_tracking_number">
+                    <el-link type="primary" :href="'https://t.17track.net?nums=' + encodeURIComponent(shipment.express_tracking_number)" target="_blank" rel="noopener noreferrer">{{ shipment.express_tracking_number }}</el-link>
+                    <small class="warehouse-secondary">填写时间 {{ dateText(shipment.shipment_confirmed_at) }}</small>
+                  </template>
+                  <template v-else>
+                    <span>未填写快递单号</span>
+                    <small class="warehouse-secondary">发货确认 {{ dateText(shipment.shipment_confirmed_at) }}</small>
+                  </template>
+                </div>
+              </div>
               <div class="order-line">
                 <span class="order-label">总览</span>
                 <div class="order-summary">
@@ -1594,6 +1638,18 @@ onActivated(() => void loadPageData());
       <template #footer><el-button @click="allocationDialog.visible = false">取消</el-button><el-button type="primary" :loading="allocationDialog.saving" :disabled="!allocationHasEditable" @click="saveInventoryAllocation">确认保存</el-button></template>
     </el-dialog>
 
+    <el-dialog v-model="shipmentDialog.visible" title="确认发货" width="min(560px, 94vw)" append-to-body :close-on-click-modal="false" :show-close="!shipmentDialog.submitting" :close-on-press-escape="!shipmentDialog.submitting">
+      <el-form label-position="top" @submit.prevent="submitShipment">
+        <el-form-item v-for="item in shipmentDialog.orders" :key="item.order.id" :label="'快递单号 · ' + orderDisplayName(item.order)">
+          <el-input v-model="item.trackingNumber" maxlength="128" :disabled="shipmentDialog.submitting" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="shipmentDialog.submitting" @click="shipmentDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="shipmentDialog.submitting" @click="submitShipment">确认发货</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="receiptDialog.visible" title="确认入仓" width="min(1000px, 94vw)" append-to-body :close-on-click-modal="false" :show-close="!receiptDialog.submitting" :close-on-press-escape="!receiptDialog.submitting">
       <div v-loading="receiptDialog.loading" class="receipt-content">
         <p class="receipt-hint">按实际收到的数量填写；未收到的商品留为 0，剩余数量继续显示在途。</p>
@@ -1790,7 +1846,21 @@ onActivated(() => void loadPageData());
       <div v-loading="batchDetailDialog.loading" class="batch-detail-list">
         <el-table v-if="batchDetailRows.length" :data="batchDetailRows" :span-method="tableSpanMethod" border class="erp-data-table replenishment-table batch-detail-table">
           <el-table-column label="备货单" min-width="260">
-            <template #default="{ row }"><div class="order-cell"><div class="shop-banner">{{ row.order.shop_name || "未命名店铺" }}</div><div class="order-line"><span class="order-label">备货单号</span><strong class="order-title">{{ orderDisplayName(row.order) }}</strong></div><div class="order-line"><span class="order-label">创建时间</span><span class="order-value">{{ dateText(row.order.created_at) }}</span></div><div class="order-line"><span class="order-label">状态</span><el-tag :type="statusType(row.order.status)" effect="light">{{ statusTagText(row.order.status, row.order.received_quantity) }}</el-tag></div><div class="order-line"><span class="order-label">总览</span><div class="order-summary"><span>SKU {{ integer(row.order.item_count) }}</span><span>申请 {{ integer(row.order.total_requested_qty) }}</span><span>通过 {{ integer(row.order.total_approved_qty) }}</span><span>最终 {{ integer(row.order.total_final_qty) }}</span></div></div><div class="order-line"><span class="order-label">操作</span><el-space wrap class="order-actions" :size="8">
+            <template #default="{ row }"><div class="order-cell"><div class="shop-banner">{{ row.order.shop_name || "未命名店铺" }}</div><div class="order-line"><span class="order-label">备货单号</span><strong class="order-title">{{ orderDisplayName(row.order) }}</strong></div><div class="order-line"><span class="order-label">创建时间</span><span class="order-value">{{ dateText(row.order.created_at) }}</span></div><div class="order-line"><span class="order-label">状态</span><el-tag :type="statusType(row.order.status)" effect="light">{{ statusTagText(row.order.status, row.order.received_quantity) }}</el-tag></div>
+              <div v-for="shipment in shipmentOrders(row.order)" :key="shipment.id" class="order-line">
+                <span class="order-label">快递单号</span>
+                <div class="order-value">
+                  <template v-if="shipment.express_tracking_number">
+                    <el-link type="primary" :href="'https://t.17track.net?nums=' + encodeURIComponent(shipment.express_tracking_number)" target="_blank" rel="noopener noreferrer">{{ shipment.express_tracking_number }}</el-link>
+                    <small class="warehouse-secondary">填写时间 {{ dateText(shipment.shipment_confirmed_at) }}</small>
+                  </template>
+                  <template v-else>
+                    <span>未填写快递单号</span>
+                    <small class="warehouse-secondary">发货确认 {{ dateText(shipment.shipment_confirmed_at) }}</small>
+                  </template>
+                </div>
+              </div>
+                <div class="order-line"><span class="order-label">总览</span><div class="order-summary"><span>SKU {{ integer(row.order.item_count) }}</span><span>申请 {{ integer(row.order.total_requested_qty) }}</span><span>通过 {{ integer(row.order.total_approved_qty) }}</span><span>最终 {{ integer(row.order.total_final_qty) }}</span></div></div><div class="order-line"><span class="order-label">操作</span><el-space wrap class="order-actions" :size="8">
                   <el-button plain v-if="canEditQuantities(row.order)" type="primary" :loading="actionLoadingId === actionKey(row.order, 'save')" @click="saveOrderItems(row.order)">保存数量</el-button>
                   <el-tooltip v-if="canApprove(row.order)" :disabled="!approveDisabledReason(row.order)" :content="approveDisabledReason(row.order)" placement="top">
                     <span><el-button type="primary" :disabled="Boolean(approveDisabledReason(row.order))" :loading="actionLoadingId === actionKey(row.order, 'approved')" @click="updateStatus(row.order, 'approved')">审核通过</el-button></span>

@@ -37,11 +37,20 @@ test('real FBS-first allocation, approved FBP demand, shipment protection and co
    const before=await counts();await assert.rejects(api.createFbpTransferRecordMysql({product_id:200,mapping_id:200,shop_id:20,ozon_sku:'SKU-A',quantity:15,status:'sent'},2,2),/须优先保障FBS 4 件，可发仓 13 件/);assert.deepEqual(await counts(),before);assert.equal(await stock(),17);
   });
   await t.test('confirmed bundle dispatch posts physical child consumption, and the next FBP shipment cannot take remaining FBS stock',async()=>{
-   await api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent'},2,2);assert.equal(await stock(),7);
+   await assert.rejects(api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent'},2,2), /未填写快递单号/);
+   await api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent',express_tracking_number:'  SF123456  '},2,2);
+   assert.equal(await stock(),7);
+   const shipment=(await api.fbpReplenishmentOrdersMysql({orderId:79},2)).rows[0];
+   assert.equal(shipment.express_tracking_number,'SF123456');
+   assert.ok(shipment.shipment_confirmed_at);
    const sent=await q("SELECT product_id,quantity_delta FROM inventory_movements WHERE source_type='fbp_transfer_outbound'");assert.deepEqual(sent.map(r=>[Number(r.product_id),Number(r.quantity_delta)]),[[200,-10]]);
-   const before=await counts();await assert.rejects(api.updateFbpReplenishmentOrderStatusMysql({id:83,status:'sent'},2,2),/可发仓 3 件/);assert.deepEqual(await counts(),before);assert.equal((await q('SELECT status FROM fbp_replenishment_orders WHERE id=83'))[0].status,'approved');
+   const before=await counts();await assert.rejects(api.updateFbpReplenishmentOrderStatusMysql({id:83,status:'sent',confirm_without_tracking:true},2,2),/可发仓 3 件/);assert.deepEqual(await counts(),before);assert.equal((await q('SELECT status FROM fbp_replenishment_orders WHERE id=83'))[0].status,'approved');
    invalidateOrderProcurementCoverage();const [s]=await state();assert.equal(s.supply_plan.required_fbs,0);assert.equal(s.supply_plan.formal_fbp_quantity,5);assert.equal(s.supply_plan.required_fbp,2);assert.equal(s.supply_plan.fbp_in_transit_quantity,10);
-   await api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent'},2,2);assert.deepEqual(await counts(),before);
+   await api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent',confirm_without_tracking:true},2,2);
+   assert.deepEqual(await counts(),before);
+   const retried=(await api.fbpReplenishmentOrdersMysql({orderId:79},2)).rows[0];
+   assert.equal(retried.express_tracking_number,shipment.express_tracking_number);
+   assert.deepEqual(retried.shipment_confirmed_at,shipment.shipment_confirmed_at);
   });
   await t.test('concurrent bundles in different shops cannot both spend the same child stock',async()=>{
    await q("INSERT INTO products(id,tenant_id,name) VALUES(202,2,'Another virtual bundle')");

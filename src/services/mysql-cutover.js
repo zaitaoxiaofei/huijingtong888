@@ -753,6 +753,8 @@ async function ensureFbpReplenishmentSchemaMysql() {
       submitted_at DATETIME NULL,
       reviewed_at DATETIME NULL,
       closed_at DATETIME NULL,
+      express_tracking_number VARCHAR(128) NULL,
+      shipment_confirmed_at DATETIME NULL,
       UNIQUE KEY uk_fbp_replenishment_order_no (order_no),
       KEY idx_fbp_replenishment_shop_date (shop_id, order_date),
       KEY idx_fbp_replenishment_shop_status (shop_id, status),
@@ -821,6 +823,8 @@ async function ensureFbpReplenishmentSchemaMysql() {
   `);
   const schemaUpdates = [
     "ALTER TABLE fbp_replenishment_orders ADD COLUMN order_date DATE NULL AFTER shop_id",
+    "ALTER TABLE fbp_replenishment_orders ADD COLUMN express_tracking_number VARCHAR(128) NULL",
+    "ALTER TABLE fbp_replenishment_orders ADD COLUMN shipment_confirmed_at DATETIME NULL",
     "ALTER TABLE fbp_replenishment_orders ADD KEY idx_fbp_replenishment_shop_date (shop_id, order_date)",
     "ALTER TABLE fbp_replenishment_order_items ADD COLUMN fbp_transfer_in_transit_qty INT NOT NULL DEFAULT 0 AFTER fbp_available",
     "ALTER TABLE fbp_replenishment_order_items ADD COLUMN fbp_effective_available INT NOT NULL DEFAULT 0 AFTER fbp_transfer_in_transit_qty",
@@ -6629,6 +6633,12 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
     params.push(userId || null);
   }
   if (["completed", "cancelled"].includes(status)) fields.push("closed_at = CURRENT_TIMESTAMP");
+  const trackingNumber = String(body.express_tracking_number ?? "").trim();
+  if (status === "sent") {
+    if (trackingNumber.length > 128) throw new Error("快递单号最多可填写 128 个字符，请在确认发货窗口核对。");
+    fields.push("express_tracking_number = ?", "shipment_confirmed_at = CURRENT_TIMESTAMP");
+    params.push(trackingNumber || null);
+  }
   params.push(id);
   let approvalResult = { transferCount: 0, outboundQuantity: 0 };
   const shopScope = tenantShopPredicateMysql("s", defaultTenant);
@@ -6655,6 +6665,13 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
       if (applicantIds.has(Number(userId))) throw new Error("申请人不能审核通过自己的 FBP 备货单，请由其他同事审核。");
     }
     const currentStatus = String(order.status || "");
+    if (status === "sent") {
+      if (currentStatus === "sent") return;
+      if (!["approved", "ozon_created"].includes(currentStatus)) throw new Error("备货单当前状态无法确认发货，请刷新后核对。");
+      if (!trackingNumber && body.confirm_without_tracking !== true) {
+        throw new Error("未填写快递单号（express_tracking_number）。请在确认发货窗口填写，或确认无单号发货。");
+      }
+    }
     if (status === "completed") {
       const completion = await fbpReplenishmentCompletionStateMysql(connection, id, scope);
       if (!completion.transferCount) throw new Error("备货单还没有确认发货，不能确认入仓。");
