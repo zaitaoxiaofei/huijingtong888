@@ -214,6 +214,7 @@
     throw new Error("发票页面还没有加载完成，请检查处理窗口后继续");
   }
   async function inspectOrder(id) {
+    if (blocker()) return {status:"review",note:blocker(),block:true};
     const state = await invoiceState();
     if (state.orderId !== id) return {status: "review", note: "发票页面订单号不匹配"};
     let status = "pending";

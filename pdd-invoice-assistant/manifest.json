@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "采购开票助手 · 拼多多",
   "description": "管理三个采购账号的订单，批量申请发票、跟踪结果和下载票据。数据保存在本机。",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minimum_chrome_version": "120",
   "permissions": [
     "storage",

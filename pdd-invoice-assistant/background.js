@@ -51,6 +51,20 @@ function syncQueueRows() {
     row.note = job.status === "processing" ? `正在${q.kind === "apply" ? "申请" : q.kind === "refresh" ? "读取开票进度" : "归档附件"}，阶段：${job.stage || "准备页面"}` : job.note || "";
     if(job.status === "processing")row.taskStatus="processing";else if(row.taskStatus === "processing")row.taskStatus="";
     const patch = {...job.facts};
+    if (q.kind === "refresh") {
+      const known = ["submitted", "issued", "rejected"];
+      const status = job.status === "checked" ? job.invoiceStatus : job.status;
+      if (known.includes(status)) { patch.status = status; row.taskStatus = ""; }
+      else if (status === "pending") {
+        if (!["pending","skipped"].includes(row.status)) {
+          row.taskStatus = "review";
+          row.note = "平台暂未返回申请记录，已保留原开票状态；合开订单请以商家确认记录为准";
+        } else { row.taskStatus = ""; }
+      } else if (["review", "failed"].includes(status)) row.taskStatus = status;
+      C.recordLedger(row, patch, "platform", job.updated || Date.now());
+      row.updated = job.updated;
+      continue;
+    }
     if (!["skipped", "processing", "downloading"].includes(job.status) && (job.status !== "pending" || job.facts?.platformCheckedAt)) {
       if (q.kind !== "download" || ["review", "failed"].includes(job.status)) {
         if (["review", "failed"].includes(job.status) && ["submitted", "issued", "rejected"].includes(row.status)) row.taskStatus = job.status;
@@ -112,7 +126,7 @@ async function pageMessage(tabId, message) {
   }
   throw new Error("拼多多页面加载超时，请检查处理窗口后继续");
 }
-async function visit(tabId, url) {
+async function visit(tabId, url, invoiceRead = false) {
   if (!C.pddUrl(url)) throw new Error("订单链接不是受支持的拼多多买家页面");
   await deadline(chrome.tabs.update(tabId, {url, active: false}),12000,"打开订单页面超时，请查看处理窗口后继续");
   // update() acknowledges a request before Chrome necessarily commits it.
@@ -122,13 +136,47 @@ async function visit(tabId, url) {
     const current = C.pddUrl(tab.url || "");
     if (current && !tab.pendingUrl && tab.status === "complete") {
       const actual = new URL(current);
-      if (actual.pathname === expected.pathname && actual.searchParams.get("order_sn") === expected.searchParams.get("order_sn") && actual.searchParams.get("_t_timestamp") === expected.searchParams.get("_t_timestamp")) return;
+      const sameOrder = actual.searchParams.get("order_sn") === expected.searchParams.get("order_sn");
+      const sameRoute = actual.pathname === expected.pathname && actual.searchParams.get("_t_timestamp") === expected.searchParams.get("_t_timestamp");
+      // An issued invoice may redirect to the official preview for the same order.
+      if (sameOrder && (sameRoute || invoiceRead && actual.pathname === "/transac_prescription_detail.html")) return;
       if (/login/.test(actual.pathname)) throw new Error("拼多多要求重新登录，请在处理窗口完成登录后继续");
     }
     await new Promise(resolve => setTimeout(resolve,350));
   }
   throw new Error("订单页面未完成切换，未发送申请；请查看处理窗口后继续");
 }
+function refreshBlocked(note) {
+  return /登录|验证码|安全验证|限制访问|访问过于频繁|操作过于频繁|登录状态已改变|另一企业|企业密钥/.test(note || "");
+}
+function refreshError(error) {
+  const note = String(error?.message || error || "");
+  if (/No tab with id|Invalid tab ID/.test(note)) return "处理窗口已关闭，自动恢复后仍未读到本单；可点击该行更新进度重试";
+  if (/message channel closed|message port closed|asynchronous response|Receiving end does not exist|Could not establish connection/i.test(note)) return "拼多多页面通信中断，自动恢复后仍未读到本单；已保留原状态，其他订单继续查询";
+  return note;
+}
+async function refreshOrder(q, a, item, tabId) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await assertSession(a, q.fingerprint);
+      if (q.state !== "running") return {tabId, result:{ok:true,status:"review",note:"查询已暂停，原开票状态已保留"}};
+      await visit(tabId, C.invoiceUrl(item.id), true);
+      const result = await pageMessage(tabId, {type:"PDD_INVOICE_INSPECT",orderId:item.id});
+      if (!result?.ok) throw new Error(result?.error || "未读取到发票详情，原开票状态已保留");
+      return {tabId,result};
+    } catch (error) {
+      if (refreshBlocked(error.message)) throw error;
+      if (attempt) throw error;
+      // State reads are repeatable. Applications and downloads never use this retry.
+      const replacement = await chrome.tabs.create({url:C.ORIGIN + "/orders.html",active:false});
+      q.tabIds = [...q.tabIds.filter(id=>id!==tabId),replacement.id];
+      if (q.tabId === tabId) q.tabId = replacement.id;
+      tabId = replacement.id; item.tabId = tabId;
+      q.note = `正在自动恢复查询窗口：${item.id}`;q.heartbeatAt=Date.now();await save();
+    }
+  }
+}
+
 async function scan(message) {
   idleOnly();
   const a = account(message.accountId);
@@ -217,7 +265,11 @@ async function startQueue(message) {
     if (context.storagePolicy?.version !== 2 || context.storagePolicy.files !== "private-oss") throw new Error("当前后台尚未提供私有 OSS 归档，请升级后台或选择本地下载；不会写入旧版服务器目录");
     if (!context.storagePolicy.configured) throw new Error("私有 OSS 尚未配置，请先使用本地下载或联系管理员配置");
   }
-  if (store.queue?.items.some(item => item.status === "pending")) throw new Error("上次任务还有待处理订单，请先继续或结束上次任务");
+  const previous = store.queue;
+  if (message.kind === "refresh" && previous?.kind === "refresh" && previous.accountId === a.id && previous.state === "paused") {
+    // A new state query also resumes the unfinished reads; no application is added.
+    message = {...message, ids:[...new Set([...message.ids,...previous.items.filter(i=>["pending","review","failed"].includes(i.status)).map(i=>i.id)])]};
+  } else if (previous?.items.some(item => item.status === "pending")) throw new Error("上次任务还有待处理订单，请先继续或结束上次任务");
   if (message.kind === "apply" && a.erpTenant && !a.titleCompanyId) throw new Error("请先在设置中选择 ERP 公司抬头，再申请发票");
   if (message.kind === "apply" && a.titleCompanyId) {
     const context = await erpCompanies(), company = context.companies.find(c=>Number(c.id)===a.titleCompanyId);
@@ -255,7 +307,7 @@ async function runQueue() {
     const laneResults = await Promise.allSettled(Array.from({length:lanes}, async () => {
       let tab;
       try{tab=await chrome.tabs.create({url:C.ORIGIN+"/orders.html",active:false});}catch(error){q.state="paused";q.note=`创建处理窗口失败：${error.message}`;throw error;}
-      const tabId=tab.id; q.tabIds.push(tabId); q.tabId ||= tabId;
+      let tabId=tab.id; q.tabIds.push(tabId); q.tabId ||= tabId;
       while(q.state === "running") {
         const item=q.items.find(i=>i.status === "pending");
         if(!item) break;
@@ -269,6 +321,16 @@ async function runQueue() {
           syncQueueRows();
           await save();
           try {
+            if (q.kind === "refresh") {
+              const refreshed = await refreshOrder(q,a,item,tabId);
+              tabId = refreshed.tabId;
+              const result = refreshed.result;
+              item.invoiceStatus = result.status;
+              item.status = result.status === "pending" ? "checked" : ["submitted","issued","rejected"].includes(result.status) ? result.status : "review";
+              item.note = result.note || "未读取到明确的发票状态，已保留原记录";
+              item.facts = result.facts;
+              if (result.block || refreshBlocked(item.note)) {q.state="paused";q.tabId=tabId;q.note=item.note;}
+            } else {
             await visit(tabId, q.kind === "apply" ? a.orders.find(row => row.id === item.id)?.applicationUrl || C.invoiceUrl(item.id) : C.invoiceUrl(item.id));
             let result;
             for (let hop = 0; hop < 4; hop++) {
@@ -323,7 +385,12 @@ async function runQueue() {
             item.note = result?.note || "页面没有可确认的结果，请人工核对";
             item.facts = result?.facts;
             if (result?.block || item.status === "review") { q.tabId=tabId;q.state = "paused"; q.note = item.note; }
+            }
           } catch (error) {
+            if (q.kind === "refresh") {
+              item.status = "review"; item.note = refreshError(error);
+              if (refreshBlocked(item.note)) {q.state="paused";q.note=item.note;}
+            } else {
             if(error.code === "PDD_TIMEOUT"){q.state="paused";q.note=error.message;}
             item.status = ["authorized", "confirmed"].includes(item.stage) || q.kind === "download" ? "review" : "failed";
             item.note = error.message;
@@ -342,6 +409,7 @@ async function runQueue() {
               } catch { /* Preserve uncertain status. */ }
             }
             if (!["submitted", "issued", "rejected"].includes(item.status)) { q.state = "paused"; q.note = error.message; }
+            }
           }
           item.updated = Date.now();q.heartbeatAt=Date.now();
           syncQueueRows();
@@ -353,7 +421,11 @@ async function runQueue() {
     }));
     const rejectedLane=laneResults.find(r=>r.status === "rejected");
     if(rejectedLane){q.state="paused";q.note=`处理窗口异常：${rejectedLane.reason?.message || "请查看浏览器"}`;}
-    if (q.state === "running") { q.state = "done"; q.note = "本批处理结束，请核对结果；已申请不代表商家已开票"; }
+    if (q.state === "running") {
+      q.state = "done";
+      const errors=q.items.filter(i=>["review","failed"].includes(i.status) || i.status === "checked" && a.orders.find(r=>r.id===i.id)?.taskStatus === "review").length;
+      q.note = q.kind === "refresh" ? `状态查询完成：${q.items.length} 笔，已开票 ${q.items.filter(i=>i.status==="issued").length} 笔，商家处理中 ${q.items.filter(i=>i.status==="submitted").length} 笔${errors ? `；${errors} 笔未读到明确状态，原记录保留，可逐笔重试` : ""}。本次未提交任何开票申请。` : "本批处理结束，请核对结果；已申请不代表商家已开票";
+    }
   } catch (error) { q.state = "paused"; q.note = error.message; }
   finally {
     runner = false;
@@ -524,7 +596,9 @@ async function handle(message, sender) {
       idleOnly();
       const q = store.queue;
       if (!q || q.state !== "paused") throw new Error("没有可继续的暂停任务");
-      if (q.items.some(j => j.status === "review")) throw new Error("请先打开待核对订单，在列表中确认实际状态，再继续任务");
+      if (q.kind === "refresh") {
+        for (const item of q.items) if (["review","failed"].includes(item.status)) {item.status="pending";item.note="等待重新查询状态";item.facts=undefined;}
+      } else if (q.items.some(j => j.status === "review")) throw new Error("请先打开待核对订单，在列表中确认实际状态，再继续任务");
       await assertSession(account(q.accountId), q.fingerprint);
       q.state = "running"; await save(); void runQueue(); return state();
     }
@@ -564,7 +638,17 @@ async function handle(message, sender) {
       if (!row) throw new Error("订单不存在");
       await chrome.tabs.create({url: C.invoiceUrl(row.id)}); return {};
     }
-    case "OPEN_TASK": if (store.queue?.tabId) await chrome.tabs.update(store.queue.tabId, {active: true}); return {};
+    case "OPEN_TASK": {
+      const q=store.queue;if(!q?.tabId)throw new Error("暂无处理窗口，请先点击更新开票进度");
+      try {await chrome.tabs.update(q.tabId,{active:true});}
+      catch(error){
+        if(!/No tab|Invalid tab/i.test(error.message))throw error;
+        const item=q.items.find(i=>["processing","review","failed","pending"].includes(i.status))||q.items[0];
+        if(!item)throw new Error("处理窗口已关闭，请重新选择订单查询状态");
+        const tab=await chrome.tabs.create({url:C.invoiceUrl(item.id),active:true});q.tabId=tab.id;await save();
+      }
+      return {};
+    }
     default: throw new Error("未知操作，请重新打开插件");
   }
 }

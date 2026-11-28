@@ -2,7 +2,7 @@
 (() => {
   const ORIGIN = "https://mobile.pinduoduo.com";
   const labels = {
-    pending: "待申请", processing: "处理中", submitted: "已申请", issued: "已开票",
+    checked: "已核对", pending: "待申请", processing: "处理中", submitted: "已申请", issued: "已开票",
     skipped: "已跳过", rejected: "开票失败", failed: "处理异常", review: "待核对", needs_review: "待核对（含失败及异常）", downloading: "下载中", downloaded: "已下载"
   };
   function pddUrl(value) {

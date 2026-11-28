@@ -128,6 +128,8 @@ function renderRows() {
   const list = rows();
   const overview = C.visibleRows(scopedRows(), {...filter(), status: ""});
   $("total").textContent = overview.length;
+  $("submittedCount").textContent = overview.filter(row=>row.status === "submitted").length;
+  $("issuedCount").textContent = overview.filter(row=>row.status === "issued").length;
   $("pending").textContent = overview.filter(row => row.status === "pending").length;
   $("review").textContent = overview.filter(row => ["review", "failed", "rejected"].includes(row.status) || ["review", "failed"].includes(row.taskStatus)).length;
   const a = active();
@@ -195,8 +197,8 @@ function renderRows() {
     for (const extra of new Set([row.rejectionReason, row.ledgerNote].filter(Boolean))) if (extra !== row.note) note.append(node("div", "", extra));
     actionBox.append(button("打开订单 ↗", async () => { notice("正在打开订单页面…"); await request("OPEN_ORDER", {accountId: row.accountId, orderId: row.id}); }, "", true));
     actionBox.append(button("查看发票 ↗", async () => request("OPEN_INVOICE", {accountId: row.accountId, orderId: row.id}), "", true));
-    if (["failed", "review"].includes(row.taskStatus || row.status)) {
-      const retry = button("重试读取状态", async () => { setModel(await request("START", {accountId: row.accountId, ids: [row.id], kind: "refresh"})); notice("正在重新读取状态，不会重复提交申请"); });
+    {
+      const retry = button(["failed", "review"].includes(row.taskStatus || row.status) ? "重试读取状态" : "更新进度", async () => { setModel(await request("START", {accountId: row.accountId, ids: [row.id], kind: "refresh"})); notice("正在重新读取状态，不会重复提交申请"); });
       retry.disabled = !a?.connected || model.queue?.state === "running" || allAccounts;
       actionBox.append(retry);
     }
@@ -328,13 +330,13 @@ $("scanForm").addEventListener("submit", event => { event.preventDefault(); acti
   setModel(next); notice(`${next.scan.note}${next.scanProgress?.missingDates ? `；${next.scanProgress.missingDates} 笔平台未提供下单日期，已保留供核对` : ""}`);
 }); });
 $("refreshProgress").addEventListener("click", () => action(async () => {
-  const ids = selectedIds().length ? selectedIds() : active()?.orders.filter(r => ["submitted", "issued", "rejected"].includes(r.status)).map(r => r.id) || [];
+  const ids = selectedIds().length ? selectedIds() : rows().filter(r => ["submitted", "issued", "rejected"].includes(r.status) || ["review","failed"].includes(r.taskStatus)).map(r => r.id);
   if (!ids.length) {
     notice("正在同步官方开票记录…");
     const next = await request("IMPORT_INVOICES", {accountId: model.active});
     setModel(next); notice(`已同步 ${next.scan.count} 条开票记录，可勾选订单继续更新详细进度`); return;
   }
-  setModel(await request("START", {accountId: model.active, ids, kind: "refresh"})); notice("正在更新开票进度，具体结果在处理记录中显示");
+  setModel(await request("START", {accountId: model.active, ids, kind: "refresh", concurrency:Number($("concurrency").value)})); notice("正在更新开票进度，只查询状态，不会重新申请；单笔异常会保留原记录并继续其他订单");
 }));
 $("importInvoices").addEventListener("click", () => action(async () => {
   notice("正在读取官方已有发票记录和金额…");
@@ -361,7 +363,7 @@ $("apply").addEventListener("click", () => action(() => confirmBatch("apply")));
 $("download").addEventListener("click", () => action(() => confirmBatch("download")));
 $("refreshStatus").addEventListener("click", () => action(async () => {
   if ($("scope").value === "all") throw new Error("请先选择当前采购账号，再刷新平台状态");
-  setModel(await request("START", {accountId: model.active, ids: selectedIds(), kind: "refresh"}));
+  setModel(await request("START", {accountId: model.active, ids: selectedIds(), kind: "refresh", concurrency:Number($("concurrency").value)}));
   selected.clear(); notice("正在查询平台上的开票状态，不提交申请。");
 }));
 for (const [id, type] of [["pause", "PAUSE"], ["resume", "RESUME"], ["stop", "STOP"]]) $(id).addEventListener("click", () => action(async () => setModel(await request(type))));

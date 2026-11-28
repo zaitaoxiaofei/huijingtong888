@@ -37,7 +37,8 @@ export function readRenderedOrders() {
       const value = String(data.invoice_amount ?? "");
       const match = value.match(/^(\d{1,10})(?:\.(\d{1,2}))?$/);
       const amount = match ? +match[1] * 100 + +(match[2] || "").padEnd(2, "0") : null;
-      const status = data.invoice_status == null ? (data.is_full_refund || data.is_mall_close ? "skipped" : "pending") : +data.invoice_status === 2 ? "issued" : +data.invoice_status === 1 ? "submitted" : +data.invoice_status === 0 ? "rejected" : "pending";
+      const hasInvoice = data.invoice_status != null;
+      const status = !hasInvoice ? (data.is_full_refund || data.is_mall_close ? "skipped" : "pending") : +data.invoice_status === 2 ? "issued" : [1,6].includes(+data.invoice_status) ? "submitted" : +data.invoice_status === 0 ? "rejected" : "review";
       const facts = {platformCheckedAt: Date.now()};
       if (amount !== null) { facts.applicationAmountCents = amount; if (status === "issued") facts.invoiceAmountCents = amount; }
       if (data.reject_reason) facts.rejectionReason = String(data.reject_reason);
@@ -58,7 +59,7 @@ export function readInvoicePage() {
   function pick(store, invoice) {
     return {ready: store.isFinishInitLoading === true, orderId: String(invoice.orderSn), mallId: String(invoice.mallId || ""),
       hasApplied: invoice.hasApplied, displayText: String(invoice.displayStatusText || ""),
-      rejected: Boolean(invoice.rejectReApplyControl) || Boolean(invoice.deniedReason), rejectionReason: String(invoice.deniedReason || ""),
+      rejected: Boolean(invoice.rejectReApplyControl?.rejectReApplyDesc) || invoice.rejectReApplyControl === true || Boolean(invoice.deniedReason), rejectionReason: String(invoice.deniedReason || invoice.rejectReApplyControl?.rejectReApplyDesc || ""),
       applicationTime: String(invoice.applicationTimeStr || ""), invoiceTime: String(invoice.invoiceTimeStr || ""),
       invoiceAmount: typeof invoice.invoiceAmount === "string" ? invoice.invoiceAmount : "",
       invoiceKind: invoice.invoiceKind, businessType: invoice.businessType,
