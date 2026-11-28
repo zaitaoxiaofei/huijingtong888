@@ -19,7 +19,7 @@ function database(options={}){
   if(sql.includes('FROM finance_submission_items'))return [];
   if(sql.includes('FROM finance_expenses'))return (options.expenses||[]).filter(e=>e.company_id===p[0]&&e.tenant_id===p[1]);
   if(sql.includes('FROM finance_vouchers')){assert.match(sql,/e.company_id=\?/);assert.match(sql,/v.tenant_id=\?/);assert.match(sql,/pf.tenant_id=\?/);return options.vouchers||[];}
-  if(sql.includes('FROM finance_companies'))return p[0]===p[1]?[{id:p[0],name:`Company ${p[0]}`,tax_number:''}]:[];
+  if(sql.includes('FROM finance_companies'))return p[0]===p[1]?[{id:p[0],name:options.companyName||`Company ${p[0]}`,tax_number:''}]:[];
   if(sql.startsWith('SELECT shop_id,DATE_FORMAT'))return [{shop_id:10,effective_from:'2026-01-01',effective_to:null}];
   if(sql.includes('FROM orders o JOIN shops s')){assert.match(sql,/s.tenant_id=\?/);return options.items||[];}
   if(sql.includes('FROM finance_shop_company_assignments'))return p[0]===p[1]?[{id:p[0]*10,name:'Example Z'}]:[];
@@ -258,4 +258,43 @@ test('large original JSON is not filesorted in MySQL and document order remains 
  const db=database({failJsonSort:true});const padding='x'.repeat(1024*1024);
  for(const [id,month]of[[3,'2026-05'],[2,'2026-04'],[1,'2026-04']])db.docs.push({id,tenant_id:1,company_id:1,shop_key:10,month_key:month,original_name:id+'.json',parse_status:'preview',payload_json:JSON.stringify({kind:'support',facts:[],padding})});
  const r=await db.service.report({company_id:1,from:'2026-01',to:'2026-12'},session());assert.deepEqual(r.documents.map(d=>d.id),[1,2,3]);assert.equal(r.documents.every(d=>d.payload_json.padding.length===1024*1024),true);
+});
+
+test('company cash previews without a month and deduplicates overlapping exports by transaction date and number',async()=>{
+ const db=database(),s=session();
+ const header=['创建日期','交易单号','币种','金额','状态'];
+ const a=['2026-03-20 10:00','entry-a','CNH','25.00','成功'];
+ const b=['2026-05-01 10:00','entry-b','CNH','50.00','成功'];
+ const input={company_id:1,shop_id:0,upload_type:'collection-cash'};
+ for(const [i,rows] of [[1,[a,b]],[2,[a]]]){
+  const url='/cash-'+i;
+  db.files.set(url,{tenant:1,row:{original_name:'entry.xlsx'},buffer:await workbook([null,[null,'连连跨境支付入账记录查询'],[null,'名称：[Company 1]'],[null,...header],...rows.map(r=>[null,...r])])});
+  const {document}=await db.service.preview({...input,attachment_url:url},s);
+  assert.equal(document.month_key,i===1?'2026-05':'2026-03');
+  assert.equal(document.payload_json.transaction_period.from,'2026-03-20');
+  await db.service.confirm({company_id:1,document_id:document.id},s);
+  assert.equal((await db.service.preview({...input,attachment_url:url},s)).duplicate,true);
+ }
+ const march=reconcileImportedCash(db.docs,{from:'2026-03',to:'2026-03'});
+ assert.equal(march.currencies[0].entries,25);
+ assert.equal(march.duplicates.length,1);
+ assert.equal(march.currencies[0].withdrawals,null);
+});
+
+test('Shanghai original exports complete company preview and confirmation without a month',{skip:!process.env.LIANLIAN_TEST_ORIGINALS},async()=>{
+ // Use the existing in-memory service fixture with an injected company name.
+ const fixture=database({companyName:'上海汇境通国际贸易有限公司'});
+ const originals=JSON.parse(process.env.LIANLIAN_TEST_ORIGINALS);
+ for(const [i,path] of originals.entries()){
+  const url='/original-'+i;
+  fixture.files.set(url,{tenant:1,row:{original_name:path.split('/').at(-1)},buffer:readFileSync(path)});
+  const input={company_id:1,shop_id:0,upload_type:'collection-cash',attachment_url:url};
+  const {document}=await fixture.service.preview(input,session());
+  assert.equal(document.payload_json.cash.length,[36,17][i]);
+  await fixture.service.confirm({company_id:1,document_id:document.id},session());
+  assert.equal((await fixture.service.preview(input,session())).duplicate,true);
+ }
+ const {currencies,rows}=reconcileImportedCash(fixture.docs,{from:'2026-01',to:'2026-11'});
+ assert.deepEqual(currencies,[{currency:'CNH',complete:true,entries:575165.32,withdrawals:575165.32,fees:6638}]);
+ assert.equal(Math.round(rows.reduce((a,r)=>a+(r.listed_bank_amount||0),0)*100),56852732);
 });
