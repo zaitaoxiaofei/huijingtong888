@@ -1,5 +1,6 @@
 import { PAYOUT_ATTRIBUTION_SCHEMA, matchFinancePayouts, payoutEvidenceKey, summarizePayoutAttributions } from './finance-payout-attribution.js';
-import {approvedH1Report} from './billing-approved-h1.js';
+import {approvedIncomeReport} from './billing-official-income.js';
+import {createOfficialIncomeCalibration} from './official-income-calibration.js';
 import {readCompanyPurchaseCosts,summarizePurchaseCostLines} from './company-purchase-costs.js';
 import {financeDocumentLocation,normalizeFinanceSourceLocation} from '../shared/finance-document-locations.js';
 import { recordedExpenseLines } from './finance-recorded-expenses.js';
@@ -108,7 +109,7 @@ export function reconcileImportedCash(documents,{from,to},attributions=[]){
   return {currency,complete:!conflict&&entries.length>0&&withdrawals.length>0&&!unknownFees,entries:conflict||!entries.length?null:rounded(entries.reduce((s,r)=>s+r.amount,0)),withdrawals:conflict||!withdrawals.length?null:rounded(withdrawals.reduce((s,r)=>s+r.amount,0)),fees:conflict||unknownFees||!withdrawals.length?null:rounded(withdrawals.reduce((s,r)=>s+(r.fee||0),0))};
  }),rows,bank_status:'missing',note:'收款与提现分别列示，不用差额认定损失；尚需平台转出匹配、期初期末余额及银行回单。'};
 }
-export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExecute,files=tenantPrivateFiles,authorize=authorizeBusinessTaskSession,parse=parseFinanceDocument,transaction=mysqlTransaction,validateSource=validateArchiveSource,readPurchaseCosts=readCompanyPurchaseCosts,readMonthlyRealization=async(shop,options)=>(await import('../ozonClient.js')).fetchOzonMonthlyRealization(shop,options)}={}){
+export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExecute,files=tenantPrivateFiles,authorize=authorizeBusinessTaskSession,parse=parseFinanceDocument,transaction=mysqlTransaction,validateSource=validateArchiveSource,readPurchaseCosts=readCompanyPurchaseCosts,readIncomeProjection=async(...args)=>(await import('./mysql-cutover.js')).officialIncomeProjectionMysql(...args),readMonthlyRealization=async(shop,options)=>(await import('../ozonClient.js')).fetchOzonMonthlyRealization(shop,options)}={}){
  let schema;
  async function ready(){if(!schema)schema=execute(FINANCE_DOCUMENT_SCHEMA).then(()=>execute(PAYOUT_ATTRIBUTION_SCHEMA)).catch(e=>{schema=null;throw e;});await schema;}
  async function actor(session){const s=await authorize(session);assertBusinessTaskPermission(s,'finance');return s;}
@@ -149,6 +150,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
   });
  }
  const reconciler=createFinanceReconciliation({query,execute,getDocs,shopsFor,writePeriod});
+ const officialIncome=createOfficialIncomeCalibration({query,execute,getDocs,shopsFor,writePeriod,readProjection:readIncomeProjection});
  return {
   async orderSalesSource(input,session){
    const month=validateMonth(input.month),shopId=id(input.shop_id,'店铺');let initial;
@@ -167,10 +169,10 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const parsed=parseOrderSalesJson(bytes,{month});if(!ctx.c.tax_number||parsed.buyer_tax_number!==ctx.c.tax_number)fail('官方报告税号与公司不符或公司税号未配置，请核对公司设置',409);
    return {data,filename:`Ozon_order_sales_${parsed.document_number}_${month}.json`,source:'Ozon /v1/finance/realization/posting',note:'仅仅读取官方原件，尚未上传、确认或调整账簿'};
   },
-  async adjustments(input,session){const ctx=await company(input,session),period=range(input);return approvedH1Report(query,{tenantId:ctx.tenantId,companyId:ctx.companyId,...period,shopId:input.shop_id},input);},
+  async adjustments(input,session){const ctx=await company(input,session),period=range(input);return approvedIncomeReport(query,{tenantId:ctx.tenantId,companyId:ctx.companyId,...period,shopId:input.shop_id},input);},
   async reconcile(input,session){return reconciler.report(input,await company(input,session));},
-  async calibrationPreview(input,session){return reconciler.preview(input,await company(input,session));},
-  async calibrationConfirm(input,session){return reconciler.confirm(input,await company(input,session));},
+  async calibrationPreview(input,session){const ctx=await company(input,session);return input.basis==='official-cny'?officialIncome.preview(input,ctx):reconciler.preview(input,ctx);},
+  async calibrationConfirm(input,session){const ctx=await company(input,session);return input.basis==='official-cny'?officialIncome.confirm(input,ctx):reconciler.confirm(input,ctx);},
   async lookup(input,session){
    const ctx=await company(input,session);validateMonth(input.month);
    if(!input.archive_source)fail('请从插件检查月份后同步原件');
