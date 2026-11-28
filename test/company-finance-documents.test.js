@@ -75,6 +75,23 @@ test('Ozon archive requires a directory and shop, resolves a single month, and c
  assert.equal((await db.service.preview({...undecided,month:'2026-09'},s)).document.month_key,'2026-09');
 });
 
+test('review edits retain legacy opinions and attachments and reject stale revisions',async()=>{
+ const db=database(),actor=session(),attachment_url='/uploads/team-attachments/legacy-invoice.pdf';
+ const document={id:40,tenant_id:1,company_id:1,shop_key:10,month_key:'2026-10',original_name:'legacy invoice.pdf',
+  attachment_url,parse_status:'confirmed',review_status:'accepted',review_note:'原历史意见',revision:3,
+  payload_json:JSON.stringify({kind:'support',facts:[]})};
+ db.docs.push(document);
+ const input={company_id:1,document_id:40,review_status:'needs_info',review_note:'补充付款依据',expected_revision:3};
+ await db.service.review(input,actor);
+ await assert.rejects(db.service.review({...input,review_note:'过期覆盖'},actor),/已被其他人修改/);
+ const {documents:[row]}=await db.service.report({company_id:1,month:'2026-10'},actor);
+ assert.equal(row.attachment_url,attachment_url);
+ assert.equal(row.review_note,'补充付款依据');
+ assert.deepEqual(row.payload_json.review_history.map(r=>[r.status,r.note]),[['accepted','原历史意见'],['needs_info','补充付款依据']]);
+ assert.equal(row.payload_json.review_history[0].at,undefined);
+ assert.equal(row.payload_json.review_history[1].person_id,actor.personId);
+});
+
 test('OOXML namespaced tags and rows without position attributes remain readable',async()=>{
  const z=new JSZip();z.file('xl/workbook.xml','<x:workbook xmlns:x="a" xmlns:r="b"><x:sheets><x:sheet r:id="s1"/></x:sheets></x:workbook>');
  z.file('xl/_rels/workbook.xml.rels','<Relationships><Relationship Id="s1" Target="/xl/worksheets/sheet1.xml"/></Relationships>');
