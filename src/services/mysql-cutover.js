@@ -18243,7 +18243,7 @@ async function postInventoryMysql(connection, body = {}) {
   return Number(result.insertId);
 }
 
-async function postProductInventoryWithComponentsMysql(connection, body = {}, tenantId = "admin") {
+async function postProductInventoryWithComponentsMysql(connection, body = {}, tenantId = "admin", { deferBundleReconciliation } = {}) {
   const scope = await resolveInventoryTenantScope(tenantId);
   const productId = Number(body.product_id || 0);
   const quantityDelta = Number(body.quantity_delta || 0);
@@ -18257,6 +18257,10 @@ async function postProductInventoryWithComponentsMysql(connection, body = {}, te
       return [];
     }
     if(live){
+    if (deferBundleReconciliation) {
+      deferBundleReconciliation();
+      return [];
+    }
     const perform=async tx=>{await mysqlConnectionQuery(tx,`SELECT p.id FROM products p WHERE ${inventoryTenantSql(scope,'p')} ORDER BY p.id FOR UPDATE`);await reconcileBundleOrders(tx,scope);};
     if(connection===mysqlPoolConnectionAdapter)await withMysqlTransaction(perform);else await perform(connection);
     return [];
@@ -18846,7 +18850,17 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
   let pending = 0;
   let outboundRecordsSynced = 0;
   let componentMigrations = 0;
-  for (const row of rows) {
+  let deferredBundleOrder;
+  async function finishNewOutbound(row, outboundStockLocation) {
+    await upsertOrderOutboundRecordMysql(row, outboundStockLocation, "Created by outbound sync", tenantScope.id);
+    outboundRecordsSynced += 1;
+    await mysqlExecute(`
+      UPDATE order_exceptions SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+      WHERE store_id = ? AND posting_number = ? AND ozon_sku = ? AND exception_type IN ('UNMAPPED_SKU', 'OUTBOUND_UNBOUND_SKU')
+    `, [row.shop_id, row.posting_number, row.ozon_sku]);
+    deducted += 1;
+  }
+  for (const [index, row] of rows.entries()) {
     await assertOrderTaskAccessMysql(tenantScope, options, ["packing", "orders.manage", "inventory.write", "procurement"]);
     if (!row.mapping_id || !row.product_id) {
       await recordOrderExceptionMysql({
@@ -18963,22 +18977,27 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
       related_posting_number: row.posting_number,
       related_order_item_id: row.id,
       note: "Created by outbound sync"
-    }, tenantScope.id);
-    await upsertOrderOutboundRecordMysql(row, outboundStockLocation, "Created by outbound sync", tenantScope.id);
-    outboundRecordsSynced += 1;
-    await mysqlExecute(`
-      UPDATE order_exceptions SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
-      WHERE store_id = ? AND posting_number = ? AND ozon_sku = ? AND exception_type IN ('UNMAPPED_SKU', 'OUTBOUND_UNBOUND_SKU')
-    `, [row.shop_id, row.posting_number, row.ozon_sku]);
-    deducted += 1;
+    }, tenantScope.id, {
+      deferBundleReconciliation: index === rows.length - 1
+        ? () => { deferredBundleOrder = { row, outboundStockLocation }; }
+        : undefined
+    });
+    if (deferredBundleOrder) continue;
+    await finishNewOutbound(row, outboundStockLocation);
   }
   options.markTiming?.("inventory_outbound_orders");
-  if((await loadBundleFinishedStocks(mysqlQuery,inventoryScope)).length)await withMysqlTransaction(async connection=>{
+  // The final pass also covers the last new order. Earlier rows retain their
+  // immediate reconciliation so later rows see the same movements as before.
+  if(deferredBundleOrder || (await loadBundleFinishedStocks(mysqlQuery,inventoryScope)).length)await withMysqlTransaction(async connection=>{
     await mysqlConnectionQuery(connection,`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p',tenantScope)} ORDER BY p.id FOR UPDATE`);
     options.markTiming?.("inventory_outbound_product_locks");
     await reconcileBundleOrders(connection,inventoryScope,options.markTiming);
     options.markTiming?.("inventory_outbound_reconcile");
   });
+  if (deferredBundleOrder) {
+    await finishNewOutbound(deferredBundleOrder.row, deferredBundleOrder.outboundStockLocation);
+    options.markTiming?.("inventory_outbound_finish_records");
+  }
   if (cancelledRows.length || outboundRecordsSynced || deducted || componentMigrations) invalidateOrderProcurementCoverage();
   return {
     deducted,
