@@ -391,7 +391,7 @@ export function summarizeLedger(product, movements, purchases, orders, fbpReserv
 export function createProcurementLedgerService(hooks) {
   const { query, transaction, coverage, postMovement, receive, recordCost, refreshPurchase, requirePerson, prepare } = hooks;
   const resolveScope = hooks.resolveScope || resolveInventoryTenantScope;
-  async function snapshot(productId, run = query, tenantId = 'admin') {
+  async function snapshot(productId, run = query, tenantId = 'admin', sharedCoverage = null) {
     if (hooks.assertProductAccess) await hooks.assertProductAccess(productId, tenantId, run);
     const scope = await resolveScope(tenantId, run);
     const movementTenantSql = ` AND ${inventoryTenantSql(scope)}`;
@@ -416,7 +416,7 @@ export function createProcurementLedgerService(hooks) {
         SUM(CASE WHEN status='pending_arrival' AND received_at IS NOT NULL THEN quantity ELSE 0 END) AS arrived_quantity
         FROM inbound_records WHERE product_id = ? AND ${inventoryTenantSql(scope)} GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
       WHERE poi.product_id = ? AND ${inventoryTenantSql(scope, 'poi')} AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
-    const projection = await coverage(run, productId, scope.id);
+    const projection = sharedCoverage || await coverage(run, productId, scope.id);
     const orders = [...projection.values()].flatMap(order => order.items
       .filter(item => item.product_id === productId).map(item => ({ ...item, order_id: order.order_id,
         stock_location:order.stock_location, posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
@@ -451,13 +451,13 @@ export function createProcurementLedgerService(hooks) {
       ORDER BY a.id DESC LIMIT 50`, [productId, productId, productId]);
     return value;
   }
-  async function read(body, tenantId = 'admin', existingConnection = null, displayQuery = null) {
+  async function read(body, tenantId = 'admin', existingConnection = null, displayQuery = null, sharedCoverage = null) {
     if (!existingConnection) await prepare();
     const id = integer(body.product_id || body.productId, '库存商品 ID');
     const run = existingConnection
       ? (sql, args = []) => existingConnection.query(sql, args).then(([rows]) => rows)
       : displayQuery || query;
-    const value = await snapshot(id, run, tenantId);
+    const value = await snapshot(id, run, tenantId, sharedCoverage);
     value.orders = await withOrderHandlingContext(value.orders, run, await resolveScope(tenantId, run));
     const fbp = hooks.fbpStocks && body.include_fbp !== false && String(body.include_fbp) !== '0' ? await hooks.fbpStocks(id, tenantId) : null;
     if (fbp) value.fbp_inventory = fbp;
@@ -814,7 +814,15 @@ export function createProcurementLedgerService(hooks) {
       ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),
       target_before: target?.local_stock, target_after: target ? target.local_stock + plan.target_delta : null };
   }
-  return { read, apply, preview, costTasks, receiveAndCount, prepare };
+  async function readMany(ids,tenantId,connection=null,displayQuery=null){
+    if(!hooks.coverageBatch){const values=[];for(const product_id of ids)values.push(await read({product_id,include_fbp:false},tenantId,connection,displayQuery));return values;}
+    if(!connection)await prepare();
+    const run=connection?(sql,args=[])=>connection.query(sql,args).then(([rows])=>rows):displayQuery||query;
+    const projection=await hooks.coverageBatch(run,ids,tenantId),values=[];
+    for(const product_id of ids)values.push(await read({product_id,include_fbp:false},tenantId,connection,run,projection));
+    return values;
+  }
+  return { read, readMany, apply, preview, costTasks, receiveAndCount, prepare };
 }
 
 export function planReceiptCorrection(batches, received, quantity) {

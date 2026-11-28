@@ -1,3 +1,4 @@
+import {procurementDemandCandidates} from '../src/services/procurement-demand-candidates.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -37,7 +38,7 @@ function reader(source, connection) {
     return rows;
   };
   const context = vm.createContext({ Date, Map, Set, Number, String, Object, Array, Math, console,
-    remainingAssemblyBatches, loadBundleFinishedStocks, allocateBundleFinishedDemands, loadInventoryComposition,
+    procurementDemandCandidates, remainingAssemblyBatches, loadBundleFinishedStocks, allocateBundleFinishedDemands, loadInventoryComposition,
     expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementQueueOrderIds, invalidateInventoryWorkflow,
     shanghaiDateKey, calculateOrderProcurementCoverageAsync, transportStatusesSql, oglPhysicalDispatchSql, loadFbpReservations,
     resolveInventoryTenantScope
@@ -117,6 +118,13 @@ test('coverage SQL changes preserve complete live/history results and indexed bi
       assert.equal(value.get(7).entered_transport, true, 'NULL timestamp transport history remains evidence');
       assert.equal(value.get(8).transport_at.getTime(), new Date(2019, 11, 29).getTime(), 'earliest status time matches the fixture driver timezone');
     });
+    await t.test('candidate item scans exactly match full binding, recipe, tenant and history results',async()=>{
+      for(const tenantId of [1,2,3])for(const productIds of [[1],[2],[3],[5],[2,3,5]]){
+        const options={tenantId,productIds,includeTrace:true};
+        const expected=canonical(await next.read(options));
+        assert.deepEqual(canonical(await next.read({...options,targetedDemands:true})),expected,JSON.stringify(options));
+      }
+    });
     await t.test('fresh stock and receipt changes cannot reuse earlier results', async () => {
       const before = canonical(await next.read({ tenantId: 2 }));
       await f.query("INSERT INTO inventory_movements(tenant_id,product_id,quantity_delta,source_type,status,stock_location) VALUES(2,3,11,'opening_stock','posted','LOCAL')");
@@ -155,6 +163,14 @@ test('coverage SQL changes preserve complete live/history results and indexed bi
       assert.ok(b.reads < a.reads, `expected fewer indexed reads: ${a.reads} -> ${b.reads}`);
       const plan = (await f.connection.query('EXPLAIN FORMAT=JSON ' + newSql.sql, newSql.args))[0];
       assert.match(JSON.stringify(plan), /materialized_from_subquery/);
+      const unrelated={tenantId:2,productIds:[100],includeTrace:true};
+      const expectedUnrelated=await next.read(unrelated),scan=next.calls.find(call=>call.sql.startsWith('SELECT STRAIGHT_JOIN o.id AS order_id'));
+      const actualUnrelated=await next.read({...unrelated,targetedDemands:true}),targeted=next.calls.find(call=>call.sql.startsWith('SELECT STRAIGHT_JOIN o.id AS order_id'));
+      assert.deepEqual(canonical(actualUnrelated),canonical(expectedUnrelated));
+      const fullSample=await sample(scan),targetedSample=await sample(targeted);
+      assert.deepEqual(fullSample.rows,targetedSample.rows);
+      assert.ok(targetedSample.reads<fullSample.reads/3,`unrelated history must be excluded before the order scan: ${fullSample.reads} -> ${targetedSample.reads}`);
+      t.diagnostic(JSON.stringify({scope:'targeted product with unrelated historical orders',before:{ms:fullSample.ms,reads:fullSample.reads},after:{ms:targetedSample.ms,reads:targetedSample.reads}}));
       t.diagnostic(JSON.stringify({ scope: 'synthetic demand SQL only', history_rows: 12005,
         old: [a,d].map(({ ms, reads }) => ({ ms, reads })), candidate: [b,c].map(({ ms, reads }) => ({ ms, reads })) }));
     });

@@ -237,7 +237,7 @@ function fixture(failSecond = false, overrides = {}) {
     if (sql.includes('INSERT INTO inventory_order_priorities')) state.priorities = [{ product_id: args[0], order_item_id: args[1], priority: args[2], action_id: args[3] }];
     return [{ insertId: 1 }];
   } };
-  const service = createProcurementLedgerService({ prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
+  const service = createProcurementLedgerService({ coverageBatch:overrides.coverageBatch, prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
     resolveScope: async () => ({ id: 1, isDefault: true }), assertActor: async () => {}, assertReferences: async () => {}, assertCurrentActor: async () => {},
     recordCost: async (_, row) => { recordedCosts.push(row); }, refreshPurchase: async () => {},
     receive: async (_, id, payload) => { state.movements.push({ product_id: 10, quantity_delta: payload.receive_quantity, stock_location: 'LOCAL', source_type: 'purchase_inbound', source_ref: `inbound_${id}` }); },
@@ -618,4 +618,12 @@ test('order-date bulk backfills allow partial quantities only within same-date s
  assert.throws(()=>planLedgerAction(state,{...input,order_item_ids:[1,2]}),/日期/);
  assert.throws(()=>planLedgerAction(state,{...input,quantity:4}),/缺口/);
  assert.throws(()=>planLedgerAction(state,{...input,purchased_at:'2026-10-03T00:00:00+08:00'}),/日期/);
+});
+
+test('bundle ledger reads share one fresh coverage projection per group and preserve per-product revisions',async()=>{
+ const groups=[];const f=fixture(false,{coverageBatch:async(_run,ids,tenant)=>{groups.push({ids:[...ids],tenant});return new Map();}});
+ const rows=await f.service.readMany([10,11],1);
+ assert.deepEqual(rows.map(r=>r.product.id),[10,11]);assert.equal(groups.length,1);assert.equal(f.coverageProducts.length,0);
+ for(const row of rows)assert.equal(row.revision,(await f.service.read({product_id:row.product.id},1)).revision);
+ await f.service.readMany([10,11],1);assert.equal(groups.length,2,'a second request must recompute instead of reusing stale coverage');
 });

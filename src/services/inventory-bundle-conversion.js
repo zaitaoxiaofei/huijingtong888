@@ -24,7 +24,8 @@ export function createInventoryBundleConversion({ledger,postMovement,reconcile,q
   const graph=await loadInventoryComposition(q,scope);
   if(!graph.isBundle(id))throw fail('此商品没有套装组成，请先在商品资料中设置配件和每套数量');
   const parts=graph.components(id),displayQuery=connection?null:bundleReadQuery(q);
-  const snapshots=await mapBundleReads([id,...parts.map(p=>p.id)],product_id=>ledger.read({product_id,include_fbp:false},scope.id,connection,displayQuery),connection?1:2);
+  const ids=[id,...parts.map(p=>p.id)];
+  const snapshots=ledger.readMany?await ledger.readMany(ids,scope.id,connection,displayQuery):await mapBundleReads(ids,product_id=>ledger.read({product_id,include_fbp:false},scope.id,connection,displayQuery),connection?1:2);
   const root=snapshots[0];
   const components=[];
   for(const [index,part] of parts.entries()){
