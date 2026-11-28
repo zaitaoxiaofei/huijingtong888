@@ -23,6 +23,7 @@ async function inputsFor(input) {
       }
       if (sql.includes('FROM inventory_movements')) return [{ posted_movements: 0 }];
       if (sql.includes('FROM wb_order_settlement_lines')) return [];
+      if (sql.includes('FROM order_profit_calc_state state')) return [];
       assert.fail(`Unexpected query: ${sql}`);
     },
     request: async () => assert.fail('Reading estimate inputs must not make a WB request')

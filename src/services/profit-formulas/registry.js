@@ -9,6 +9,7 @@ import * as outcomeV2 from "./v2/order-outcome.js";
 import * as outcomeV3 from "./v3/order-outcome.js";
 import * as aggregationV3 from "./v3/aggregation.js";
 import * as outcomeV4 from "./v4/order-outcome.js";
+import { WB_ORDER_ESTIMATE_MODEL_VERSION, estimateWbOrderProfit } from '../../shared/wb-order-profit.js';
 
 // V1 is a frozen dependency closure. Define V2 in a separate directory only
 // after both estimated and finance/aftersale semantics have been approved.
@@ -18,7 +19,8 @@ const formulas = Object.freeze({
   V3: Object.freeze({ version: "V3", ...v1, ...aggregationV3, outcome: outcomeV3 }),
   V4: Object.freeze({ version: "V4", ...v2, ...aggregationV3, outcome: outcomeV4 }),
   V5: Object.freeze({ version: "V5", ...v1, ...aggregation, outcome, finance: legacyDailyFinance }),
-  V6: Object.freeze({ version: 'V6', ...v1, ...aggregation, outcome, finance: legacyDailyFinance, planReviewedDailySettlement })
+  V6: Object.freeze({ version: 'V6', ...v1, ...aggregation, outcome, finance: legacyDailyFinance, planReviewedDailySettlement }),
+  [WB_ORDER_ESTIMATE_MODEL_VERSION]: Object.freeze({ version: WB_ORDER_ESTIMATE_MODEL_VERSION, estimateWbOrderProfit })
 });
 
 export function assertProfitFormulaSupported(version, { operation = "estimate" } = {}) {
@@ -26,6 +28,11 @@ export function assertProfitFormulaSupported(version, { operation = "estimate" }
   if (!Object.hasOwn(formulas, normalized)) {
     throw Object.assign(new Error(`Unsupported profit formula version: ${normalized || "missing"} (${operation})`), {
       code: "UNSUPPORTED_PROFIT_FORMULA_VERSION", statusCode: 409
+    });
+  }
+  if (normalized === WB_ORDER_ESTIMATE_MODEL_VERSION && operation !== 'estimate') {
+    throw Object.assign(new Error(`WB profit formula only supports explicit estimates (${operation})`), {
+      code: 'UNSUPPORTED_PROFIT_FORMULA_VERSION', statusCode: 409
     });
   }
   // Finance and outcome allocation currently live in mysql-cutover. V2 must

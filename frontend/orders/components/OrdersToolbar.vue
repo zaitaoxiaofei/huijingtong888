@@ -19,6 +19,8 @@ const props = defineProps({
   marking:{type:Boolean,default:false},
   selectedCount: { type: Number, default: 0 },
   pageRowCount: { type: Number, default: 0 },
+  canRecalculateProfit: { type: Boolean, default: false },
+  recalculatingProfit: { type: Boolean, default: false },
   preparableCount:{type:Number,default:0},canPrepare:{type:Boolean,default:false},
   preparingPage:{type:Boolean,default:false}
 });
@@ -31,6 +33,7 @@ const emit = defineEmits([
   "sync-full",
   "cancel-sync",
   "more-action",
+  "recalculate-profit",
   "print-selected",
   "print-page",
   "prepare-page",
@@ -187,6 +190,8 @@ function handlePrintCommand(command) {
               </el-tooltip>
             </div>
 
+
+            <el-button v-if="canRecalculateProfit" class="orders-toolbar-btn orders-toolbar-btn-secondary" :loading="recalculatingProfit" :disabled="syncRunning || recalculatingProfit || (!pageRowCount && !selectedCount)" @click="emit('recalculate-profit')">{{ selectedCount ? '重算已选利润' : '重算本页利润' }}</el-button>
 
             <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
               <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>

@@ -6,16 +6,18 @@ import { ElMessage } from 'element-plus';
 import { apiClient, currentApiCacheScope } from '../../admin/utils/api.js';
 import { useAuthStore } from '../../admin/stores/auth.js';
 import { hasPermission } from '../../../src/shared/permissions.js';
-import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText } from '../../admin/utils/shanghai-date.js';
+import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from '../../admin/utils/shanghai-date.js';
 
 const props = defineProps({ row: { type: Object, required: true } });
-const emit = defineEmits(['close']);
+const emit = defineEmits(['close', 'recalculated']);
 const auth = useAuthStore();
 const canSync = computed(() => hasPermission(auth.user, 'finance'));
+const canRecalculate = computed(() => hasPermission(auth.user, 'orders.manage'));
 const evidence = ref(null);
 const error = ref('');
 const loading = ref(true);
 const syncing = ref(false);
+const recalculating = ref(false);
 const cursor = ref(null);
 const dateRange = ref([shanghaiDateDaysAgo(6), shanghaiDateKey()]);
 const statusText = { pending: '待 WB 出账', needs_review: '账单有待核对项目', needs_fx: '缺少账单日期汇率', reported: '已有账单流水' };
@@ -28,6 +30,10 @@ const preferencesLoaded = ref(false);
 const preferenceError = ref('');
 const savingPreference = ref(false);
 const savedPreferences = ref({});
+const savedScenario = computed(() => {
+  const snapshot = evidence.value?.saved_profit;
+  return snapshot && Object.hasOwn(snapshot, 'manual_overrides') ? snapshot.manual_overrides || {} : snapshot?.inputs || {};
+});
 const configuration = reactive({ warehouseId: 382855, paymentRate: null });
 const manualReturnLoss = ref(false);
 const preferenceKey = computed(() => auth.user?.tenant?.id ? `wb.profit.warehouse.${auth.user.tenant.id}` : null);
@@ -118,10 +124,12 @@ async function loadPreferences() {
     const result = await apiClient.get(`/api/user-preferences?key=${preferenceKey.value}`, { noCache: true });
     if (!active()) return;
     savedPreferences.value = result?.value && typeof result.value === 'object' ? result.value : {};
+    const savedInputs = savedScenario.value;
     const selectedId = Number(savedPreferences.value.warehouseId);
-    warehouseId.value = selectedId > 0 ? selectedId : null;
+    warehouseId.value = savedInputs.warehouseId != null ? Number(savedInputs.warehouseId) : selectedId > 0 ? selectedId : null;
     const rate = savedPreferences.value.paymentRates?.[String(shopId.value)];
-    inputs.paymentRate = rate != null && Number.isFinite(Number(rate)) && Number(rate) >= 0 && Number(rate) <= 100 ? Number(rate) : null;
+    inputs.paymentRate = savedInputs.paymentRate != null ? savedInputs.paymentRate
+      : rate != null && Number.isFinite(Number(rate)) && Number(rate) >= 0 && Number(rate) <= 100 ? Number(rate) : null;
     preferencesLoaded.value = true;
   } catch (failure) {
     if (active()) preferenceError.value = failure.message || '仓库配置读取失败，请重试。';
@@ -151,6 +159,33 @@ async function saveConfiguration() {
 function toggleReturnOverride(enabled) {
   inputs.returnLoss = enabled ? estimate.value.autoReturnLoss : null;
 }
+async function recalculate() {
+  if (!active() || !canRecalculate.value || recalculating.value || loading.value || syncing.value || savingPreference.value || configuring.value || estimate.value.profit == null) return;
+  recalculating.value = true;
+  try {
+    const result = await apiClient.post('/api/wb/orders/recalculate-profit', {
+      order_ids: [props.row.id], command_id: crypto.randomUUID(),
+      overrides: { [props.row.id]: { ...inputs, warehouseId: warehouseId.value } }
+    });
+    if (!active()) return;
+    const outcome = result?.results?.find(item => Number(item.order_id) === Number(props.row.id));
+    if (outcome?.status !== 'saved') {
+      if (outcome?.status === 'needs_inputs') {
+        emit('recalculated', result);
+        await load();
+        if (!active()) return;
+      }
+      const missing = (outcome?.missing_inputs || []).map(field => typeof field === 'string' ? field : field.label).filter(Boolean).join('、');
+      ElMessage.warning(outcome?.error || (missing ? `利润未保存，请补齐${missing}后重试。` : '利润未保存，请核对计算参数后重试。'));
+      return;
+    }
+    emit('recalculated', result);
+    await load();
+    if (active()) ElMessage.success('已重算并保存利润。');
+  } catch (failure) {
+    if (active()) ElMessage.error(failure.message || '利润保存失败，请重试。');
+  } finally { recalculating.value = false; }
+}
 async function load() {
   loading.value = true;
   error.value = '';
@@ -162,6 +197,15 @@ async function load() {
       hydrated = true;
       const { shop_id, subject_id, ordered_at, ...packageInputs } = result.estimate_inputs;
       Object.assign(inputs, packageInputs);
+      const savedInputs = savedScenario.value;
+      if (savedInputs) {
+        for (const key of Object.keys(inputs)) {
+          if (savedInputs[key] != null) inputs[key] = savedInputs[key];
+        }
+        if (savedInputs.warehouseId != null) warehouseId.value = Number(savedInputs.warehouseId);
+        manualReturnLoss.value = inputs.returnLoss != null;
+        if (savedInputs.commissionRate != null) commissionNote.value = '使用此订单上次保存的 WB 佣金费率。';
+      }
       await loadPreferences();
       if (shop_id && subject_id) {
         void apiClient.get(`/api/wb/pricing-commissions?shop_id=${shop_id}`).then(({ rows: choices = [] }) => {
@@ -193,6 +237,7 @@ async function sync() {
     if (!result.fetched) ElMessage.info('所选日期范围没有更多 WB 账单流水。');
     else ElMessage.success(`已读取店铺账单 ${result.fetched} 行，请按平台频率限制继续拉取下一页。`);
     await load();
+    if (active()) emit('recalculated');
   } catch (failure) {
     if (active()) ElMessage.error(failure.message);
   } finally { syncing.value = false; }
@@ -208,6 +253,7 @@ onMounted(load);
       <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
       <template v-if="evidence">
         <div class="wb-order-heading"><div><span class="wb-muted">订单</span><strong>{{ row.posting_number }}</strong><span v-if="row.shop_name" class="wb-muted">{{ row.shop_name }}</span></div><el-tag :type="evidence.settlement?.state === 'reported' ? 'success' : 'info'" effect="plain">{{ statusText[evidence.settlement?.state] || '账单状态待核对' }}</el-tag></div>
+        <div class="wb-profit-save-controls"><span class="wb-muted">{{ canRecalculate ? '参数调整后点击保存，预估利润才会更新到订单列表。' : '当前账号可查看利润，保存需要订单管理权限。' }}<span v-if="evidence.saved_profit?.calculated_at" class="wb-save-stamp">上次保存 {{ shanghaiDateTimeText(evidence.saved_profit.calculated_at, { assumeUtcWhenNaive: true }) }}</span></span><el-button v-if="canRecalculate" type="primary" :loading="recalculating" :disabled="loading || syncing || savingPreference || configuring || estimate.profit == null" @click="recalculate">重算并保存利润</el-button></div>
         <div class="wb-profit-summary">
           <div class="wb-summary-card wb-summary-estimate"><span class="wb-summary-label">预估利润 <small v-if="estimate.provisional">· 待补支付费率</small></span><strong class="wb-profit-value" :class="{ negative: estimate.profit < 0 }">{{ money(estimate.profit) }}</strong><span class="wb-summary-note">{{ estimate.profit == null ? '补齐计费资料后自动计算' : `预估利润率 ${margin}` }}</span></div>
           <div class="wb-summary-card"><span class="wb-summary-label">真实利润</span><strong class="wb-profit-value" :class="{ negative: evidence.settlement?.actual_profit_cny < 0 }">{{ money(evidence.settlement?.actual_profit_cny) }}</strong><span class="wb-summary-note">{{ evidence.settlement?.actual_profit_cny == null ? '等待正式账单及实际出库成本' : '按正式账单与实际出库核算' }}</span></div>
@@ -227,10 +273,10 @@ onMounted(load);
           <p v-if="estimate.shippingError" class="wb-notice wb-notice-warning">{{ estimate.shippingError }}</p><p v-if="!tariff" class="wb-notice wb-notice-warning">下单日期没有已登记的 WB 报价，请核对订单日期。</p>
         </section>
         <section class="wb-section">
-          <div class="wb-section-heading"><div><h3>成本与包裹参数</h3><p>已带入商品资料，调整后即时更新本次测算。</p></div><span v-if="tariff" class="wb-muted">报价 {{ tariff.version }}</span></div>
+          <div class="wb-section-heading"><div><h3>成本与包裹参数</h3><p>调整后即时预览，点击“重算并保存利润”写入订单列表。</p></div><span v-if="tariff" class="wb-muted">报价 {{ tariff.version }}</span></div>
           <el-form label-position="top" class="wb-estimate-grid"><el-form-item v-for="[key, label, unit] in inputFields" :key="key" :label="`${label}（${unit}）`"><el-input-number v-model="inputs[key]" :aria-label="label" :min="0" :max="unit === '%' ? 100 : undefined" :precision="key === 'weight' ? 0 : 2" :controls="false" @change="key === 'commissionRate' && (commissionNote = '使用手工填写的 WB 佣金费率。')" /></el-form-item></el-form>
           <div class="wb-parameter-notes"><span v-if="commissionNote">{{ commissionNote }}</span><span>支付手续费率：{{ inputs.paymentRate == null ? '未配置' : `${inputs.paymentRate}%` }}<el-button link type="primary" :disabled="!preferencesLoaded || !tariff" @click="openConfiguration">设置</el-button></span></div>
-          <details class="wb-optional-inputs"><summary>广告、退货与其他费用<span>默认费率 0 · 单次退货损失自动计算</span></summary><el-form label-position="top" class="wb-optional-grid"><el-form-item v-for="[key, label] in optionalFields" :key="key" :label="`${label}（%）`"><el-input-number v-model="inputs[key]" :aria-label="label" :min="0" :max="100" :precision="2" :controls="false" /></el-form-item><el-form-item label="单次退货损失（元）"><strong v-if="!manualReturnLoss" class="wb-return-value">{{ money(estimate.singleReturnLoss) }}</strong><el-input-number v-else v-model="inputs.returnLoss" aria-label="单次退货损失" :min="0" :precision="2" :controls="false" /></el-form-item></el-form><div class="wb-return-explanation"><span>自动合计：货值 + 国内运费及贴单 + 跨境物流费 + 佣金 + 委托派送费。</span><el-checkbox v-model="manualReturnLoss" @change="toggleReturnOverride">手动填写单次退货损失</el-checkbox></div><p class="wb-muted">预期退货损失 = 退货率 × 单次损失。广告、退货与其他参数仅用于本次测算。</p></details>
+          <details class="wb-optional-inputs"><summary>广告、退货与其他费用<span>默认费率 0 · 单次退货损失自动计算</span></summary><el-form label-position="top" class="wb-optional-grid"><el-form-item v-for="[key, label] in optionalFields" :key="key" :label="`${label}（%）`"><el-input-number v-model="inputs[key]" :aria-label="label" :min="0" :max="100" :precision="2" :controls="false" /></el-form-item><el-form-item label="单次退货损失（元）"><strong v-if="!manualReturnLoss" class="wb-return-value">{{ money(estimate.singleReturnLoss) }}</strong><el-input-number v-else v-model="inputs.returnLoss" aria-label="单次退货损失" :min="0" :precision="2" :controls="false" /></el-form-item></el-form><div class="wb-return-explanation"><span>自动合计：货值 + 国内运费及贴单 + 跨境物流费 + 佣金 + 委托派送费。</span><el-checkbox v-model="manualReturnLoss" @change="toggleReturnOverride">手动填写单次退货损失</el-checkbox></div><p class="wb-muted">预期退货损失 = 退货率 × 单次损失。广告、退货与其他参数随本次订单利润保存。</p></details>
         </section>
         <div v-if="estimate.profit == null" class="wb-notice wb-notice-warning wb-estimate-hint">请补齐{{ missingHint || '计费参数' }}。{{ estimate.inputErrors?.map(field => `${field.label}需填写有效数值`).join('；') }}</div>
         <div v-if="estimate.provisional" class="wb-notice wb-notice-warning">支付手续费率未配置，暂未计入预估利润。请在“修改仓库与费率”中填写已确认费率。</div>
@@ -246,7 +292,7 @@ onMounted(load);
         </section>
         <section v-if="canSync" class="wb-section wb-settlement-controls"><div><h3>正式账单核对</h3><p>按北京时间选择账单日期，拉取后更新真实费用与利润。</p></div><div class="wb-settlement-actions"><el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="账单开始日" end-placeholder="账单结束日" :disabled="syncing" @change="cursor = null" /><el-button type="primary" plain :loading="syncing" :disabled="!dateRange?.length" @click="sync">{{ cursor ? '继续拉取下一页' : '拉取 WB 正式账单' }}</el-button></div></section>
         <el-collapse v-if="evidence.settlement?.lines?.length" class="wb-ledger-collapse"><el-collapse-item title="WB 原始账单流水"><el-table :data="evidence.settlement.lines" size="small" max-height="330"><el-table-column prop="report_id" label="报表编号" min-width="140" /><el-table-column prop="row_id" label="流水编号" min-width="140" /><el-table-column label="账单日期" min-width="105"><template #default="{ row: line }">{{ shanghaiDateText(line.date) }}</template></el-table-column><el-table-column prop="operation" label="WB 记账事项" min-width="160" /><el-table-column label="商品应付净额" min-width="140" align="right"><template #default="{ row: line }">{{ money(line.forPay, line.currency) }}</template></el-table-column><el-table-column prop="fx_rate" label="人民币兑卢布汇率" min-width="135" /></el-table></el-collapse-item></el-collapse>
-        <details class="wb-appendix wb-calculation-source"><summary>计算依据与报价来源</summary><p>预估仅用于本次订单测算，不覆盖已保存的历史利润。罚款等未确认费用暂不预估，真实退货以账单冲减核算。</p><p>委托派送费 = 销售额 × 2.5%。提现费沿用现有约定：max(0, 销售额 − 跨境物流费 − 委托派送费 − 销售额 × 20%) × 1.2%。这些为测算约定，请以实际合同及账单核对。</p><p v-if="tariff">下单日生效报价 {{ tariff.version }} · <a :href="tariff.downloadUrl" target="_blank" rel="noopener noreferrer">查看官方报价原表</a></p><p v-if="estimate.modelVersion">预估模型 {{ estimate.modelVersion }}</p></details>
+        <details class="wb-appendix wb-calculation-source"><summary>计算依据与报价来源</summary><p>预览参数不会自动改写订单利润；点击“重算并保存利润”后保存当前订单及计算依据。罚款等未确认费用暂不预估，真实退货以账单冲减核算。</p><p>委托派送费 = 销售额 × 2.5%。提现费沿用现有约定：max(0, 销售额 − 跨境物流费 − 委托派送费 − 销售额 × 20%) × 1.2%。这些为测算约定，请以实际合同及账单核对。</p><p v-if="tariff">下单日生效报价 {{ tariff.version }} · <a :href="tariff.downloadUrl" target="_blank" rel="noopener noreferrer">查看官方报价原表</a></p><p v-if="estimate.modelVersion">预估模型 {{ estimate.modelVersion }}</p></details>
       </template>
     </div>
   </el-dialog>
@@ -258,6 +304,8 @@ onMounted(load);
 .wb-order-heading { margin-bottom: 18px; flex-wrap: wrap; }
 .wb-order-heading > div { justify-content: flex-start; flex-wrap: wrap; gap: 10px; }
 .wb-order-heading strong { font-size: 15px; }
+.wb-profit-save-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: -4px 0 16px; font-size: 12px; }
+.wb-save-stamp { display: block; }
 .wb-muted, .wb-summary-note { color: var(--el-text-color-secondary); }
 .wb-profit-summary { display: grid; grid-template-columns: 1.15fr 1.15fr 1fr; gap: 14px; margin-bottom: 20px; }
 .wb-summary-card { display: flex; flex-direction: column; gap: 5px; padding: 19px 22px; border: 1px solid var(--el-border-color-light); border-radius: 12px; background: var(--el-fill-color-extra-light); }

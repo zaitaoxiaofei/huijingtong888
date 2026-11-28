@@ -6,6 +6,8 @@ import test from 'node:test';
 import { build } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright-core';
+import { estimateWbOrderProfit } from '../src/shared/wb-order-profit.js';
+import { currentWbTariff } from '../src/shared/wb-logistics-catalog.js';
 
 test('WB order profit configures scoped warehouses, quotes parcels and keeps fee evidence usable on phones', {
   skip: process.env.RUN_TASK_BROWSER_TESTS !== '1', timeout: 180000
@@ -20,7 +22,7 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
     },
     settlement: { state: 'pending', lines: [], amounts: [], amounts_cny: {}, net_settlement_cny: null, actual_profit_cny: null }
   };
-  let browser, failPreferenceRead = false, holdEvidence = false, heldEvidence, evidenceHeld;
+  let browser, failPreferenceRead = false, failRecalculation = false, holdEvidence = false, heldEvidence, evidenceHeld;
   try {
     await build({
       configFile: false, root: process.cwd(), publicDir: false, logLevel: 'error',
@@ -36,11 +38,13 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
             import {useAuthStore} from '/frontend/admin/stores/auth.js';
             import {setAuthToken,currentApiCacheScope} from '/frontend/admin/utils/api.js';
             const tenant=Number(new URL(location.href).searchParams.get('tenant')||2);
-            const user={id:1,personId:1,roles:['admin'],tenant:{id:tenant,slug:'wb-profit-'+tenant,role:'owner'}};
+            const readOnly=new URL(location.href).searchParams.has('readonly');
+            const user={id:1,personId:1,roles:readOnly?['packing']:['admin'],tenant:{id:tenant,slug:'wb-profit-'+tenant,role:readOnly?'member':'owner'}};
             localStorage.setItem('baodanAuthUser',JSON.stringify(user));setAuthToken('wb-profit-browser-only');currentApiCacheScope();
-            const app=createApp({setup(){const opened=ref(true);return()=>h('main',[
+            const app=createApp({setup(){const opened=ref(true),refreshes=ref(0);return()=>h('main',[
               h('button',{id:'reopen',onClick:()=>opened.value=true},'重新查看利润'),
-              opened.value?h(Dialog,{row:{id:17,posting_number:'WB-6339198672'},onClose:()=>opened.value=false}):null
+              h('output',{id:'refresh-count'},String(refreshes.value)),
+              opened.value?h(Dialog,{row:{id:17,posting_number:'WB-6339198672'},onClose:()=>opened.value=false,onRecalculated:()=>refreshes.value++}):null
             ]);}});app.use(createPinia());const auth=useAuthStore();auth.user=user;
             window.switchProfitTestTenant=id=>{const next={...user,tenant:{...user.tenant,id}};auth.user=next;localStorage.setItem('baodanAuthUser',JSON.stringify(next));currentApiCacheScope();};
             app.use(ElementPlus,{locale:zhCn});app.mount('#app');
@@ -74,6 +78,14 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
           return route.fulfill({ json: { key, value: preferences.get(key) ?? null } });
         }
         if (url.pathname === '/api/wb/orders/sync-settlement') return route.fulfill({ json: { fetched: 0, next_cursor: null } });
+        if (url.pathname === '/api/wb/orders/recalculate-profit') {
+          if (failRecalculation) return route.fulfill({ json: { ok: false, updated_count: 0, results: [{ order_id: 17, status: 'needs_inputs', error: '测试：当前采购成本需要核对' }] } });
+          const inputs = { ...body.overrides['17'], sale: evidence.revenue_cny };
+          const tariff = currentWbTariff(evidence.estimate_inputs.ordered_at);
+          const outputs = estimateWbOrderProfit(inputs, tariff.rows.find(row => row.id === inputs.warehouseId));
+          evidence.saved_profit = { inputs, outputs, manual_overrides: { ...body.overrides['17'] }, calculated_at: '2026-11-28T02:30:00Z', revision_id: 7 };
+          return route.fulfill({ json: { ok: true, updated_count: 1, results: [{ order_id: 17, status: 'saved', estimated_profit_cny: outputs.profit, provisional: outputs.provisional }] } });
+        }
         throw new Error('Unexpected fixture API: ' + request.method() + ' ' + url.pathname);
       }
       const asset = url.pathname === '/style.css'
@@ -96,6 +108,7 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
     await dialog().getByRole('button', { name: '保存并使用', exact: true }).click();
     await feeRow('跨境物流费').getByText('¥ 13.60', { exact: true }).waitFor();
     await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 24.57', { exact: true }).waitFor();
+    assert.equal(requests.filter(request => request.path === '/api/wb/orders/recalculate-profit').length, 0, 'preview and warehouse preferences do not silently persist order profit');
     for (const name of ['预估金额', '真实金额', '差异', '说明']) {
       assert.equal(await dialog().locator('.wb-settlement-rows').getByRole('columnheader', { name, exact: true }).count(), 1);
     }
@@ -131,6 +144,7 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
     await enterNumber('长', 116);
     await dialog().getByText(/包裹超出该仓限制/).waitFor();
     await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('—', { exact: true }).waitFor();
+    assert.equal(await dialog().getByRole('button', { name: '重算并保存利润', exact: true }).isDisabled(), true, 'unquotable packages cannot be saved as a completed profit');
     await enterNumber('长', 15);
     await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 21.41', { exact: true }).waitFor();
 
@@ -154,6 +168,48 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
     await feeRow('支付手续费').getByText('¥ 0.57', { exact: true }).waitFor();
     await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 24.00', { exact: true }).waitFor();
     assert.equal(await dialog().getByRole('button', { name: '保存并使用', exact: true }).count(), 0, 'saved configuration is automatically reused on reopen');
+    await enterNumber('采购成本', 5.3);
+    await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 23.00', { exact: true }).waitFor();
+    failRecalculation = true;
+    await dialog().getByRole('button', { name: '重算并保存利润', exact: true }).click();
+    await page.getByText('测试：当前采购成本需要核对', { exact: true }).waitFor();
+    assert.equal(await page.locator('#refresh-count').textContent(), '1', 'an incomplete canonical result refreshes the list so a previous known profit cannot remain stale');
+    assert.equal(await page.getByText('已重算并保存利润。', { exact: true }).count(), 0, 'an incomplete calculation is not reported as successful');
+    assert.equal(evidence.saved_profit, undefined);
+    failRecalculation = false;
+    await dialog().getByRole('button', { name: '重算并保存利润', exact: true }).click();
+    await dialog().getByText(/上次保存/).waitFor();
+    assert.equal(await page.locator('#refresh-count').textContent(), '2', 'a successful persisted recalculation requests an order-list refresh');
+    const recalculated = requests.filter(request => request.path === '/api/wb/orders/recalculate-profit').at(-1);
+    assert.deepEqual(recalculated.body.order_ids, [17]);
+    assert.match(recalculated.body.command_id, /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
+    assert.equal(new Set(requests.filter(request => request.path === '/api/wb/orders/recalculate-profit').map(request => request.body.command_id)).size, 2, 'each explicit save action starts a distinct retry-safe command');
+    assert.equal(recalculated.body.overrides['17'].purchaseCost, 5.3);
+    assert.equal(recalculated.body.overrides['17'].warehouseId, 382855);
+    assert.equal(recalculated.body.overrides['17'].paymentRate, 1);
+    assert.equal(recalculated.body.overrides['17'].returnLoss, null);
+    await page.reload();
+    await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 23.00', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('spinbutton', { name: '采购成本', exact: true }).inputValue(), '5.30', 'saved order inputs win over current product defaults on reopen');
+    evidence.saved_profit.manual_overrides.purchaseCost = null;
+    evidence.saved_profit.manual_overrides.paymentRate = null;
+    evidence.saved_profit.manual_overrides.weight = null;
+    await page.reload();
+    await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 24.00', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('spinbutton', { name: '采购成本', exact: true }).inputValue(), '4.30', 'missing scenario fields fall back to available product data');
+    assert.equal(await page.getByRole('spinbutton', { name: '包裹实重', exact: true }).inputValue(), '200');
+    await feeRow('支付手续费').getByText('¥ 0.57', { exact: true }).waitFor();
+    evidence.saved_profit.manual_overrides.paymentRate = 0;
+    await page.reload();
+    await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 24.57', { exact: true }).waitFor();
+    await feeRow('支付手续费').getByText('¥ 0.00', { exact: true }).waitFor();
+    evidence.saved_profit.manual_overrides = {};
+    evidence.saved_profit.inputs.warehouseId = null;
+    evidence.saved_profit.inputs.paymentRate = null;
+    evidence.saved_profit.inputs.weight = null;
+    await page.reload();
+    await dialog().locator('.wb-profit-summary .wb-profit-value').first().getByText('¥ 24.00', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('spinbutton', { name: '采购成本', exact: true }).inputValue(), '4.30', 'automatic audit inputs never become manual overrides');
     await fs.mkdir('.verification', { recursive: true });
     await page.screenshot({ path: '.verification/wb-order-financial-light.png', fullPage: true, animations: 'disabled' });
     await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; document.documentElement.classList.add('dark'); });
@@ -181,6 +237,11 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
     await dialog().getByText('2026-11-28', { exact: true }).waitFor();
     await page.screenshot({ path: '.verification/wb-order-financial-settlement.png', fullPage: true, animations: 'disabled' });
 
+    await page.goto('http://localhost:8788/admin.html?tenant=2&readonly=1#/orders');
+    await dialog().locator('.wb-profit-summary').waitFor();
+    assert.equal(await dialog().getByRole('button', { name: '重算并保存利润', exact: true }).count(), 0, 'read-only order permissions cannot invoke recalculation');
+
+    delete evidence.saved_profit;
     await page.goto('http://localhost:8788/admin.html?tenant=3#/orders');
     await dialog().getByRole('button', { name: '配置仓库', exact: true }).waitFor();
     assert.ok(requests.some(request => request.path === '/api/user-preferences' && request.query.key === 'wb.profit.warehouse.3'));
@@ -204,7 +265,7 @@ test('WB order profit configures scoped warehouses, quotes parcels and keeps fee
     await heldEvidence.fulfill({ json: evidence });
     await dialog().waitFor({ state: 'hidden' });
     assert.equal(requests.filter(request => request.method === 'POST').length, postsBeforeFailure, 'a stale enterprise response cannot save configuration or remain visible');
-    assert.ok(requests.filter(request => request.method === 'POST').every(request => ['/api/user-preferences', '/api/wb/orders/sync-settlement'].includes(request.path)), 'inspection never invokes WB product or fulfillment writes');
+    assert.ok(requests.filter(request => request.method === 'POST').every(request => ['/api/user-preferences', '/api/wb/orders/sync-settlement', '/api/wb/orders/recalculate-profit'].includes(request.path)), 'inspection never invokes WB product or fulfillment writes');
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

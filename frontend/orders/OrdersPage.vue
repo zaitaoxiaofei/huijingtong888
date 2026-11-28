@@ -31,6 +31,7 @@ import {
 } from "./constants/orders-ui.js";
 import { buildInventoryPickingSummary, buildProductDisplayRows, inventoryBindingReminders, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { applyOrderImageSyncToRow, applyOrderImageSyncToItems } from './utils/order-image-sync.js';
+import { wbProfitView, wbProfitRecalculationTargets, wbProfitRecalculationMessage } from './utils/wb-profit-recalculation.js';
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
@@ -57,6 +58,7 @@ const canReceiveInventory = computed(() => hasPermission(inventoryAuth.user, "pa
 const canRemindProcurement = computed(() => canUpdateInventory.value || hasPermission(inventoryAuth.user, "packing"));
 const canManageOrderNotes = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
 const canSyncOrderImages = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
+const recalculatingWbProfit = ref(false);
 const canEditProcurementNotes = computed(() => ['packing','procurement','inventory.write'].some(permission => hasPermission(inventoryAuth.user, permission)));
 const procurementOrderNotes = reactive({visible:false,productId:0,orderId:0});
 const router = useRouter();
@@ -849,6 +851,12 @@ function detailItemSaleAmount(item = {}) {
 }
 
 function buildProfitSummary(row) {
+  if (row.platform === 'wb') {
+    const value = wbProfitView(row.wb_profit);
+    return { revenue: Number(row.wb_amount_cny ?? row.revenue ?? 0), estimated: value.amount,
+      actual: null, hasActual: false, effective: value.amount, effectiveType: 'estimated',
+      alertLevel: !value.known ? '' : value.amount < 0 ? 'loss' : value.amount < 1 ? 'low' : '' };
+  }
   const estimated = Number(row.estimated_profit || 0);
   const actual = Number(row.actual_profit || 0);
   const settlementStates = splitCsv(row.settlement_states).map((value) => value.toLowerCase());
@@ -1846,7 +1854,37 @@ function handleToolbarMoreAction(action) {
   if (action === "ogl-create-batch") return openOglDispatch("create");
   if (action === "ogl-batch-history") return openOglDispatch("history");
   if (action === "print-selected") return bulkPrintSelected();
+  if (action === "recalculate-profit" && vm.filters.platform === 'wb') return handleWbRecalculate();
   return handleMoreAction(action);
+}
+
+async function handleWbProfitSaved(result = {}) {
+  if (result.order_id) orderDetailCache.delete(Number(result.order_id));
+  else orderDetailCache.clear();
+  try { await loadOrders({ forceRefresh: true }); }
+  catch { ElMessage.warning('利润已保存，订单列表刷新失败，请手动刷新列表。'); }
+}
+
+async function handleWbRecalculate(orderId = null) {
+  if (recalculatingWbProfit.value || !canManageOrderNotes.value) return;
+  const scope = currentApiCacheScope();
+  try {
+    const candidates = orderId
+      ? tableRows.value.filter(row => Number(row.id) === Number(orderId))
+      : selectedRows.value.length ? selectedRows.value : tableRows.value.filter(row => row.platform === 'wb');
+    const ids = wbProfitRecalculationTargets(candidates);
+    recalculatingWbProfit.value = true;
+    const result = await apiClient.post('/api/wb/orders/recalculate-profit', {
+      order_ids: ids, command_id: crypto.randomUUID()
+    });
+    if (scope !== currentApiCacheScope()) return;
+    await handleWbProfitSaved({ order_id: orderId });
+    if (scope !== currentApiCacheScope()) return;
+    const summary = wbProfitRecalculationMessage(result);
+    ElMessage[summary.kind](summary.message);
+  } catch (error) {
+    if (scope === currentApiCacheScope()) ElMessage.error(error.message || 'WB 利润重算失败');
+  } finally { recalculatingWbProfit.value = false; }
 }
 
 async function bulkPrepareCurrentPage(){
@@ -2948,6 +2986,8 @@ onBeforeUnmount(() => {
       :sync-running="vm.syncRunning"
       :last-sync-text="vm.lastSyncText"
       :more-actions="vm.filters.platform === 'wb' ? vm.moreActions.filter(action => action.value === 'prepare-selected') : vm.moreActions"
+      :can-recalculate-profit="vm.filters.platform === 'wb' && canManageOrderNotes"
+      :recalculating-profit="recalculatingWbProfit"
       :selected-count="selectedCount"
       :page-row-count="tableRows.length"
       :preparable-count="pagePreparePlan.ids.length"
@@ -2959,6 +2999,7 @@ onBeforeUnmount(() => {
       @sync-full="syncAllOrdersAction"
       @cancel-sync="cancelSync"
       @more-action="handleToolbarMoreAction"
+      @recalculate-profit="handleWbRecalculate()"
       @print-selected="bulkPrintSelected"
       @print-page="bulkPrintPage"
       @prepare-page="bulkPrepareCurrentPage"
@@ -3065,6 +3106,8 @@ onBeforeUnmount(() => {
       <OrdersTable
         :key="vm.filters.platform"
         :can-sync-order-images="canSyncOrderImages"
+        :can-recalculate-profit="canManageOrderNotes"
+        :recalculating-profit="recalculatingWbProfit"
         :can-prepare="canPreparePage"
         :can-update-inventory="canUpdateInventory"
         :can-receive-inventory="canReceiveInventory"
@@ -3081,6 +3124,8 @@ onBeforeUnmount(() => {
         table-height="100%"
         @toggle-all="toggleAll"
         @images-synced="handleOrderImagesSynced"
+        @profit-recalculated="handleWbProfitSaved"
+        @recalculate-wb-profit="handleWbRecalculate"
         @toggle-row="toggleRow"
         @open-profit="openProfitDetail"
         @prepare-order="handlePrepareOrder"

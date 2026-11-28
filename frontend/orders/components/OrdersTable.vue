@@ -7,6 +7,7 @@ import {PROCUREMENT_CANCELLATION_CAUSES} from '../../../src/shared/procurement-d
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
+import { wbProfitView } from '../utils/wb-profit-recalculation.js';
 import InventoryIdentity from './InventoryIdentity.vue';
 import OrderProductAliases from './OrderProductAliases.vue';
 import { useOrderImageSync } from '../composables/useOrderImageSync.js';
@@ -24,6 +25,8 @@ const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/c
 
 const props = defineProps({
   canSyncOrderImages: { type: Boolean, default: false },
+  canRecalculateProfit: { type: Boolean, default: false },
+  recalculatingProfit: { type: Boolean, default: false },
   canPrepare: { type: Boolean, default: false },
   canRemindProcurement: { type: Boolean, default: false },
   canUpdateInventory: { type: Boolean, default: false },
@@ -45,6 +48,8 @@ const props = defineProps({
 
 const emit = defineEmits([
   "images-synced",
+  "profit-recalculated",
+  "recalculate-wb-profit",
   "toggle-all",
   "toggle-row",
   "open-profit",
@@ -659,7 +664,13 @@ function canEditCollaborationNote(row) {
 
       <el-table-column label="利润" min-width="188" align="left">
         <template #default="{ row }">
-          <div v-if="row.platform === 'wb'" class="orders-cell-stack orders-money-cell"><div class="orders-cell-meta-line">金额: {{ row.amountText }}</div><small>真实利润待结算</small><el-button link type="primary" size="small" :icon="Document" @click="wbFinancialRow=row">查看明细</el-button></div>
+          <div v-if="row.platform === 'wb'" class="orders-cell-stack orders-money-cell">
+            <div class="orders-cell-meta-line">金额: {{ row.amountText }}</div>
+            <div class="orders-cell-meta-line" :class="{ 'orders-low-profit-value': wbProfitView(row.wb_profit).known && wbProfitView(row.wb_profit).amount < 0 }">预计: <span v-if="wbProfitView(row.wb_profit).known">CNY {{ formatMoney(wbProfitView(row.wb_profit).amount) }}</span><span v-else>{{ wbProfitView(row.wb_profit).status }}</span></div>
+            <small v-if="wbProfitView(row.wb_profit).provisional">暂估 · 待补支付费率</small>
+            <small>真实利润待结算</small>
+            <div><el-button link type="primary" size="small" :icon="Document" @click="wbFinancialRow=row">查看明细</el-button><el-button v-if="canRecalculateProfit" link type="primary" size="small" :disabled="recalculatingProfit" @click="emit('recalculate-wb-profit', row.id)">重算利润</el-button></div>
+          </div>
           <div v-else class="orders-cell-stack orders-money-cell">
             <div class="orders-cell-meta-line">金额: {{ row.amountText }}</div>
             <div
@@ -883,7 +894,7 @@ function canEditCollaborationNote(row) {
     </Teleport>
 
     <OzonAftersaleDialog v-if="aftersaleRow" :row="aftersaleRow" @close="aftersaleRow=null" @open-profit="id => { aftersaleRow=null; emit('open-profit', id); }" />
-    <WbOrderFinancialDialog v-if="wbFinancialRow" :row="wbFinancialRow" @close="wbFinancialRow=null" />
+    <WbOrderFinancialDialog v-if="wbFinancialRow" :row="wbFinancialRow" @close="wbFinancialRow=null" @recalculated="result => emit('profit-recalculated', { ...result, order_id: wbFinancialRow.id })" />
     <WbHandoverDialog v-if="wbHandoverRow" :row="wbHandoverRow" @close="wbHandoverRow=null" @changed="emit('inventory-saved')" />
     <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved', $event)">
       <template #management>

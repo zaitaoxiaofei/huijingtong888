@@ -2,18 +2,32 @@ import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./bu
 import { wbFulfillmentEnabled, wbPlatform } from './wb-platform.js';
 import { wbOrderCapabilities, wbOrderAmountCny } from '../shared/wb-order-state.js';
 
-export async function enrichWbOrders(result) {
+export async function enrichWbOrders(result, { query, readSnapshots } = {}) {
   const rows = Array.isArray(result) ? result : result?.rows;
   const wbRows = (rows || []).filter(row => row.platform === 'wb');
   if (!wbRows.length) return result;
-  const { mysqlQuery } = await import('../mysql-pool.js');
+  const mysqlQuery = query || (await import('../mysql-pool.js')).mysqlQuery;
   const ids = wbRows.map(row=>Number(row.id));
-  const details = await mysqlQuery(`SELECT w.order_id,w.supplier_status AS wb_supplier_status,w.wb_status,w.supply_id AS wb_supply_id,w.raw_json
+  const details = await mysqlQuery(`SELECT w.order_id,w.tenant_id,w.supplier_status AS wb_supplier_status,w.wb_status,w.supply_id AS wb_supply_id,w.raw_json
     FROM wb_order_details w JOIN orders o ON o.id=w.order_id AND o.shop_id=w.shop_id
-    JOIN shops s ON s.id=w.shop_id AND s.tenant_id=w.tenant_id
+    JOIN shops s ON s.id=w.shop_id AND s.tenant_id=w.tenant_id AND s.platform='wb'
     WHERE w.order_id IN (${ids.map(()=>'?').join(',')})`, ids);
   const map = new Map(details.map(row=>[Number(row.order_id),row]));
+  const snapshots = new Map();
+  const readProfits = readSnapshots || (await import('./wb-order-profit-recalculation.js')).readWbOrderProfitSnapshots;
+  const tenants = new Set(details.map(row => Number(row.tenant_id)));
+  for (const tenantId of tenants) {
+    if (!Number.isSafeInteger(tenantId) || tenantId <= 0) continue;
+    const orderIds = details.filter(row => Number(row.tenant_id) === tenantId).map(row => Number(row.order_id));
+    for (const [orderId, snapshot] of await readProfits({ query: mysqlQuery, tenantId, orderIds })) snapshots.set(orderId, snapshot);
+  }
   for (const row of wbRows) {
+    const saved = snapshots.get(Number(row.id));
+    const value = saved?.outputs?.profit;
+    const estimated = value != null && Number.isFinite(Number(value)) ? Number(value) : null;
+    row.estimated_profit = estimated;
+    row.wb_profit = saved ? { estimated_profit_cny: estimated, provisional: saved.outputs.provisional === true,
+      calculated_at: saved.calculated_at, revision_id: saved.revision_id, missing_inputs: saved.outputs.missingInputs || [] } : null;
     const detail = map.get(Number(row.id));
     if (!detail) continue;
     const raw = typeof detail.raw_json === 'string' ? JSON.parse(detail.raw_json) : detail.raw_json;
@@ -34,6 +48,14 @@ async function partitionWbOrders(ids, session) {
   if(rows.some(row=>!['ozon','wb'].includes(row.platform||'ozon')))throw Object.assign(new Error('所选平台尚未接通此履约操作。'),{statusCode:409});
   if (rows.length !== clean.length) throw Object.assign(new Error('部分订单不存在或不属于当前企业。'), { statusCode: 404 });
   return { wb: clean.filter(id=>rows.find(row=>Number(row.id)===id)?.platform==='wb'), ozon: clean.filter(id=>rows.find(row=>Number(row.id)===id)?.platform!=='wb') };
+}
+
+export async function dispatchWbProfitRecalculation(orderId, options, { authorize = authorizeBusinessTaskSession, platform = wbPlatform } = {}) {
+  const session = await authorize(options.session);
+  assertBusinessTaskPermission(session, 'orders.manage');
+  const service = await platform(session, 'orders.manage', options.signal);
+  const result = await service.recalculateOrderProfit(Number(session.tenant.id), { order_ids: [Number(orderId)] });
+  return { ...result, updated: result.updated_count, unbound: 0 };
 }
 
 export async function dispatchPrepare(body, userId, tenantId, options, ozonPrepare) {
