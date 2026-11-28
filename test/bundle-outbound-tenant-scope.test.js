@@ -45,3 +45,36 @@ for (const defaultTenant of [true, false]) {
     assert.ok(reconciled);
   });
 }
+
+test('the last new order shares the final bundle reconciliation before writing outbound records', async () => {
+  const events = [];
+  const row = { id: 21, order_status: 'awaiting_packaging', shop_id: 5, mapping_id: 3,
+    sku_mapping_id: 3, product_id: 4, quantity: 1, posting_number: 'ORDER-21', ozon_sku: '21' };
+  const run = runInNewContext(`(${syncOutbound.trim()})`, {
+    orderListTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
+    assertOrderTaskAccessMysql: async () => {},
+    orderOutboundSyncScopeMysql: () => ({ sql: '', params: [] }),
+    orderTenantPredicateMysql: () => '1=1',
+    orderTransportEvidenceSql: () => '0',
+    orderStatusSqlMysql: () => '0',
+    mysqlQuery: async sql => sql.includes('FROM order_items oi') ? [row] : [],
+    resolveOrderStockLocationMysql: () => ({ stockLocation: 'LOCAL' }),
+    mysqlPoolConnectionAdapter: {},
+    postProductInventoryWithComponentsMysql: async (_connection, body, _tenant, { deferBundleReconciliation }) => {
+      assert.equal(body.related_order_item_id, row.id);
+      events.push('defer');
+      deferBundleReconciliation();
+    },
+    loadBundleFinishedStocks: async () => assert.fail('the deferred item already confirmed bundle stock'),
+    withMysqlTransaction: async callback => { await callback({}); events.push('commit'); },
+    mysqlConnectionQuery: async () => { events.push('lock'); return []; },
+    reconcileBundleOrders: async () => events.push('reconcile'),
+    upsertOrderOutboundRecordMysql: async () => events.push('record'),
+    mysqlExecute: async sql => { assert.match(sql, /UPDATE order_exceptions/); events.push('resolve'); },
+    invalidateOrderProcurementCoverage: () => events.push('invalidate')
+  });
+  const result = await run({ tenantId: 1, open_only: true });
+  assert.equal(result.deducted, 1);
+  assert.equal(result.outbound_records_synced, 1);
+  assert.deepEqual(events, ['defer', 'lock', 'reconcile', 'commit', 'record', 'resolve', 'invalidate']);
+});
