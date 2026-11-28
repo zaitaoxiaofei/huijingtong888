@@ -24,7 +24,7 @@ import { assertInventoryPackage, defaultInventoryPackagingFee } from "../shared/
 import { productProfitParameterChanges } from "../shared/product-profit-parameters.js";
 import { scopedProductProfitRecalculation, preserveOrderEstimateParameters } from "./product-profit-recalculation.js";
 import { WB_REMOTE_WRITES_ENABLED } from "../shared/wb-capabilities.js";
-import { enrichWbOrders } from "./wb-order-dispatch.js";
+import { enrichWbOrders, dispatchWbProfitRecalculation } from "./wb-order-dispatch.js";
 import { createOrderBindingIgnoreService } from "./order-binding-ignore.js";
 import { settlementOverdue } from '../shared/settlement-overdue.js';
 import { checkOzonHealth, recordOzonSyncHealth } from './ozon-credential-health-mysql.js';
@@ -21111,7 +21111,8 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
   await assertOrderTaskAccessMysql(tenantScope, options);
   const order = await mysqlQueryOne(`SELECT o.*, owned_shop.platform FROM orders o JOIN shops owned_shop ON owned_shop.id = o.shop_id WHERE o.id = ? AND ${orderTenantPredicateMysql("owned_shop", tenantScope)}`, [Number(orderId)]);
   if (!order) throw new Error("Order not found");
-  if (order.platform !== 'ozon') throw Object.assign(new Error('WB 利润尚未接入，不能套用 Ozon 计费公式。'), { statusCode:409 });
+  if (order.platform === 'wb') return dispatchWbProfitRecalculation(order.id, options);
+  if (order.platform !== 'ozon') throw Object.assign(new Error('该平台尚未接入订单利润计算。'), { statusCode:409 });
   const rawOrder = await mysqlQueryOne(
     "SELECT raw_json FROM ozon_orders_raw WHERE store_id = ? AND posting_number = ? LIMIT 1",
     [order.shop_id, order.posting_number]
@@ -35899,6 +35900,7 @@ export const applyInventoryStocktakeMysql = async (body, personId, tenantId = "a
 // WB uses the existing inventory ledger and component expansion. No Ozon profit
 // arithmetic runs here. The order lock serializes sync, binding and cancellation.
 export function invalidateWbOrderCachesMysql() {
+  invalidateOrderReadCache();
   invalidateOrderProcurementCoverage();
   invalidateShopCacheMysql();
 }

@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateWbOrderProfit, WB_ORDER_ESTIMATE_MODEL_VERSION } from '../frontend/orders/utils/wb-order-profit.js';
+import { estimateWbOrderProfit, WB_ORDER_ESTIMATE_MODEL_VERSION } from '../src/shared/wb-order-profit.js';
+import { estimateWbOrderProfit as frontendEstimate } from '../frontend/orders/utils/wb-order-profit.js';
 import { wbTariffVersion } from '../src/shared/wb-logistics-catalog.js';
 
 const hefei = wbTariffVersion('2026-11-11').rows.find(row => row.id === 382855);
 const input = { sale: 56.55, purchaseCost: 4.3, domesticCost: 1, weight: 200, length: 15, width: 15, height: 5,
   commissionRate: 20, adRate: 0, otherRate: 0, returnRate: 0 };
+
+test('WB frontend and persisted server estimates use the same versioned model implementation', () => {
+  assert.equal(frontendEstimate, estimateWbOrderProfit);
+});
 
 test('WB estimate calculates the pictured order using Hefei freight and automatic fee components', () => {
   const result = estimateWbOrderProfit(input, hefei);

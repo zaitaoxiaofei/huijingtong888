@@ -17,6 +17,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { wbRequest } from './wb-client.js';
 import { wbOrderState, wbOrderAmountCny, wbOrderCapabilities } from '../shared/wb-order-state.js';
 import { assertTenantQuotaAvailable } from './tenant-quotas.js';
+import { createWbOrderProfitRecalculation, readWbOrderProfitSnapshots } from './wb-order-profit-recalculation.js';
 
 const pricingCommissionCache = new Map();
 const fulfillmentActions = new Set(['prepare', 'supplyAction']);
@@ -443,11 +444,13 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
     const purchaseCost = positive(input?.purchase_cost);
     const domesticShipping = nonnegative(input?.domestic_shipping);
     const handlingFee = nonnegative(input?.handling_fee);
+    const saved = await readWbOrderProfitSnapshots({ query, tenantId, orderIds: [order.id] });
     return {
       order_id: order.id,
       wb_order_id: order.wb_order_id,
       revenue_cny: wbOrderAmountCny(raw),
       posted_inventory_cost_cny: inventoryCost,
+      saved_profit: saved.get(Number(order.id)) || null,
       estimate_inputs: {
         shop_id: order.shop_id, subject_id: positive(card?.subjectID), ordered_at: raw?.createdAt ?? input?.ordered_at ?? null,
         purchaseCost: purchaseCost == null || quantity == null ? null : purchaseCost * quantity,
@@ -741,8 +744,9 @@ export function createWbPlatform({ actorId, query, transaction, request = wbRequ
   }
   const productOperations=createWbProductOperations({query,transaction,request,account,listing,actorId,enabled:WB_LISTING_PUBLISH_ENABLED});
   const stockManagement=createWbStockManagement({account,query,request});
+  const recalculateOrderProfit = createWbOrderProfitRecalculation({ actorId, query, transaction, pricingCommissions, invalidate });
   return { ...stockManagement, cardLimits, pricingCommissions, refreshProducts:workspace.refreshProducts,createProductInventory,...records, ...catalog, listingSource, ...listing, ...publishing, ...productOperations, account, shops, saveShop, check, warehouses, saveWarehouse, products, syncProducts, bindProduct, uploadMedia, prices, setPrice, priceResult, stocks, setStocks, categories, characteristics, publish, publishErrors,
-    syncOrders, syncOrderMedia, orderFinancialEvidence, syncOrderSettlement, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
+    syncOrders, syncOrderMedia, orderFinancialEvidence, recalculateOrderProfit, syncOrderSettlement, ownedOrders, bindOrderInventory, createOrderInventory: (tenantId, body) => bindOrderInventory(tenantId, body, true), prepare, stickers, supply, supplyAction, promotions, promotionProducts, enrollPromotion, inventoryUsage };
 }
 
 export async function wbPlatform(session, permission = 'operations', signal) {
