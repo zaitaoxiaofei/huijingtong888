@@ -150,7 +150,10 @@ test('grouped procurement detail optimizations preserve actual baseline results 
     const old = loadReader(oldSource, f.connection, dependencies), current = loadReader(currentSource, f.connection, dependencies);
     const compare = async (query, tenant = 2) => {
       const before = await old.read(query, tenant), after = await current.read(query, tenant);
-      assert.deepEqual(after.detail?.rows, before.detail?.rows, `All raw detail columns: ${JSON.stringify({query,tenant})}`);
+      const productId=Number(query.productId||query.product_id||0);
+      const expectedDetail=String(query.grouped||'')!=='1'&&Number.isSafeInteger(productId)&&productId>0
+        ? before.detail?.rows.filter(row=>Number(row.product_id)===productId) : before.detail?.rows;
+      assert.deepEqual(after.detail?.rows, expectedDetail, `All selected raw detail columns: ${JSON.stringify({query,tenant})}`);
       assert.deepEqual(after.result, before.result, `Complete result: ${JSON.stringify({query,tenant})}`);
       return { before, after };
     };
@@ -208,6 +211,10 @@ test('grouped procurement detail optimizations preserve actual baseline results 
     await t.test('non-grouped legacy reads keep their full result and component totals', async () => {
       await compare({ status: 'all', paged: '1', pageSize: 100 });
       await compare({ status: 'pending', bindingStatus: 'bound' }, 'admin');
+      for(const tenant of ['admin',1,2,3])for(const productId of [100,101,200,205,300,999]){
+        await compare({status:'all',paged:'1',pageSize:20,productId},tenant);
+        await compare({status:'all',paged:'1',page:2,pageSize:1,product_id:productId},tenant);
+      }
     });
     await t.test('actual purchasing and partial receiving preserve order coverage and enterprise isolation', async () => {
       const readLive = async () => {

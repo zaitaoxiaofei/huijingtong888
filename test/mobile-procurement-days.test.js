@@ -8,7 +8,7 @@ const settle=async()=>{await nextTick();await new Promise(setImmediate);};
 
 test('mobile shared warehouse queue shows unmarked purchases, retains old dates and clears selections on filter changes',async()=>{
  const h=await component('components/mobile/MobileWorkQueue.vue',{auth:{user:{id:3,roles:['packing'],tenant:{id:2,role:'member'}}},get:async url=>{const p=new URL(url,'http://localhost').searchParams;return{rows:[row(1),row(2,20,{review_required:true})],days:[{date:'2026-01-02',pending:1,open:1,arrived:0},{date:'2026-11-06',pending:2,open:0,arrived:2}],selected_day:p.get('status')==='arrived'?'2026-11-06':'2026-01-02',page:1,total:2};}}),sut=h.definition.setup({warehouse:true},{expose(){},emit(){}});
- await sut.load();assert.equal(sut.tab.value,'pending');assert.equal(new URL(h.calls.at(-1).path,'http://localhost').searchParams.get('status'),'pending');assert.equal(sut.selectedDay.value,'2026-01-02');assert.deepEqual([...sut.dateTabs.value.map(day=>day.date)],['2026-01-02','2026-11-06']);assert.equal(sut.dateGroups.value[0].monthLabel,'2026年1月');
+ await h.mount();assert.equal(sut.tab.value,'pending');assert.equal(new URL(h.calls.at(-1).path,'http://localhost').searchParams.get('status'),'pending');assert.equal(sut.selectedDay.value,'2026-01-02');assert.deepEqual([...sut.dateTabs.value.map(day=>day.date)],['2026-01-02','2026-11-06']);assert.equal(sut.dateGroups.value[0].monthLabel,'2026年1月');
  sut.selectPage(true);assert.deepEqual([...sut.selected.value],[1]);await sut.load();assert.equal(sut.selected.value.length,0);assert.match(h.calls.at(-1).path,/purchase_day=2026-01-02/);
  sut.openReceive(row(4));assert.equal(sut.receive.visible,true,'warehouse can receive without purchaser marking arrival');sut.receive.visible=false;
  sut.queueStatus.value='arrived';await settle();const p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;assert.equal(p.get('status'),'arrived');assert.equal(p.get('day_mode'),'pending');assert.equal(p.has('purchase_day'),false);
@@ -18,14 +18,14 @@ test('mobile shared warehouse queue shows unmarked purchases, retains old dates 
 test('late mobile queue searches and previous-enterprise responses cannot replace current dates or rows',async()=>{
  let release;
  const h=await component('components/mobile/MobileWorkQueue.vue',{get:async url=>{const p=new URL(url,'http://localhost').searchParams;if(p.get('query')==='old')return new Promise(resolve=>release=resolve);return{rows:[row(8)],days:[{date:'2026-11-06',pending:1,open:1}],selected_day:'2026-11-06',page:1,total:1};}}),sut=h.definition.setup({warehouse:false},{expose(){},emit(){}});
- sut.tab.value='pending';await settle();sut.filters.query='old';const previous=sut.load(true);sut.filters.query='new';await sut.load(true);release({rows:[row(99)],days:[{date:'2020-01-01',pending:1,open:1}],selected_day:'2020-01-01'});await previous;assert.equal(sut.rows.value[0].id,8);assert.equal(sut.selectedDay.value,'2026-11-06');
+ sut.tab.value='pending';await settle();await h.mount();sut.filters.query='old';const previous=sut.load(true);sut.filters.query='new';await sut.load(true);release({rows:[row(99)],days:[{date:'2020-01-01',pending:1,open:1}],selected_day:'2020-01-01'});await previous;assert.equal(sut.rows.value[0].id,8);assert.equal(sut.selectedDay.value,'2026-11-06');
  sut.filters.query='old';const foreign=sut.load(true);h.scope='B';sut.reset();release({rows:[row(100)],days:[{date:'2020-01-01',open:1}],selected_day:'2020-01-01'});await foreign;assert.equal(sut.rows.value.length,0);assert.equal(sut.purchaseDays.value.length,0);assert.equal(sut.loading.value,false);
 });
 
 test('mobile receipt filters use pending for all states, preserve purchase dates and reset every filter',async()=>{
  const h=await component('components/mobile/MobileWorkQueue.vue'),sut=h.definition.setup({warehouse:true},{expose(){},emit(){}});
  assert.equal(sut.canStocktake({product_id:1,is_bundle:false}),true);assert.equal(sut.canStocktake({product_id:1,is_bundle:true,review_required:false}),false,'reviewed bundles still require stocktake of physical components');
- sut.purchaseRange.start='2026-10-01';sut.purchaseRange.end='2026-10-31';sut.filters.query='1-3-1';await sut.load(true);let p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
+ await h.mount();sut.purchaseRange.start='2026-10-01';sut.purchaseRange.end='2026-10-31';sut.filters.query='1-3-1';await sut.load(true);let p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
  assert.equal(p.get('status'),'pending');assert.equal(p.get('start_date'),'2026-10-01');assert.equal(p.get('end_date'),'2026-10-31');assert.equal(p.get('query'),'1-3-1');assert.equal(sut.queueFilters[0][1],'全部状态');
  sut.queueStatus.value='arrived';await settle();sut.resetFilters();await settle();p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
  assert.equal(p.get('status'),'pending');assert.equal(p.has('start_date'),false);assert.equal(p.has('end_date'),false);assert.equal(p.get('query'),'');assert.equal(sut.purchaseRange.start,'');assert.equal(sut.purchaseRange.end,'');assert.equal(sut.selected.value.length,0);
@@ -34,7 +34,7 @@ test('mobile receipt filters use pending for all states, preserve purchase dates
 
 test('mobile warehouse completed receipts use received-only history without a recent purchase cutoff',async()=>{
  const h=await component('components/mobile/MobileWorkQueue.vue',{auth:{user:{id:3,roles:['packing'],tenant:{id:2,role:'member'}}}}),sut=h.definition.setup({warehouse:false},{expose(){},emit(){}});
- sut.queueMore('received');await settle();let p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
+ await h.mount();sut.queueMore('received');await settle();let p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;
  assert.equal(sut.tab.value,'received');assert.equal(p.get('status'),'received');assert.equal(p.has('recent'),false);assert.equal(p.has('day_mode'),false);assert.equal(sut.canBatch.value,false);assert.equal(sut.canPurchase.value,false);assert.equal(h.calls.some(call=>call.path.includes('status=all')),false);
  sut.queueMore('pending');await settle();p=new URL(h.calls.at(-1).path,'http://localhost').searchParams;assert.equal(p.get('status'),'pending');assert.equal(sut.tab.value,'pending');sut.reset();
 });

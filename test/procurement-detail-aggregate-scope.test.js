@@ -34,7 +34,7 @@ async function detailQuery(query = { grouped: "1" }) {
 test("grouped procurement binds both child aggregations to the selected parent page", async () => {
   const { sql, params } = await detailQuery();
   assert.equal((sql.match(/\?/g) || []).length, params.length, "every aggregate filter must bind its page IDs");
-  assert.deepEqual(Array.from(params), Array.from({ length: 13 }, () => [101, 102]).flat());
+  assert.deepEqual(Array.from(params), Array.from({ length: 12 }, () => [101, 102]).flat());
   const childScopes = [...sql.matchAll(/AND (inventory_movements\.product_id|product_id) IN \(\s*SELECT page_component\.component_product_id FROM product_components page_component\s*WHERE page_component\.tenant_id = 42\s*AND page_component\.product_id IN \(\?, \?\)\s*\)/g)];
   assert.equal(childScopes.length, 2, "stock and incoming must select direct children rather than parent IDs");
   assert.deepEqual(childScopes.map(match => match[1]), ["inventory_movements.product_id", "product_id"]);
@@ -55,7 +55,10 @@ test("the sales lower bound preserves calendar boundaries, future rows, mappings
   try {
     const [[server]] = await connection.query("SELECT @@skip_networking AS disabled");
     assert.equal(Number(server.disabled), 1, "this fixture may only use the isolated server with TCP disabled");
-    const { sql } = await detailQuery();
+    // Keep the original OR-join compatibility path's date-window oracle. The
+    // bounded mapping CTE is compared against the full baseline in the reader
+    // and mapping-join MySQL suites, including both session time zones.
+    const { sql } = await detailQuery({ paged: "1" });
     const aggregate = sql.match(/LEFT JOIN \(\s*(SELECT sales_mapping\.product_id,[\s\S]*?)\s*\) sales ON/)[1];
     const bound = "AND sales_order.ordered_at >= CONVERT_TZ(DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY), '+08:00', '+00:00')";
     assert.ok(aggregate.includes(bound));
@@ -83,8 +86,8 @@ test("the sales lower bound preserves calendar boundaries, future rows, mappings
     for (const zone of ["+00:00", "+08:00"]) {
       await connection.query("SET time_zone = ?", [zone]);
       await connection.query("SET timestamp = ?", [Date.parse("2026-11-26T18:05:00Z") / 1000]);
-      const [before] = await connection.query(`${fixtures}${legacy} ORDER BY sales_mapping.product_id`, [101, 102]);
-      const [after] = await connection.query(`${fixtures}${aggregate} ORDER BY sales_mapping.product_id`, [101, 102]);
+      const [before] = await connection.query(`${fixtures}${legacy} ORDER BY sales_mapping.product_id`);
+      const [after] = await connection.query(`${fixtures}${aggregate} ORDER BY sales_mapping.product_id`);
       assert.deepEqual(after, before, `the original CURRENT_DATE semantics must remain intact in ${zone}`);
       assert.equal(after.length, 2, "both eligible mappings must still participate");
       assert.equal(Number(after[0].recent_30d_qty), 21, "include cutoff, future and null tracking; exclude old, cancelled and foreign rows");

@@ -38,8 +38,23 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const current=await authorizeBusinessTaskSession(session,query);if(!hasPermission(current,'inventory.read'))throw fail('请由本企业库存或采购人员查看到货情况',403);
   const dateFilters=procurementArrivalDateFilters(params);
   const scope=await resolveInventoryTenantScope(current.tenant.id,query),where=[inventoryTenantSql(scope,'ir'),inventoryTenantSql(scope,'p'),"(po.purchased_at IS NOT NULL OR pr.status='purchased')"],args=[];
-  const status=params.status||'open',statusFilters={pending:"ir.status='pending_arrival'",open:"ir.status='pending_arrival' AND ir.received_at IS NULL",reminded:"ir.status='pending_arrival' AND ir.received_at IS NULL AND reminder.id IS NOT NULL",arrived:"ir.status='pending_arrival' AND ir.received_at IS NOT NULL",inspection:"ir.status='pending_arrival' AND (ir.received_at IS NOT NULL OR po.purchased_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 72 HOUR))",received:"ir.status='approved'"};
-  const stateFilter=statusFilters[status];if(stateFilter)where.push(stateFilter);else if(status!=='all')throw fail('请选择全部待处理、待到货、已提醒、待验收、已入库或全部记录');
+  const status=params.status||'open',statusFilters={pending:"ir.status='pending_arrival'",open:"ir.status='pending_arrival' AND ir.received_at IS NULL",reminded:"ir.status='pending_arrival' AND ir.received_at IS NULL",arrived:"ir.status='pending_arrival' AND ir.received_at IS NOT NULL",inspection:"ir.status='pending_arrival' AND (ir.received_at IS NOT NULL OR po.purchased_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 72 HOUR))",received:"ir.status='approved'"};
+  if(!statusFilters[status]&&status!=='all')throw fail('请选择全部待处理、待到货、已提醒、待验收、已入库或全部记录');
+  // Resolve the latest reminder once for this request, rather than repeating
+  // the full event JSON grouping in the summary, count and page statements.
+  // Select MAX(id) before checking product ownership, as the original join did.
+  const reminderRows=await query(`SELECT reminders.inbound_id,reminder.product_id,reminder.id AS reminder_id
+    FROM (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id')) AS UNSIGNED) AS inbound_id,MAX(id) AS id
+      FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_arrival_reminder'
+      GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id')) AS UNSIGNED)) reminders
+    JOIN inventory_flow_events reminder ON reminder.id=reminders.id AND reminder.tenant_id=${scope.id}
+    JOIN inbound_records reminder_batch ON reminder_batch.id=reminders.inbound_id AND reminder_batch.product_id=reminder.product_id AND ${inventoryTenantSql(scope,'reminder_batch')}`,[scope.id]);
+  const reminders=new Map(reminderRows.map(({inbound_id,...row})=>[Number(inbound_id),row]));
+  const reminderDetails=new Map();
+  const stateArgs=status==='reminded'?reminderRows.map(row=>row.inbound_id):[];
+  const stateFilter=status==='reminded'?`${statusFilters.reminded} AND ${stateArgs.length?`ir.id IN (${stateArgs.map(()=>'?').join(',')})`:'1=0'}`:statusFilters[status];
+  if(stateFilter)where.push(stateFilter);
+  const withReminder=row=>{const reminder=reminders.get(Number(row.id));return{...row,...(Number(reminder?.product_id)===Number(row.product_id)?{...reminder,...reminderDetails.get(Number(reminder.reminder_id))}:{}),id:row.id};};
   const graph=await loadInventoryComposition(query,scope);
   const search=inventoryProductSearch(params,scope),productWhere=[inventoryTenantSql(scope,'p')],productArgs=[];
   if(search.sql){productWhere.push(search.sql);productArgs.push(...search.params);}
@@ -68,20 +83,9 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   if(dateFilters.to){where.push(`${purchaseTime}<?`);args.push(dateFilters.to);}
   const reviews=await query("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_bundle_review' ORDER BY id DESC",[scope.id]);
   const lineage=new Map();const reviewed=new Map();for(const row of reviews){const v=typeof row.detail_json==='string'?JSON.parse(row.detail_json):row.detail_json;if(v?.result?.mode==='whole'&&!reviewed.has(Number(v.result.inbound_id)))reviewed.set(Number(v.result.inbound_id),v.content_revision);for(const child of v?.result?.created||[])if(!lineage.has(Number(child.inbound_id)))lineage.set(Number(child.inbound_id),{id:Number(v.result.inbound_id),product_id:Number(v.source?.product_id),source_purchase_order_id:Number(v.source?.purchase_order_id)||null,child_product_id:Number(child.product_id),child_purchase_order_id:Number(child.purchase_order_id)});}
-  const sourceIds=[...new Set([...lineage.values()].map(source=>source.id).filter(id=>Number.isSafeInteger(id)&&id>0))];
-  const sourceRows=sourceIds.length?await query(`SELECT source.id,source.product_id,original.id AS purchase_order_id,original.order_no
-    FROM inbound_records source JOIN products source_product ON source_product.id=source.product_id AND ${inventoryTenantSql(scope,'source_product')}
-    LEFT JOIN purchase_orders original ON original.id=source.purchase_order_id AND ${inventoryTenantSql(scope,'original')}
-    WHERE source.id IN (${sourceIds.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'source')}`,sourceIds):[];
-  const sources=new Map(sourceRows.map(source=>[Number(source.id),source]));
-  for(const [id,line] of lineage){
-   const source=sources.get(line.id);
-   if(!source||Number(source.product_id)!==line.product_id){lineage.delete(id);continue;}
-   const validPurchase=source.purchase_order_id!=null&&(!line.source_purchase_order_id||Number(source.purchase_order_id)===line.source_purchase_order_id);
-   line.purchase_order_id=validPurchase?Number(source.purchase_order_id):null;line.order_no=validPurchase?source.order_no:null;
-  }
   const financial=hasPermission(current,'procurement');
-  const project=(row,details=true)=>{
+  const project=raw=>{
+   const row=withReminder(raw);
    const {amount,shipping_amount,purchase_note,reminder_id,reminder_person_id,reminder_person_name,reminder_created_at,reminder_note,...safe}=row;
    safe.arrival_reminder=reminder_id?{id:Number(reminder_id),person_id:Number(reminder_person_id),person_name:reminder_person_name||null,created_at:reminder_created_at,note:reminder_note||''}:null;
    if(financial)Object.assign(safe,{amount,shipping_amount,purchase_note});
@@ -90,7 +94,7 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
     const bundle=graph.isBundle(row.product_id),needsReview=bundle&&reviewed.get(Number(row.id))!==bundleReviewContentRevision(row,components);
     const line=lineage.get(Number(row.id)),sourceBundle=line&&line.child_product_id===Number(row.product_id)&&line.child_purchase_order_id===Number(row.purchase_order_id)
       ?{id:line.id,product_id:line.product_id,purchase_order_id:line.purchase_order_id,order_no:line.order_no}:null;
-    return{...safe,source_bundle_batch:sourceBundle,components,is_bundle:bundle,review_required:needsReview,physical_quantity:needsReview?null:components.reduce((n,c)=>n+c.quantity,0),affected_bundles:!details?[]:bundle?[{...graph.products.get(Number(row.product_id)),per_set_quantity:1}]:graph.affected(row.product_id)};
+    return{...safe,source_bundle_batch:sourceBundle,components,is_bundle:bundle,review_required:needsReview,physical_quantity:needsReview?null:components.reduce((n,c)=>n+c.quantity,0),affected_bundles:bundle?[{...graph.products.get(Number(row.product_id)),per_set_quantity:1}]:graph.affected(row.product_id)};
    }catch(e){return{...safe,components:[],is_bundle:true,review_required:true,physical_quantity:null,composition_error:e.message,affected_bundles:[]};}
   };
   const joins=`FROM inbound_records ir JOIN products p ON p.id=ir.product_id
@@ -98,24 +102,22 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
     LEFT JOIN procurement_requests pr ON pr.id=ir.procurement_request_id AND ${inventoryTenantSql(scope,'pr')}
     LEFT JOIN purchase_order_items poi ON poi.id=ir.purchase_order_item_id AND poi.product_id=ir.product_id AND poi.purchase_order_id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'poi')}
     LEFT JOIN people buyer ON buyer.id=ir.person_id AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=buyer.id AND tm.active=1)
-    LEFT JOIN (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id')) AS UNSIGNED) AS inbound_id,MAX(id) AS id
-      FROM inventory_flow_events WHERE tenant_id=${scope.id} AND action='purchase_arrival_reminder'
-      GROUP BY CAST(JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.inbound_id')) AS UNSIGNED)) reminders ON reminders.inbound_id=ir.id
-    LEFT JOIN inventory_flow_events reminder ON reminder.id=reminders.id AND reminder.tenant_id=${scope.id} AND reminder.product_id=ir.product_id
-    LEFT JOIN people reminder_person ON reminder_person.id=reminder.person_id AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=reminder_person.id AND tm.active=1)
     WHERE ${where.map(w=>'('+w+')').join(' AND ')}`;
   let page=Math.max(1,Math.min(1000000,Math.trunc(Number(params.page)||1)));const pageSize=Math.min(100,Math.max(1,Math.trunc(Number(params.pageSize)||20)));
   const summaryFilter=[...where.filter(w=>w!==stateFilter),"ir.status='pending_arrival'"];
   const summaryJoins=joins.slice(0,joins.indexOf('WHERE '+where.map(w=>'('+w+')').join(' AND ')))+'WHERE '+summaryFilter.map(w=>'('+w+')').join(' AND ');
-  const summaryRows=await query(`SELECT ir.id,ir.product_id,ir.quantity,ir.amount,ir.shipping_amount,ir.status,ir.received_at,reminder.id AS reminder_id,
+  const summaryRows=await query(`SELECT ir.id,ir.product_id,ir.quantity,ir.amount,ir.shipping_amount,ir.status,ir.received_at,
     DATE_FORMAT(CONVERT_TZ(${purchaseTime},'+00:00','+08:00'),'%Y-%m-%d') AS purchase_day ${summaryJoins}`,args);
   const summary=emptySummary(),byDay=new Map();
   for(const raw of summaryRows){
-   const row=project(raw,false),key=row.received_at?'arrived':'open';
+   const row=withReminder(raw),key=row.received_at?'arrived':'open';
+   let physical=null;try{const components=graph.components(Number(row.product_id));
+    if(!graph.isBundle(row.product_id)||reviewed.get(Number(row.id))===bundleReviewContentRevision(row,components))physical=components.reduce((n,c)=>n+Number(row.quantity)*Number(c.per_set_quantity),0);
+   }catch{/* Invalid compositions remain explicit unknown batches. */}
    const date=String(row.purchase_day||'');
    if(!byDay.has(date))byDay.set(date,{date,...emptySummary(),total:0});
    const day=byDay.get(date);day.total++;
-   for(const target of [summary,day])for(const bucket of ['pending',key,...(!row.received_at&&row.arrival_reminder?['reminded']:[])]){target[bucket]++;if(row.physical_quantity==null)target[bucket+'_unknown_batches']++;else target[bucket+'_quantity']+=row.physical_quantity;}
+   for(const target of [summary,day])for(const bucket of ['pending',key,...(!row.received_at&&row.reminder_id?['reminded']:[])]){target[bucket]++;if(physical==null)target[bucket+'_unknown_batches']++;else target[bucket+'_quantity']+=physical;}
   }
   const days=[...byDay.values()].sort((a,b)=>dateFilters.grouped?a.date.localeCompare(b.date):b.date.localeCompare(a.date));
   const pending=day=>['pending','open','reminded','arrived'].includes(status)?day[status]>0:day.total>0;
@@ -125,11 +127,33 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const daySummary=selectedDay&&selectedDay!=='all'?byDay.get(selectedDay)||emptySummary():summary;
   const dateResult={days,selected_day:selectedDay,day_summary:daySummary};
   if(params.summary_only==='1')return{rows:[],total:0,page,pageSize,summary,...dateResult};
-  let detailJoins=joins;const detailArgs=[...args];
+  let detailJoins=joins;const detailArgs=[...stateArgs,...args];
   const selectedRange=selectedDay&&selectedDay!=='all'?procurementDayRange(selectedDay):null;
   const order=dateFilters.grouped?'ASC':'DESC';
   if(selectedRange){detailJoins+=` AND ${purchaseTime}>=? AND ${purchaseTime}<?`;detailArgs.push(...selectedRange);}
-  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${detailJoins}`,detailArgs),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,${purchaseTime} AS purchased_at,poi.id AS purchase_order_item_id,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name,reminder.id AS reminder_id,reminder.person_id AS reminder_person_id,reminder_person.name AS reminder_person_name,reminder.created_at AS reminder_created_at,JSON_UNQUOTE(JSON_EXTRACT(reminder.detail_json,'$.note')) AS reminder_note ${detailJoins} ORDER BY ${purchaseTime} ${order},ir.id ${order} LIMIT ? OFFSET ?`,[...detailArgs,pageSize,(page-1)*pageSize])]);
+  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${detailJoins}`,detailArgs),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,${purchaseTime} AS purchased_at,poi.id AS purchase_order_item_id,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${detailJoins} ORDER BY ${purchaseTime} ${order},ir.id ${order} LIMIT ? OFFSET ?`,[...detailArgs,pageSize,(page-1)*pageSize])]);
+  const pageReminderIds=[...new Set(rows.map(row=>reminders.get(Number(row.id))?.reminder_id).filter(Boolean))];
+  if(pageReminderIds.length){
+   const details=await query(`SELECT reminder.id AS reminder_id,reminder.person_id AS reminder_person_id,reminder_person.name AS reminder_person_name,
+    reminder.created_at AS reminder_created_at,JSON_UNQUOTE(JSON_EXTRACT(reminder.detail_json,'$.note')) AS reminder_note
+    FROM inventory_flow_events reminder LEFT JOIN people reminder_person ON reminder_person.id=reminder.person_id
+      AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=reminder_person.id AND tm.active=1)
+    WHERE reminder.tenant_id=${scope.id} AND reminder.id IN (${pageReminderIds.map(()=>'?').join(',')})`,pageReminderIds);
+   for(const detail of details)reminderDetails.set(Number(detail.reminder_id),detail);
+  }
+  const sourceIds=[...new Set(rows.map(row=>lineage.get(Number(row.id))?.id).filter(id=>Number.isSafeInteger(id)&&id>0))];
+  const sourceRows=sourceIds.length?await query(`SELECT source.id,source.product_id,original.id AS purchase_order_id,original.order_no
+    FROM inbound_records source JOIN products source_product ON source_product.id=source.product_id AND ${inventoryTenantSql(scope,'source_product')}
+    LEFT JOIN purchase_orders original ON original.id=source.purchase_order_id AND ${inventoryTenantSql(scope,'original')}
+    WHERE source.id IN (${sourceIds.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'source')}`,sourceIds):[];
+  const sources=new Map(sourceRows.map(source=>[Number(source.id),source]));
+  for(const row of rows){
+   const id=Number(row.id),line=lineage.get(id);if(!line)continue;
+   const source=sources.get(line.id);
+   if(!source||Number(source.product_id)!==line.product_id){lineage.delete(id);continue;}
+   const validPurchase=source.purchase_order_id!=null&&(!line.source_purchase_order_id||Number(source.purchase_order_id)===line.source_purchase_order_id);
+   line.purchase_order_id=validPurchase?Number(source.purchase_order_id):null;line.order_no=validPurchase?source.order_no:null;
+  }
   const itemIds=[...new Set(rows.map(row=>Number(row.purchase_order_item_id)).filter(id=>Number.isSafeInteger(id)&&id>0))];
   const progressRows=itemIds.length?await query(`SELECT ir.purchase_order_item_id,ir.product_id,poi.actual_quantity AS ordered_quantity,
     SUM(CASE WHEN ir.status='pending_arrival' AND ir.received_at IS NULL THEN ir.quantity ELSE 0 END) AS unarrived_quantity,

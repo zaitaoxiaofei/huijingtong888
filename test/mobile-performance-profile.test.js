@@ -17,6 +17,7 @@ import * as shanghai from '../frontend/admin/utils/shanghai-date.js';
 import * as purchaseQueue from '../frontend/admin/utils/purchase-queue-days.js';
 import * as orderImages from '../frontend/orders/utils/order-image-sync.js';
 import * as purchaseWorkers from '../frontend/admin/utils/purchase-batch-workers.js';
+import {createDisplayReadScope} from '../frontend/admin/utils/display-read-scope.js';
 const owner={id:1,personId:1,name:'Fixture member',username:'fixture',roles:['admin'],tenant:{id:2,role:'owner'}};
 export async function component(file,{inlineTemplate=false,get=async()=>({}),post=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
  const {descriptor}=parse(fs.readFileSync(new URL('../frontend/admin/'+file,import.meta.url),'utf8'));
@@ -25,16 +26,17 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(bindings.trim().startsWith('{'))return `const ${bindings.replace(/\bas\b/g,':')}=require(${JSON.stringify(id)});`;
   return `const ${bindings.trim()}=require(${JSON.stringify(id)});`;
  }).replace(/export\s+default/,'module.exports.default =');
- const h={scope:'A',calls:[],timers:new Set(),timerCallbacks:new Map(),mounted:[],auth,history:{state:{},replaceState(){}}};
+ const h={scope:'A',token:'fixture-session',calls:[],timers:new Set(),timerCallbacks:new Map(),mounted:[],activated:[],deactivated:[],unmounted:[],auth,history:{state:{},replaceState(){}}};
  const api={get:async(path,options)=>{h.calls.push({path,options});return get(path,options);},post:async(path,body)=>{h.calls.push({path,body,method:'POST'});return post(path,body);}};
- const deps={...vue,onMounted:fn=>h.mounted.push(fn),onBeforeUnmount:()=>{}};
+ const deps={...vue,onMounted:fn=>h.mounted.push(fn),onActivated:fn=>h.activated.push(fn),onDeactivated:fn=>h.deactivated.push(fn),onBeforeUnmount:fn=>h.unmounted.push(fn)};
  function require(id){
   if(id==='vue')return deps;
   if(id==='vue-router')return{useRoute:()=>route,useRouter:()=>router};
   if(id==='element-plus')return{ElMessage:{warning(){},error(){},success(){},info(){}},ElMessageBox:{}};
   if(id==='@element-plus/icons-vue'||id==='lucide-vue-next')return{Search:{}};
   if(id.endsWith('/stores/auth.js')||id.endsWith('/stores/auth'))return{useAuthStore:()=>auth};
-  if(id.endsWith('/utils/api')||id.endsWith('/utils/api.js'))return{apiClient:api,currentApiCacheScope:()=>h.scope};
+  if(id.endsWith('/utils/api')||id.endsWith('/utils/api.js'))return{apiClient:api,currentApiCacheScope:()=>h.scope,getAuthToken:()=>h.token};
+  if(id.endsWith('display-read-scope.js'))return{createDisplayReadScope};
   if(id.endsWith('useOrderImageSync.js'))return{useOrderImageSync:()=>({busy:vue.ref(new Set()),needsSync:()=>false,imageKey:(_order,_item,url)=>url,markFailed(){},syncImage:async()=>{}})};
   if(id.endsWith('order-image-sync.js'))return orderImages;
   if(id.endsWith('permissions.js'))return permissions;
@@ -55,9 +57,11 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   throw Error('Unexpected component dependency '+id);
  }
  const module={exports:{}};
+ const events=()=>{const listeners=new Map();return{addEventListener(name,fn){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},removeEventListener(name,fn){listeners.get(name)?.delete(fn);},dispatchEvent(event){for(const fn of listeners.get(event.type)||[])fn(event);}};};
  vm.runInNewContext(code,{module,exports:module.exports,require,AbortController,DOMException,URLSearchParams,Date,console,crypto,
- window:{history:h.history,addEventListener(){},removeEventListener(){},setTimeout(fn,ms){const id=setTimeout(fn,ms);h.timers.add(id);h.timerCallbacks.set(id,fn);return id;},clearTimeout(id){h.timers.delete(id);h.timerCallbacks.delete(id);clearTimeout(id);}},
- clearTimeout(id){h.timers.delete(id);clearTimeout(id);},document:{querySelector(){return{scrollTo(){},scrollTop:0};}}});
+ window:{...events(),history:h.history,setTimeout(fn,ms){const id=setTimeout(fn,ms);h.timers.add(id);h.timerCallbacks.set(id,fn);return id;},clearTimeout(id){h.timers.delete(id);h.timerCallbacks.delete(id);clearTimeout(id);}},
+ clearTimeout(id){h.timers.delete(id);clearTimeout(id);},document:{...events(),visibilityState:'visible',querySelector(){return{scrollTo(){},scrollTop:0};}}});
+ h.mount=async()=>{for(const fn of h.mounted)await fn();for(const fn of h.activated)await fn();await vue.nextTick();await new Promise(setImmediate);};
  h.definition=module.exports.default;return h;
 }
 test('mobile order packing requests only page rows and ignores stale enterprise responses',async()=>{
@@ -76,7 +80,7 @@ test('procurement keeps registration available and reads the completed snapshot 
   return {rows:[row],total:1,snapshot:{available:true,stale:true,refreshing:true}};
  }});
  const sut=h.definition.setup({warehouse:false},{expose(){}});
- await sut.load();assert.equal(sut.tab.value,'register');assert.equal(h.calls.length,1);assert.match(h.calls[0].path,/includeStock=0/);assert.ok(!h.calls[0].path.includes('/alerts'));
+ await h.mount();assert.equal(sut.tab.value,'register');assert.equal(h.calls.length,1);assert.match(h.calls[0].path,/includeStock=0/);assert.ok(!h.calls[0].path.includes('/alerts'));
  sut.filters.searchMode='inventory_id';sut.filters.query='1-14';sut.filters.inventoryCategory='钥匙壳';sut.filters.vehicleModel=['J6'];sut.pageSize.value=50;
  const p=sut.filtersUrl();assert.equal(p.get('pageSize'),'50');assert.equal(p.get('searchMode'),'inventory_id');assert.equal(p.get('inventoryCategory'),'钥匙壳');assert.equal(p.get('vehicleModel'),'J6');
  sut.tab.value='required';await vue.nextTick();await new Promise(setImmediate);
@@ -164,12 +168,12 @@ test('single-layer mobile purchase adds inventory without discarding entered amo
 test('mobile queue stocktakes refresh only the affected product and do not restore stale purchase suggestions',async()=>{
  const state={product_id:7,physical_recorded:12,supply_plan:{required_purchase:0,optional_purchase:0}};
  const h=await component('components/mobile/MobileWorkQueue.vue',{get:async path=>path.includes('view=status')?{rows:[state]}:{rows:[{product_id:7,workflow:{physical_recorded:0,supply_plan:{required_purchase:3}}}],total:1,snapshot:{stale:true,calculated_at:'2000-01-01T00:00:00Z'}}});
- const sut=h.definition.setup({warehouse:false},{expose(){}});sut.tab.value='required';await vue.nextTick();await new Promise(setImmediate);const row=sut.rows.value[0];assert.equal(sut.canStocktake(row),true);sut.openStocktake(row);assert.equal(sut.stocktake.product.id,7);await sut.stocktakeSaved({physical_after:12});assert.equal(sut.rows.value.length,0);assert.match(h.calls.at(-1).path,/view=status&product_ids=7&fresh=1/);
+ const sut=h.definition.setup({warehouse:false},{expose(){}});sut.tab.value='required';await vue.nextTick();await h.mount();const row=sut.rows.value[0];assert.equal(sut.canStocktake(row),true);sut.openStocktake(row);assert.equal(sut.stocktake.product.id,7);await sut.stocktakeSaved({physical_after:12});assert.equal(sut.rows.value.length,0);assert.match(h.calls.at(-1).path,/view=status&product_ids=7&fresh=1/);
  await sut.load();assert.equal(sut.rows.value.length,0);assert.match(sut.stockFeedback.value,/需求已覆盖/);
  sut.reset();assert.equal(sut.stocktake.visible,false);assert.equal(sut.stockFeedback.value,'');
 });
 test('pending purchase stocktake leaves batches unreceived and stock actions respect inventory permission',async()=>{
- const h=await component('components/mobile/MobileWorkQueue.vue');const sut=h.definition.setup({warehouse:false},{expose(){}});sut.tab.value='pending';await vue.nextTick();await new Promise(setImmediate);sut.rows.value=[{id:91,product_id:7,product_name:'Physical item',physical_quantity:3}];sut.openStocktake(sut.rows.value[0]);assert.equal(sut.stocktake.product.id,7);const before=h.calls.length;await sut.stocktakeSaved({physical_after:8});assert.equal(h.calls.length,before);assert.equal(sut.rows.value[0].physical_quantity,3);assert.equal(sut.rows.value[0].stocktake_physical,8);
+ const h=await component('components/mobile/MobileWorkQueue.vue');const sut=h.definition.setup({warehouse:false},{expose(){}});sut.tab.value='pending';await vue.nextTick();await h.mount();sut.rows.value=[{id:91,product_id:7,product_name:'Physical item',physical_quantity:3}];sut.openStocktake(sut.rows.value[0]);assert.equal(sut.stocktake.product.id,7);const before=h.calls.length;await sut.stocktakeSaved({physical_after:8});assert.equal(h.calls.length,before);assert.equal(sut.rows.value[0].physical_quantity,3);assert.equal(sut.rows.value[0].stocktake_physical,8);
  assert.equal(sut.canStocktake({component_count:2}),false);assert.equal(sut.canStocktake({review_required:true}),false);
  const staff=await component('components/mobile/MobileWorkQueue.vue',{auth:{user:{id:3,roles:['packing'],tenant:{id:2,role:'member'}}}});const packing=staff.definition.setup({warehouse:true},{expose(){}});assert.equal(packing.canStocktake({product_id:7}),false);
 });
@@ -205,7 +209,7 @@ test('packing rows keep each SKU inventory, image and quantity together, includi
 test('mobile purchase selection excludes stock checks, caps batches at 50, and clears on user navigation',async()=>{
  const products=Array.from({length:55},(_,i)=>({id:i+1,name:`Physical ${i+1}`,component_count:0}));
  const h=await component('components/mobile/MobileWorkQueue.vue',{get:async()=>({rows:products,total:55})}),sut=h.definition.setup({warehouse:false},{expose(){}});
- await sut.load();sut.rows.value[0].stocktake_pending=true;sut.rows.value[1].stocktake_recheck_error=true;
+ await h.mount();sut.rows.value[0].stocktake_pending=true;sut.rows.value[1].stocktake_recheck_error=true;
  sut.selectPurchasePage(true);assert.equal(sut.purchaseSelected.value.length,50);assert.equal(sut.purchaseSelected.value.includes(1),false);assert.equal(sut.purchaseSelected.value.includes(2),false);assert.equal(sut.allPurchasesSelected.value,true);
  sut.selectPurchaseRow(sut.rows.value[54],true);assert.equal(sut.purchaseSelected.value.length,50);assert.equal(sut.purchaseSelected.value.includes(55),false);
  sut.selectPurchaseRow(sut.rows.value[2],false);sut.selectPurchaseRow(sut.rows.value[54],true);assert.equal(sut.purchaseSelected.value.length,50);assert.equal(sut.purchaseSelected.value.includes(55),true);
@@ -217,7 +221,7 @@ test('mobile purchase selection excludes stock checks, caps batches at 50, and c
 test('mobile batch registration retains deliberate manual quantities for stale suggestions and prunes obsolete selections',async()=>{
  const rows=[7,8,9].map(id=>({product_id:id,product_name:`Stock ${id}`,workflow:{supply_plan:{required_purchase:3,optional_purchase:4}}}));
  const h=await component('components/mobile/MobileWorkQueue.vue',{get:async()=>({rows,total:3,snapshot:{stale:true}})}),sut=h.definition.setup({warehouse:false},{expose(){}});
- sut.tab.value='advisory';await vue.nextTick();await new Promise(setImmediate);sut.selectPurchasePage(true);assert.equal(sut.purchaseSelectedRows.value.length,3);
+ sut.tab.value='advisory';await vue.nextTick();await h.mount();sut.selectPurchasePage(true);assert.equal(sut.purchaseSelectedRows.value.length,3);
  sut.applyDemandPage({rows:[rows[0],{...rows[1],stocktake_pending:true}],total:2,snapshot:{stale:true}});assert.deepEqual([...sut.purchaseSelected.value],[7]);
  sut.openBatchPurchase();assert.equal(sut.purchase.rows.length,1);assert.equal(sut.purchase.rows[0].manualPurchaseQuantity,true);
  sut.purchase.visible=false;sut.applyDemandPage({rows,total:3,snapshot:{stale:false,refreshing:false}});sut.selectPurchasePage(true);sut.openBatchPurchase();assert.equal(sut.purchase.rows.every(row=>row.manualPurchaseQuantity===false),true);

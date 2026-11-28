@@ -9,6 +9,7 @@ async function listing({source,sourceRows,child={product_id:200,purchase_order_i
   calls.push({sql,args});
   if(sql.includes('JOIN tenant_members tm ON tm.tenant_id = t.id'))return[{...scope,tenant_role:'member',business_roles_json:['procurement']}];
   if(sql.includes('SELECT id, slug FROM tenants'))return[scope];
+  if(sql.includes('SELECT reminders.inbound_id'))return[];
   if(sql.includes('SELECT p.id,p.name'))return[{id:200,name:'Synthetic component'},{id:331,name:'Synthetic parent'}];
   if(sql.includes('SELECT c.product_id,c.component_product_id'))return[{product_id:331,component_product_id:200,quantity:2}];
   if(sql.includes("action='purchase_bundle_review'"))return[{detail_json:JSON.stringify({source,result:{mode:'whole',inbound_id:1685,created:[{inbound_id:1915,...child}]}})}];
