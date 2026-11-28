@@ -255,7 +255,8 @@ test("a failed status refresh keeps a previously confirmed invoice and amount in
   await h.send("START", {accountId: id, ids: [firstId], kind: "refresh"}); await h.done();
   const row = h.data().accounts[0].orders[0];
   assert.equal(row.status, "issued");
-  assert.equal(row.taskStatus, "failed");
+  assert.equal(row.taskStatus, "review");
+  assert.equal(h.data().queue.state, "done");
   assert.equal(row.invoiceAmountCents, 4650);
   assert.equal(C.summarize([row]).issued.cents, 4650);
 });
@@ -474,3 +475,72 @@ test('navigation waits for the committed invoice document, not the update acknow
  const ctx=vm.createContext({location:new URL("https://mobile.pinduoduo.com/orders.html"),AbortController,setTimeout,clearTimeout,URL,Intl,Date,fetch:async()=>({ok:true,json:async()=>({orders:["交易已取消","拼单失败","拼单未成功"].map((prompt,i)=>({order_sn:String(2611171234567890+i),order_status_prompt:prompt,offset:"next"}))})})});
  vm.runInContext(reader,ctx);const result=await ctx.readPurchasePage();assert.equal(result.rows.length,3);assert.ok(result.rows.every(r=>r.status==="skipped"));
  });
+
+test('refreshing an unapplied order completes once and never runs an application command',async()=>{
+ const h=await harness(undefined,async()=>({ok:true,status:'pending',facts:{platformCheckedAt:Date.now()}}));const id=await bound(h);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();
+ assert.equal(h.data().queue.state,'done');assert.equal(h.data().queue.items[0].status,'checked');assert.equal(h.data().accounts[0].orders[0].status,'pending');
+ assert.deepEqual(h.messages.filter(m=>m.type!=='PDD_INVOICE_SCAN').map(m=>m.type),['PDD_INVOICE_INSPECT']);
+});
+test('a missing platform application preserves merchant-confirmed combined invoice status',async()=>{
+ const h=await harness(undefined,async()=>({ok:true,status:'pending',facts:{platformCheckedAt:Date.now()}}));const id=await bound(h);
+ await h.send('LEDGER_SAVE',{accountId:id,orderId:firstId,ledger:{status:'submitted',ledgerNote:'商家已确认三笔合开69元，沿用原申请'}});
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();const r=h.data().accounts[0].orders[0];
+ assert.equal(h.data().queue.state,'done');assert.equal(r.status,'submitted');assert.equal(r.taskStatus,'review');assert.match(r.ledgerNote,/合开69元/);assert.match(r.note,/保留原开票状态/);assert.match(h.data().queue.note,/1 笔未读到明确状态/);
+ assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_INSPECT').length,1);
+});
+test('refresh recreates a closed processing tab and finishes with read-only inspection',async()=>{
+ const h=await harness(undefined,async()=>({ok:true,status:'issued',facts:{issuedAt:'2026-11-28',invoiceAmountCents:1200}}));const id=await bound(h);const update=h.chrome.tabs.update;let closed=false;
+ h.chrome.tabs.update=async(tabId,options)=>{if(!closed){closed=true;throw Error('No tab with id: '+tabId);}return update(tabId,options);};
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();
+ assert.equal(h.data().queue.state,'done');assert.equal(h.data().accounts[0].orders[0].status,'issued');assert.equal(h.data().queue.items[0].tabId,12);assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,0);
+});
+test('refresh retries a lost message channel once in a new tab without submitting',async()=>{
+ let calls=0;const visited=[];const h=await harness(undefined,async(m,tab)=>{assert.equal(m.type,'PDD_INVOICE_INSPECT');visited.push(tab);if(++calls===1)throw Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received');return{ok:true,status:'submitted'};});const id=await bound(h);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(calls,2);assert.notEqual(visited[0],visited[1]);assert.equal(h.data().queue.state,'done');
+});
+test('one permanently unreadable invoice retains its business state and does not stop other reads',async()=>{
+ const h=await harness(undefined,async m=>{if(m.orderId===firstId)throw Error('The message port closed before a response was received');return{ok:true,status:'issued'};});const id=await bound(h);
+ await h.send('LEDGER_SAVE',{accountId:id,orderId:firstId,ledger:{status:'submitted'}});
+ await h.eval(`account(${JSON.stringify(id)}).orders.push({id:${JSON.stringify(secondId)},url:${JSON.stringify(orderUrl(secondId))},status:'submitted'})`);
+ await h.send('START',{accountId:id,ids:[firstId,secondId],kind:'refresh',concurrency:1});await h.done();
+ const [a,b]=h.data().accounts[0].orders;assert.equal(a.status,'submitted');assert.equal(a.taskStatus,'review');assert.match(a.note,/通信中断/);assert.equal(b.status,'issued');assert.equal(h.data().queue.state,'done');assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_INSPECT').length,3);
+});
+test('refresh still pauses on an actual platform security challenge',async()=>{
+ const h=await harness(undefined,async()=>({ok:true,status:'review',note:'拼多多要求安全验证或限制访问',block:true}));const id=await bound(h);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(h.data().queue.state,'paused');assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_INSPECT').length,1);
+});
+test('same-order official issued-invoice redirects are accepted only for state reads',async()=>{
+ const h=await harness(),url=C.invoiceUrl(firstId);h.chrome.tabs.get=async()=>({id:1,status:'complete',url:`https://mobile.pinduoduo.com/transac_prescription_detail.html?order_sn=${firstId}`});
+ await h.eval(`visit(1,${JSON.stringify(url)},true)`);assert.equal(h.messages.length,0);
+});
+test('official merchant-processing status 6 and unknown enums never become pending applications',()=>{
+ const card=n=>({children:[],textContent:'发票详情',__reactFiberTest:{memoizedProps:{data:{order_sn:firstId,invoice_status:n,invoice_amount:'12.00'}}}});
+ const doc={querySelectorAll:s=>s==='div,span'?[card(6)]:[]},ctx=vm.createContext({document:doc,location:{origin:'https://mobile.pinduoduo.com'},URL,Intl,Date});vm.runInContext(reader,ctx);assert.equal(ctx.readRenderedOrders()[0].status,'submitted');
+ doc.querySelectorAll=s=>s==='div,span'?[card(99)]:[];assert.equal(ctx.readRenderedOrders()[0].status,'review');
+});
+test('invoice restriction descriptions are retained and empty controls are not rejected',()=>{
+ const invoice={orderSn:firstId,hasApplied:false,rejectReApplyControl:{rejectReApplyDesc:'店铺调整中，不支持申请重开发票'}};const ctx=vm.createContext({document:{querySelectorAll:()=>[]},window:{rawData:{stores:{store:{invoice,isFinishInitLoading:true}}}}});vm.runInContext(reader,ctx);
+ assert.equal(ctx.readInvoicePage().rejectionReason,'店铺调整中，不支持申请重开发票');invoice.rejectReApplyControl={};assert.equal(ctx.readInvoicePage().rejected,false);
+});
+
+test('resuming a read-only task retries read errors without submission authorization',async()=>{
+ let fail=true;const h=await harness(undefined,async()=>{if(fail)throw Error('channel closed');return{ok:true,status:'submitted'}});const id=await bound(h);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();await h.eval("store.queue.state='paused'");fail=false;
+ await h.send('RESUME');await h.done();assert.equal(h.data().queue.state,'done');assert.equal(h.data().accounts[0].orders[0].status,'submitted');assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,0);
+});
+test('new refresh keeps the unfinished portion of a paused refresh and queries both selections',async()=>{
+ const h=await harness();const id=await bound(h);await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();
+ await h.eval(`account(${JSON.stringify(id)}).orders.push({id:${JSON.stringify(secondId)},url:${JSON.stringify(orderUrl(secondId))},status:'submitted'});store.queue.state='paused';store.queue.items.push({id:${JSON.stringify(secondId)},status:'pending'})`);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(h.data().queue.items.length,2);assert.equal(h.data().queue.state,'done');assert.equal(h.data().accounts[0].orders[1].status,'submitted');
+});
+test('opening a closed task window recreates a read-only invoice view instead of exposing a tab-id error',async()=>{
+ const h=await harness();const id=await bound(h);await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();const previous=h.data().queue.tabId;
+ h.chrome.tabs.update=async()=>{throw Error('No tab with id: '+previous)};await h.send('OPEN_TASK');assert.notEqual(h.data().queue.tabId,previous);const tab=await h.chrome.tabs.get(h.data().queue.tabId);assert.equal(C.orderId(tab.url),firstId);
+});
+
+test('refresh never reactivates a previously skipped or uncertain invoice as eligible to apply',async()=>{
+ const h=await harness(undefined,async()=>({ok:true,status:'pending',facts:{platformCheckedAt:Date.now()}}));const id=await bound(h);await h.eval(`account(${JSON.stringify(id)}).orders[0].status='review'`);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(h.data().accounts[0].orders[0].status,'review');assert.equal(h.data().queue.state,'done');
+ await h.eval(`account(${JSON.stringify(id)}).orders[0].status='skipped'`);await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(h.data().accounts[0].orders[0].status,'skipped');
+});
