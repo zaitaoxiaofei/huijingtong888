@@ -19,7 +19,9 @@ export async function readApprovedH1(query,{tenantId,companyId,from,to,shopId}){
  if(Number(tenantId)!==1||(companyId&&Number(companyId)!==1)||from>'2026-06'||to<'2026-01')return [];
  const params=[tenantId,from<'2026-01'?'2026-01':from,to>'2026-06'?'2026-06':to];
  if(Number(shopId)>0)params.push(Number(shopId));
- const records=await query(`SELECT j.* FROM finance_reconciliation_adjustments j JOIN shops s ON s.id=j.shop_id AND (s.tenant_id=j.tenant_id OR s.tenant_id IS NULL)
+ // These approved maintenance batches used Beijing-local MySQL sessions.
+ // Preserve their stored wall time with an explicit offset; the column is not UTC.
+ const records=await query(`SELECT j.*,DATE_FORMAT(j.created_at,'%Y-%m-%dT%H:%i:%s+08:00') created_at FROM finance_reconciliation_adjustments j JOIN shops s ON s.id=j.shop_id AND (s.tenant_id=j.tenant_id OR s.tenant_id IS NULL)
   WHERE j.tenant_id=? AND j.company_id=1 AND j.month_key>=? AND j.month_key<=? ${Number(shopId)>0?'AND j.shop_id=?':''}
   AND EXISTS(SELECT 1 FROM finance_shop_company_assignments a WHERE a.company_id=j.company_id AND a.shop_id=j.shop_id AND (a.tenant_id=j.tenant_id OR a.tenant_id IS NULL) AND a.effective_from<=LAST_DAY(CONCAT(j.month_key,'-01')) AND (a.effective_to IS NULL OR a.effective_to>=CONCAT(j.month_key,'-01'))) ORDER BY j.id`,params);
  const selected=records.filter(isApprovedH1),ids=[...new Set(selected.flatMap(j=>parse(j.sources_json).map(s=>Number(s.document_id))))];
