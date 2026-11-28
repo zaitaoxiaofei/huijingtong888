@@ -2,7 +2,7 @@ import {procurementDemandCandidates} from './procurement-demand-candidates.js';
 import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
 import {loadBundleFinishedStocks,allocateBundleFinishedDemands} from './bundle-finished-stock.js';
 import { loadInventoryComposition } from './inventory-composition.js';
-import { expandCurrentProcurementDemands, procurementDemandAncestorIds } from './procurement-demand-composition.js';
+import { expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementDemandRelatedIds } from './procurement-demand-composition.js';
 import { procurementQueueOrderIds } from './order-procurement-queues.js';
 import { invalidateInventoryWorkflow } from './inventory-workflow-cache.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
@@ -49,16 +49,17 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   const finishedStocks = await loadBundleFinishedStocks(query, ownerScope);
   const hasFinishedHistory = finishedStocks.length > 0;
   const requestedIds = [...new Set([
-    ...(hasFinishedHistory ? [] : Array.isArray(productIds) ? productIds : []),
-    hasFinishedHistory ? null : productId
+    ...(hasFinishedHistory&&!targetedDemands ? [] : Array.isArray(productIds) ? productIds : []),
+    hasFinishedHistory&&!targetedDemands ? null : productId
   ].map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
-  const ownedProducts = await query(`SELECT id FROM products WHERE ${ownerScope.predicate().sql}${requestedIds.length ? ` AND id IN (${requestedIds.join(',')})` : ''}`, [tenantPk]);
+  const composition = await loadInventoryComposition(query, ownerScope);
+  const stockIds=targetedDemands&&hasFinishedHistory&&requestedIds.length?procurementDemandRelatedIds(requestedIds,composition.edges).filter(id=>composition.products.has(id)):requestedIds;
+  const ownedProducts = await query(`SELECT id FROM products WHERE ${ownerScope.predicate().sql}${requestedIds.length ? ` AND id IN (${stockIds.join(',')||'NULL'})` : ''}`, [tenantPk]);
   const scopedIds = ownedProducts.map(row => Number(row.id)).filter(id => Number.isSafeInteger(id) && id > 0);
   if (!scopedIds.length) return new Map();
   const scopedIdSet = new Set(scopedIds);
   fresh = true; // A tenant snapshot must never reuse or populate the all-product cache.
   const scopedIdSql = scopedIds.join(',');
-  const composition = await loadInventoryComposition(query, ownerScope);
   const demandIdSql = procurementDemandAncestorIds(scopedIds, composition.edges).join(',');
   if (tenantPk !== null && !scopedIds.length) throw new Error('企业库存覆盖查询需要指定库存商品 ID');
   const scope = (column = 'product_id') => scopedIds.length ? ` AND ${column} IN (${scopedIdSql})` : '';
@@ -257,7 +258,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       if (!byProduct.has(id)) byProduct.set(id, { product_id: id, ledger: 0, open_deducted: 0 });
       byProduct.get(id).open_deducted += Number(movement.quantity || 0);
     }
-    for(const id of composition.products.keys())if(composition.isBundle(id)){const existing=byProduct.get(id)||{product_id:id,open_deducted:0,fbp_reserved:0};byProduct.set(id,{...existing,ledger:Number(finishedStocks.find(s=>Number(s.product_id)===id)?.ledger||0)});}
+    for(const id of composition.products.keys())if(composition.isBundle(id)&&(!targetedDemands||!hasFinishedHistory||!requestedIds.length||scopedIdSet.has(id))){const existing=byProduct.get(id)||{product_id:id,open_deducted:0,fbp_reserved:0};byProduct.set(id,{...existing,ledger:Number(finishedStocks.find(s=>Number(s.product_id)===id)?.ledger||0)});}
     const priorityForBundle=new Map(priorities.map(p=>[`${p.product_id}:${p.order_item_id}`,Number(p.priority)]));
     const bundleDemands=allocateBundleFinishedDemands(demands.map(d=>({...d,allocation_priority:priorityForBundle.get(`${d.root_product_id}:${d.order_item_id}`)||0})),composition,[...byProduct.values()]);
     currentDemands=expandCurrentProcurementDemands(bundleDemands,composition);
@@ -285,7 +286,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
     const cancellationEvents = await query(`SELECT id,product_id,detail_json,created_at FROM inventory_flow_events
       WHERE tenant_id=? AND action='procurement_demand_cancellation' AND product_id IN (${scopedIdSql}) ORDER BY id`, [tenantPk]);
-    const assemblyEvents=hasFinishedHistory?await query("SELECT id,product_id,action,detail_json,created_at FROM inventory_flow_events WHERE tenant_id=? AND action IN ('bundle_assembly','bundle_disassembly') ORDER BY id",[tenantPk]):[];
+    const assemblyEvents=hasFinishedHistory?await query("SELECT id,product_id,action,detail_json,created_at FROM inventory_flow_events WHERE tenant_id=? AND action IN ('bundle_assembly','bundle_disassembly')"+(targetedDemands&&requestedIds.length?` AND product_id IN (${scopedIdSql})`:'')+" ORDER BY id",[tenantPk]):[];
     const assemblySources=[];
     for(const id of new Set(assemblyEvents.map(e=>Number(e.product_id))))for(const batch of remainingAssemblyBatches(assemblyEvents.filter(e=>Number(e.product_id)===id),Infinity))assemblySources.push({id:1000000000000+batch.id,product_id:id,quantity:batch.remaining,amount:batch.cost_known?batch.remaining*batch.unit_cost:0,approved_at:batch.created_at,source_label:'套装组装批次'});
     const physicalSources=[...stockSources.filter(s=>!composition.isBundle(Number(s.product_id))||s.stock_location_source==='bundle_finished'),...assemblySources];

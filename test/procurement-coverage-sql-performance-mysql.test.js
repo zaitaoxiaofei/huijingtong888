@@ -10,7 +10,7 @@ import { createOrderFixtureSchema } from './helpers/tenant-order-service.js';
 import { remainingAssemblyBatches } from '../src/shared/bundle-finished-stock.js';
 import { loadBundleFinishedStocks, allocateBundleFinishedDemands } from '../src/services/bundle-finished-stock.js';
 import { loadInventoryComposition } from '../src/services/inventory-composition.js';
-import { expandCurrentProcurementDemands, procurementDemandAncestorIds } from '../src/services/procurement-demand-composition.js';
+import { expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementDemandRelatedIds } from '../src/services/procurement-demand-composition.js';
 import { procurementQueueOrderIds } from '../src/services/order-procurement-queues.js';
 import { invalidateInventoryWorkflow } from '../src/services/inventory-workflow-cache.js';
 import { shanghaiDateKey } from '../src/shanghai-time.js';
@@ -39,7 +39,7 @@ function reader(source, connection) {
   };
   const context = vm.createContext({ Date, Map, Set, Number, String, Object, Array, Math, console,
     procurementDemandCandidates, remainingAssemblyBatches, loadBundleFinishedStocks, allocateBundleFinishedDemands, loadInventoryComposition,
-    expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementQueueOrderIds, invalidateInventoryWorkflow,
+    expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementDemandRelatedIds, procurementQueueOrderIds, invalidateInventoryWorkflow,
     shanghaiDateKey, calculateOrderProcurementCoverageAsync, transportStatusesSql, oglPhysicalDispatchSql, loadFbpReservations,
     resolveInventoryTenantScope
   });

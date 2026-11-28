@@ -442,7 +442,9 @@ export function createProcurementLedgerService(hooks) {
     value.cost_links = await run(`SELECT l.* FROM procurement_stock_cost_links l JOIN procurement_stock_cost_tasks t ON t.id = l.task_id
       WHERE t.product_id = ? ORDER BY l.id`, [productId]);
     value.priorities = await run(`SELECT * FROM inventory_order_priorities WHERE product_id = ? AND ${orderOwner} ORDER BY order_item_id`, [productId]);
-    value.revision = ledgerRevision(value);
+    // Query plans may enumerate the same order set differently. A display
+    // optimization must not change the revision unless the ledger facts change.
+    value.revision = ledgerRevision({...value,orders:[...value.orders].sort((a,b)=>Number(a.order_id)-Number(b.order_id)||Number(a.order_item_id)-Number(b.order_item_id)||Number(a.product_id)-Number(b.product_id))});
     value.actions = await run(`SELECT a.id, a.action_type, a.person_id, p.name AS person_name, a.reason, a.result_json, a.created_at FROM procurement_ledger_actions a
       JOIN products owner_product ON owner_product.id = a.product_id AND ${inventoryTenantSql(scope, 'owner_product')}
       LEFT JOIN people p ON p.id = a.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = p.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)

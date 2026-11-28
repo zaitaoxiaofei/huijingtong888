@@ -76,5 +76,23 @@ test('bundle conversion conserves parts, starts at zero, rejects occupied stock 
    await assert.rejects(legacy.applyInventoryBundleConversionMysql(input(c,'assemble',1),owner),/simulated/);
    assert.equal(await stock(210),beforeX);assert.equal(await stock(211),beforeY);assert.deepEqual(await q('SELECT COUNT(*) n FROM inventory_flow_events'),count);await f.connection.query('DROP TRIGGER reject_finished');
   });
+  await t.test('finished batches scope related BOM families while matching full-ledger facts and revisions',async()=>{
+   await q("INSERT INTO products(id,tenant_id,name,inventory_number,purchase_cost) VALUES(900,2,'Unrelated kit','2-900',0),(901,2,'Unrelated part','2-901',2)");
+   await q('INSERT INTO product_components(tenant_id,product_id,component_product_id,quantity) VALUES(2,900,901,1)');
+   await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,source_ref,quantity_delta,stock_location) VALUES(2,901,'opening_stock','unrelated',10,'LOCAL')");
+   const other=await context(900);await legacy.applyInventoryBundleConversionMysql({...input(other,'assemble',2),product_id:900},owner);
+   await q("INSERT INTO shops(id,tenant_id,name,status) VALUES(90,2,'Unrelated shop','active')");
+   await q("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku,active) VALUES(900,2,90,900,'OTHER-KIT',1)");
+   await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(900,90,'OTHER-ORDER','awaiting_packaging',UTC_TIMESTAMP())");
+   await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(900,900,900,'OTHER-KIT',3,10)");
+   const c=await context();const ids=[200,...c.components.map(p=>p.product_id)];
+   for(const id of ids){const full=await legacy.procurementLedgerMysql({product_id:id,include_fbp:false},2),part=c.components.find(p=>p.product_id===id);assert.equal(part?part.physical_stock:c.finished_physical,full.physical_estimate);assert.equal(part?part.available_stock:c.finished_available,full.available_estimate);if(part)assert.equal(part.revision,full.revision);}
+   const {loadOrderProcurementCoverage}=await import('../src/services/mysql-order-procurement-coverage.js');let demandSql='';
+   const q2=async(sql,args)=>{if(sql.startsWith('SELECT STRAIGHT_JOIN o.id'))demandSql=sql;return q(sql,args);};
+   const projection=await loadOrderProcurementCoverage(q2,'',{tenantId:2,productIds:ids,includeTrace:true,targetedDemands:true});
+   assert.ok(demandSql.includes('candidate_items'),'finished history must retain the targeted order scan');
+   assert.ok(!projection.inventory_stocks.some(p=>Number(p.product_id)===900||Number(p.product_id)===901),'unrelated finished stock must not force full-tenant coverage');
+   assert.ok(projection.inventory_stocks.some(p=>Number(p.product_id)===202),'the shared sibling kit stays inside the scope');
+  });
  }finally{await closeMysqlPool();await f.cleanup();}
 });
