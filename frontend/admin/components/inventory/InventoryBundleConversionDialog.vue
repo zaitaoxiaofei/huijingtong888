@@ -1,4 +1,5 @@
 <script setup>
+import {ElDialog} from 'element-plus';
 import {ref} from 'vue';
 import MobileDialog from '../mobile/MobileDialog.vue';
 import InventoryBundleConversion from './InventoryBundleConversion.vue';
@@ -9,7 +10,7 @@ function saved(result){emit('saved',result);emit('update:modelValue',false);}
 function updateState(value){state.value=value;emit('busy',value.busy);}
 </script>
 <template>
- <component :is="mobile?MobileDialog:'el-dialog'" v-if="modelValue" :model-value="modelValue" title="库存转换 · 套装组装 / 拆包" width="min(800px,94vw)" class="inventory-bundle-conversion-dialog" append-to-body :close-on-click-modal="false" :show-close="!state.busy" :close-on-press-escape="!state.busy" @update:model-value="emit('update:modelValue',$event)">
+ <component :is="mobile?MobileDialog:ElDialog" v-if="modelValue" :model-value="modelValue" title="库存转换 · 套装组装 / 拆包" width="min(800px,94vw)" class="inventory-bundle-conversion-dialog" append-to-body :close-on-click-modal="false" :show-close="!state.busy" :close-on-press-escape="!state.busy" @update:model-value="emit('update:modelValue',$event)">
   <InventoryBundleConversion ref="panel" :product-id="productId" form-open external-actions @state="updateState" @saved="saved"/>
   <template #footer><el-button :disabled="state.busy" @click="emit('update:modelValue',false)">取消</el-button><el-button type="primary" :loading="state.busy" :disabled="!state.canSave&&!state.retrying" @click="panel?.save()">{{state.label}}</el-button></template>
  </component>
