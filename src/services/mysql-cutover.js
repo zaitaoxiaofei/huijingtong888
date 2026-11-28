@@ -18628,6 +18628,7 @@ export async function revokeShippedCancellationReturnsMysql(orderItemId, tenantI
 async function syncOutboundForOpenOrdersMysql(options = {}) {
   const tenantScope = await orderListTenantScopeMysql(options.tenantId || "admin");
   await assertOrderTaskAccessMysql(tenantScope, options, ["packing", "orders.manage", "inventory.write", "procurement"]);
+  const inventoryScope = { id: tenantScope.id, isDefault: tenantScope.defaultTenant };
   const scope = orderOutboundSyncScopeMysql(options, tenantScope);
   const cancelledRows = options.open_only ? [] : await mysqlQuery(`
     SELECT oi.id AS order_item_id, oi.quantity, o.posting_number, o.shop_id,
@@ -18838,7 +18839,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
       FROM inventory_movements
       WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
     `, [row.id]);
-    if (existingOutboundMovements.length && (await loadBundleFinishedStocks(mysqlQuery,tenantScope)).length) {
+    if (existingOutboundMovements.length && (await loadBundleFinishedStocks(mysqlQuery,inventoryScope)).length) {
       if(!isOrderInTransportMysql({status:row.order_status,tracking_stage:row.tracking_stage}))await upsertOrderOutboundRecordMysql(row,outboundStockLocation,'套装统一分配',tenantScope.id);
       continue;
     }
@@ -18941,9 +18942,9 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     `, [row.shop_id, row.posting_number, row.ozon_sku]);
     deducted += 1;
   }
-  if((await loadBundleFinishedStocks(mysqlQuery,tenantScope)).length)await withMysqlTransaction(async connection=>{
+  if((await loadBundleFinishedStocks(mysqlQuery,inventoryScope)).length)await withMysqlTransaction(async connection=>{
     await mysqlConnectionQuery(connection,`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p',tenantScope)} ORDER BY p.id FOR UPDATE`);
-    await reconcileBundleOrders(connection,tenantScope);
+    await reconcileBundleOrders(connection,inventoryScope);
   });
   if (cancelledRows.length || outboundRecordsSynced || deducted || componentMigrations) invalidateOrderProcurementCoverage();
   return {
