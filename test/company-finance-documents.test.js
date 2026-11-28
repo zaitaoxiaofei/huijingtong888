@@ -53,6 +53,28 @@ test('parser reads original document period and does not infer it from renamed f
  await assert.rejects(parseFinanceDocument(buffer,'202611.xlsx',{month:'2026-11'}),/正文期间/);
  await assert.rejects(parseFinanceDocument(buffer,'file.xlsx',{month:'2026-13'}),/业务月份/);
 });
+test('Ozon archive requires a directory and shop, resolves a single month, and can retry the same original with a manual month',async()=>{
+ const db=database(),s=session(),url='/ozon-original';
+ const source_location={platform:'ozon',folder_id:'agentReports',section:'报告'};
+ db.files.set(url,{tenant:1,buffer:await starFile(),row:{original_name:'renamed-2026-11.xlsx'}});
+ const input={company_id:1,shop_id:10,attachment_url:url,upload_channel:'ozon-archive'};
+ await assert.rejects(db.service.preview(input,s),/平台目录/);
+ await assert.rejects(db.service.preview({...input,source_location,shop_id:0},s),/实际店铺/);
+ await assert.rejects(db.service.preview({...input,source_location,shop_id:20},s),/不属于当前公司/);
+ db.closed.add('1:2026-10');
+ await assert.rejects(db.service.preview({...input,source_location},s),/已关账/);
+ db.closed.clear();
+ const {document}=await db.service.preview({...input,source_location},s);
+ assert.equal(document.month_key,'2026-10');
+ assert.equal(document.payload_json.source_location.folder_id,'agentReports');
+ assert.equal((await db.service.preview({...input,source_location},s)).duplicate,true);
+ const undecided={...input,source_location,attachment_url:'/undated'};
+ db.files.set('/undated',{tenant:1,buffer:await workbook([[null,'platform evidence without a reporting period']]),row:{original_name:'undated.xlsx'}});
+ await assert.rejects(db.service.preview(undecided,s),/待确认月份/);
+ assert.equal(db.docs.length,1);
+ assert.equal((await db.service.preview({...undecided,month:'2026-09'},s)).document.month_key,'2026-09');
+});
+
 test('OOXML namespaced tags and rows without position attributes remain readable',async()=>{
  const z=new JSZip();z.file('xl/workbook.xml','<x:workbook xmlns:x="a" xmlns:r="b"><x:sheets><x:sheet r:id="s1"/></x:sheets></x:workbook>');
  z.file('xl/_rels/workbook.xml.rels','<Relationships><Relationship Id="s1" Target="/xl/worksheets/sheet1.xml"/></Relationships>');
@@ -270,6 +292,10 @@ test('company cash previews without a month and deduplicates overlapping exports
  for(const [i,rows] of [[1,[a,b]],[2,[a]]]){
   const url='/cash-'+i;
   db.files.set(url,{tenant:1,row:{original_name:'entry.xlsx'},buffer:await workbook([null,[null,'连连跨境支付入账记录查询'],[null,'名称：[Company 1]'],[null,...header],...rows.map(r=>[null,...r])])});
+  for(const month of [undefined,'2026-03'])await assert.rejects(db.service.preview({
+   ...input,shop_id:10,upload_type:'auto',upload_channel:'ozon-archive',attachment_url:url,month,
+   source_location:{platform:'ozon',folder_id:'invoices',section:'扣款'}
+  },s),/结算回款上传/);
   const {document}=await db.service.preview({...input,attachment_url:url},s);
   assert.equal(document.month_key,i===1?'2026-05':'2026-03');
   assert.equal(document.payload_json.transaction_period.from,'2026-03-20');

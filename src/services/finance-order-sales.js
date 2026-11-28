@@ -13,12 +13,14 @@ function component(value,side){
  for(const key of ['amount','stars','bank_coinvestment','pick_up_point_coinvestment','bonus','standard_fee'])if(value[key]==null)fail(`逐单销售缺少${key}，请上传完整官方报告，不能补零`);
  return {amount:money(value.amount),partner:add(['stars','bank_coinvestment','pick_up_point_coinvestment'].map(k=>money(value[k]))),bonus:money(value.bonus),quantity,standard_fee:money(value.standard_fee)};
 }
-export function parseOrderSalesJson(buffer,{month}){
+export function parseOrderSalesJson(buffer,{month,inferMonth=false}){
  let value;try{value=JSON.parse(buffer.toString('utf8'));}catch{fail('逐单销售JSON无效，请保留Ozon原始header和rows');}
  const {header:h,rows}=value||{};
  if(!h||!Array.isArray(rows)||!rows.length||rows.length>20000)fail('需要Ozon逐单销售报告header及1—20000行rows，不支持截图或手工金额JSON');
  if(h.currency_sys_name!=='CNY')fail('当前逐单核定仅支持合同CNY原始报告，其他币种不能猜测折算');
  if(!/^\d+$/.test(String(h.number||''))||!/^9[0-9A-Z]{17}$/.test(h.receiver_inn||''))fail('逐单报告缺少凭证编号或购买方税号，请下载完整原件');
+ if(inferMonth&&!month&&/^20\d{2}-(0[1-9]|1[0-2])-01$/.test(h.start_date||''))month=h.start_date.slice(0,7);
+ if(!month)fail('无法识别逐单报告的业务月份，请选择月份后重试');
  const last=new Date(Date.UTC(Number(month.slice(0,4)),Number(month.slice(5)),0)).toISOString().slice(0,10);
  if(h.start_date!==`${month}-01`||h.stop_date!==last)fail('逐单报告正文起止月份与所选业务月不符，请按正文月份上传');
  const seen=new Set();
