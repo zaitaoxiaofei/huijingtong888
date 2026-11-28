@@ -23,7 +23,7 @@ function database(options={}){
   if(sql.startsWith('SELECT shop_id,DATE_FORMAT'))return [{shop_id:10,effective_from:'2026-01-01',effective_to:null}];
   if(sql.includes('FROM orders o JOIN shops s')){assert.match(sql,/s.tenant_id=\?/);return options.items||[];}
   if(sql.includes('FROM finance_shop_company_assignments'))return p[0]===p[1]?[{id:p[0]*10,name:'Example Z'}]:[];
-  if(sql.includes('FROM finance_reconciliation_adjustments'))return [];
+  if(sql.includes('FROM finance_reconciliation_adjustments')||sql.includes('FROM finance_payout_attributions'))return [];
   if(sql.includes('FROM ozon_orders_raw'))return [];
   if(sql.includes('FROM finance_periods'))return closed.has(`${p[0]}:${p[1]}`)?[{id:1}]:[];
   if(sql.includes('FROM finance_import_documents')){
@@ -90,9 +90,10 @@ test('unparseable uploads remain archived as errors and cannot enter financial t
  await assert.rejects(db.service.confirm({company_id:1,document_id:doc.document.id},session()),/解析失败/);assert.deepEqual((await db.service.report({company_id:1,month:'2026-10'},session())).metrics,{});
 });
 test('cash reconciliation preserves currencies, cross-month dates, ambiguous candidates and bank unknown',()=>{
- const doc={id:1,parse_status:'confirmed',payload_json:{cash:[{type:'entry',date:'2026-10-14 01:04',currency:'CNH',amount:100},{type:'withdrawal',date:'2026-10-14',currency:'CNH',amount:100,fee:1.2},{type:'withdrawal',date:'2026-11-05',currency:'CNH',amount:200,fee:2.4},{type:'platform-payment',date:'2026-10-13',currency:'CNY',amount:100}]}};
- const r=reconcileImportedCash([doc],{from:'2026-10',to:'2026-10'});assert.equal(r.currencies[0].fees,1.2);assert.equal(r.matches[0].status,'amount_date_candidate');assert.equal(r.bank_status,'missing');
- doc.payload_json.cash.push({type:'entry',date:'2026-10-14 02:00',currency:'CNH',amount:100});assert.equal(reconcileImportedCash([doc],{from:'2026-10',to:'2026-10'}).matches[0].status,'ambiguous');
+ const doc={id:1,parse_status:'confirmed',payload_json:{cash:[{type:'entry',date:'2026-10-14 01:04',currency:'CNH',amount:100,reference:'a'},{type:'withdrawal',date:'2026-10-14',currency:'CNH',amount:100,fee:1.2},{type:'withdrawal',date:'2026-11-05',currency:'CNH',amount:200,fee:2.4}]}};
+ const platform={id:2,shop_key:10,parse_status:'confirmed',payload_json:{cash:[{type:'platform-payment',date:'2026-10-13',currency:'CNY',amount:100,source:'row 2'}]}};
+ const r=reconcileImportedCash([doc,platform],{from:'2026-10',to:'2026-10'});assert.equal(r.currencies[0].fees,1.2);assert.equal(r.matches[0].status,'amount_date_candidate');assert.equal(r.bank_status,'missing');
+ doc.payload_json.cash.push({type:'entry',date:'2026-10-14 02:00',currency:'CNH',amount:100,reference:'b'});assert.equal(reconcileImportedCash([doc,platform],{from:'2026-10',to:'2026-10'}).matches[0].status,'ambiguous');
 });
 test('preview and foreign-currency invoice facts never contribute to CNY totals',()=>{
  const s=summarizeImportedDocuments([{parse_status:'preview',payload_json:{facts:[{metric:'佣金',amount:99,currency:'CNY'}]}},{parse_status:'confirmed',payload_json:{facts:[{metric:'佣金',amount:99,currency:'RUB'}]}}]);assert.deepEqual(s.metrics,{});
@@ -297,4 +298,25 @@ test('Shanghai original exports complete company preview and confirmation withou
  const {currencies,rows}=reconcileImportedCash(fixture.docs,{from:'2026-01',to:'2026-11'});
  assert.deepEqual(currencies,[{currency:'CNH',complete:true,entries:575165.32,withdrawals:575165.32,fees:6638}]);
  assert.equal(Math.round(rows.reduce((a,r)=>a+(r.listed_bank_amount||0),0)*100),56852732);
+});
+
+test('payout attribution uses the collection month and rejects competing payment evidence',()=>{
+ const wrap=(id,shop_key,cash)=>({id,shop_key,parse_status:'confirmed',payload_json:{cash}});
+ const entry={type:'entry',reference:'12345678901234567890',date:'2026-11-01 00:01',currency:'CNH',amount:100};
+ const payment={type:'platform-payment',date:'2026-10-31',currency:'CNY',amount:100,source:'第3行'};
+ const docs=[wrap(1,0,[entry]),wrap(2,10,[payment]),wrap(3,0,[entry])];
+ const month={from:'2026-11',to:'2026-11'};
+ const candidates=reconcileImportedCash(docs,month);
+ assert.equal(candidates.matches[0].status,'amount_date_candidate');
+ assert.equal(candidates.currencies[0].entries,100);
+ assert.deepEqual(candidates.shop_entries,[{month:'2026-11',shop_id:null,currency:'CNH',count:1,amount:100}]);
+ const overlapping=[...docs,wrap(4,11,[payment])];
+ const ambiguous=reconcileImportedCash(overlapping,{from:'2026-10',to:'2026-11'});
+ assert.deepEqual(ambiguous.matches.map(m=>m.status),['ambiguous','ambiguous']);
+ const saved={entry_reference:entry.reference,payment_document_id:2,payment_source:payment.source,shop_id:10};
+ const confirmed=reconcileImportedCash(overlapping,month,[saved]);
+ assert.deepEqual(confirmed.matches.map(m=>m.status),['confirmed']);
+ assert.deepEqual(confirmed.shop_entries,[{month:'2026-11',shop_id:10,currency:'CNH',count:1,amount:100}]);
+ const conflicting=[...docs,wrap(5,0,[{...entry,amount:110}])];
+ assert.equal(reconcileImportedCash(conflicting,month,[saved]).shop_entries[0].shop_id,null);
 });

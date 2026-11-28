@@ -5,7 +5,7 @@ import { FINANCE_FILE_CATEGORIES, financeDocumentCategories } from '../../../../
 import { FINANCE_GROUPS, MANUAL_EXPENSE_METRICS, UPLOAD_TYPES, financeMatrix, financeSourceShops, financeLineSign, financeExpenseRecordQuery } from '../../../../src/shared/company-finance-report.js';
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient, currentApiCacheScope, getAuthToken } from '../../utils/api';
 import { useAuthStore } from '../../stores/auth';
 import { canAccessPage } from '../../../../src/shared/permissions.js';
@@ -137,6 +137,24 @@ async function saveManualDraft(){
  try{await apiClient.post('/api/finance-center/document-import',{action:'preview',company_id:companyId.value,shop_id:doc.shop_key,month:doc.month_key,attachment_url:doc.attachment_url,upload_type:'manual-expense',display_name:doc.payload_json.display_name,manual:{...editManual.value},expected_revision:Number(doc.revision||0)});if(scope!==currentApiCacheScope())return;preview.value=null;ElMessage.success('草稿已保存，请重新预览后确认归档');await load();}
  catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{busy.value=false;}
 }
+const payoutCandidates=computed(()=>report.value?.cash_reconciliation.matches.filter(row=>row.status==='amount_date_candidate').slice(0,500)||[]);
+const payoutStatuses={confirmed:'归属已确认',amount_date_candidate:'待确认归属',ambiguous:'多笔候选，待核对',unmatched:'未匹配',evidence_missing:'原件待核对'};
+async function confirmPayouts(rows){
+ const company=String(companyId.value),scope=currentApiCacheScope(),bounds={...windowRange.value};
+ try{await ElMessageBox.confirm(`确认这 ${rows.length} 笔连连入账的店铺归属？`,'确认回款归属',{type:'warning'});}
+ catch{return;}
+ if(busy.value||company!==String(companyId.value)||scope!==currentApiCacheScope()||bounds.from!==windowRange.value.from)return;
+ busy.value=true;
+ try{
+  const result=await apiClient.post('/api/finance-center/document-import',{action:'confirmPayouts',company_id:company,...bounds,matches:rows.map(({entry,payment})=>({
+   entry_reference:String(entry.reference),payment_document_id:payment.document_id,payment_source:payment.source
+  }))});
+  if(company!==String(companyId.value)||scope!==currentApiCacheScope())return;
+  ElMessage.success(result.confirmed?`已确认 ${result.confirmed} 笔回款归属`:'所选回款归属已确认');
+  await load();
+ }catch(e){ElMessage.error(e.message);}
+ finally{busy.value=false;}
+}
 async function confirm(doc){
  const scope=currentApiCacheScope();busy.value=true;
  try{await apiClient.post('/api/finance-center/document-import',{action:'confirm',company_id:companyId.value,document_id:doc.id,expected_revision:Number(doc.revision||0)});if(scope!==currentApiCacheScope())return;ElMessage.success('已确认，原件与明细已归档');await load();}
@@ -230,12 +248,25 @@ onBeforeUnmount(()=>{costGeneration++;generation++;controller?.abort();});
       <el-table-column label="实收手续费"><template #default="{row}">{{money(row.fees)}}</template></el-table-column>
       <el-table-column label="表列到账"><template #default="{row}"><div v-for="item in row.listed_arrivals" :key="item.currency">{{money(item.amount)}} {{item.currency}}</div></template></el-table-column>
      </el-table>
-     <el-table :data="report.cash_reconciliation.shop_payments||[]">
-      <el-table-column label="店铺"><template #default="{row}">{{report.shops.find(shop=>Number(shop.id)===row.shop_id)?.name||row.shop_id}}</template></el-table-column>
-      <el-table-column label="Ozon付款凭证合计"><template #default="{row}">{{money(row.amount)}} {{row.currency}}</template></el-table-column>
-      <el-table-column prop="payment_count" label="付款笔数"/><el-table-column prop="candidate_count" label="连连入账候选笔数"/>
+     <h2>按实际入账月份归属</h2>
+     <el-table :data="report.cash_reconciliation.shop_entries||[]">
+      <el-table-column prop="month" label="入账月份"/>
+      <el-table-column label="店铺"><template #default="{row}">{{row.shop_id?shopName(row.shop_id):'待确认归属'}}</template></el-table-column>
+      <el-table-column prop="count" label="入账笔数"/>
+      <el-table-column label="入账金额"><template #default="{row}">{{money(row.amount)}} {{row.currency}}</template></el-table-column>
      </el-table>
-     <el-table :data="report.cash_reconciliation.matches"><el-table-column label="平台转出日期"><template #default="{row}">{{row.payment.date}}</template></el-table-column><el-table-column label="平台转出 CNY"><template #default="{row}">{{money(row.payment.amount)}}</template></el-table-column><el-table-column label="入账日期"><template #default="{row}">{{row.entry?.date||'未匹配'}}</template></el-table-column><el-table-column label="入账 CNH"><template #default="{row}">{{money(row.entry?.amount)}}</template></el-table-column><el-table-column label="状态"><template #default="{row}">{{row.status==='amount_date_candidate'?'金额日期候选，归属待核':row.status==='ambiguous'?'多笔候选，待人工核对':'未匹配'}}</template></el-table-column></el-table>
+     <h2>逐笔归属</h2>
+     <el-button v-if="payoutCandidates.length" type="primary" :disabled="busy" @click="confirmPayouts(payoutCandidates)">确认 {{payoutCandidates.length}} 笔唯一匹配</el-button>
+     <el-table :data="report.cash_reconciliation.matches">
+      <el-table-column label="店铺" min-width="130"><template #default="{row}">{{shopName(row.payment.shop_id)}}</template></el-table-column>
+      <el-table-column label="Ozon付款日期"><template #default="{row}">{{row.payment.date}}</template></el-table-column>
+      <el-table-column label="平台转出 CNY"><template #default="{row}">{{money(row.payment.amount)}}</template></el-table-column>
+      <el-table-column label="实际入账日期" min-width="150"><template #default="{row}">{{row.entry?.date||'—'}}</template></el-table-column>
+      <el-table-column label="入账 CNH"><template #default="{row}">{{money(row.entry?.amount)}}</template></el-table-column>
+      <el-table-column label="连连交易号" min-width="160"><template #default="{row}">{{row.entry?.reference||'—'}}</template></el-table-column>
+      <el-table-column label="凭证" min-width="130"><template #default="{row}"><el-button link @click="openFile(row.payment.attachment_url)">Ozon · {{row.payment.source}}</el-button><el-button v-if="row.entry" link @click="openFile(row.entry.attachment_url)">连连原件</el-button></template></el-table-column>
+      <el-table-column label="状态" min-width="140"><template #default="{row}">{{payoutStatuses[row.status]}} <el-button v-if="row.status==='amount_date_candidate'" link type="primary" :disabled="busy" @click="confirmPayouts([row])">确认</el-button></template></el-table-column>
+     </el-table>
      <el-tooltip :content="report.cash_reconciliation.note"><span class="help-icon" tabindex="0" aria-label="回款匹配说明">ⓘ</span></el-tooltip><h2>文件内部核对</h2><div v-for="d in report.documents.filter(d=>d.parse_status==='confirmed'&&d.payload_json.controls?.length)" :key="d.id"><p>{{d.original_name}}</p><div v-for="c in d.payload_json.controls" :key="c.name">{{c.name}}：{{c.amount!=null?money(c.amount):money(c.difference)}} {{c.currency}} {{c.amount==null?'（差额）':''}}</div></div>
     </el-tab-pane>
     <el-tab-pane label="发票审核" name="vouchers" lazy>
