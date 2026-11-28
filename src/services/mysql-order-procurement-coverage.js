@@ -2,7 +2,7 @@ import {procurementDemandCandidates} from './procurement-demand-candidates.js';
 import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
 import {loadBundleFinishedStocks,allocateBundleFinishedDemands} from './bundle-finished-stock.js';
 import { loadInventoryComposition } from './inventory-composition.js';
-import { expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementDemandRelatedIds } from './procurement-demand-composition.js';
+import { expandCurrentProcurementDemands, procurementDemandAncestorIds, procurementDemandStockIds } from './procurement-demand-composition.js';
 import { procurementQueueOrderIds } from './order-procurement-queues.js';
 import { invalidateInventoryWorkflow } from './inventory-workflow-cache.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
@@ -53,7 +53,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     hasFinishedHistory&&!targetedDemands ? null : productId
   ].map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
   const composition = await loadInventoryComposition(query, ownerScope);
-  const stockIds=targetedDemands&&hasFinishedHistory&&requestedIds.length?procurementDemandRelatedIds(requestedIds,composition.edges).filter(id=>composition.products.has(id)):requestedIds;
+  const stockIds=targetedDemands&&hasFinishedHistory&&requestedIds.length?procurementDemandStockIds(requestedIds,composition.edges,finishedStocks.map(row=>row.product_id)).filter(id=>composition.products.has(id)):requestedIds;
   const ownedProducts = await query(`SELECT id FROM products WHERE ${ownerScope.predicate().sql}${requestedIds.length ? ` AND id IN (${stockIds.join(',')||'NULL'})` : ''}`, [tenantPk]);
   const scopedIds = ownedProducts.map(row => Number(row.id)).filter(id => Number.isSafeInteger(id) && id > 0);
   if (!scopedIds.length) return new Map();

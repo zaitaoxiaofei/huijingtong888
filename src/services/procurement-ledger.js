@@ -816,12 +816,14 @@ export function createProcurementLedgerService(hooks) {
       ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),
       target_before: target?.local_stock, target_after: target ? target.local_stock + plan.target_delta : null };
   }
+  // Bundle stock validation needs canonical snapshot facts and revisions,
+  // not print annotations or historical procurement suggestions.
   async function readMany(ids,tenantId,connection=null,displayQuery=null){
     if(!hooks.coverageBatch){const values=[];for(const product_id of ids)values.push(await read({product_id,include_fbp:false},tenantId,connection,displayQuery));return values;}
     if(!connection)await prepare();
     const run=connection?(sql,args=[])=>connection.query(sql,args).then(([rows])=>rows):displayQuery||query;
     const projection=await hooks.coverageBatch(run,ids,tenantId),values=[];
-    for(const product_id of ids)values.push(await read({product_id,include_fbp:false},tenantId,connection,run,projection));
+    for(const product_id of ids)values.push(await snapshot(integer(product_id,'库存商品 ID'),run,tenantId,projection));
     return values;
   }
   return { read, readMany, apply, preview, costTasks, receiveAndCount, prepare };
