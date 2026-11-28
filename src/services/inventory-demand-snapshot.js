@@ -1,4 +1,5 @@
 import {readScopedJson,writeScopedJson} from './scoped-json-object.js';
+import {withMysqlWorkload} from '../mysql-workload.js';
 // A read model only: never used to reserve stock, post receipts or write costs.
 export const INVENTORY_DEMAND_SNAPSHOT_VERSION = 'demand-v10-fbs-first';
 export const INVENTORY_DEMAND_SNAPSHOT_SCHEMA = `CREATE TABLE IF NOT EXISTS inventory_demand_snapshots (
@@ -21,7 +22,8 @@ export function limitInventoryDemandQueries(query){
 function enqueue(work){
   if(queued>=16)throw new Error('需求核算任务较多，请稍后重新核算');
   queued++;
-  const result=queue.then(work);
+  // A refresh triggered by HTTP must not inherit its foreground connection lane.
+  const result=queue.then(()=>withMysqlWorkload('background',work));
   queue=result.catch(()=>{}).finally(()=>queued--);
   return result;
 }

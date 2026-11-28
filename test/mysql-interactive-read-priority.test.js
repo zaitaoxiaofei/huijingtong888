@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {withMysqlWorkload,withMysqlInteractiveRead,waitForMysqlInteractiveReads} from '../src/mysql-workload.js';
+import {createOrderReadDiagnostics} from '../src/services/order-read-diagnostics.js';
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 test('new background reads wait for concurrent interactive rows, foreground and errors remain live',async()=>{
  const a=deferred(),b=deferred(),events=[];
@@ -22,7 +23,7 @@ test('only ordinary row-only order pages pause scans; coverage-dependent pages r
  const {readFileSync}=await import('node:fs');const vm=await import('node:vm');
  const runtime=readFileSync(new URL('../src/services/mysql-runtime-services.js',import.meta.url),'utf8');
  const body=runtime.match(/ordersPaged: ([\s\S]*?),\n  outboundRecords:/)?.[1];assert.ok(body);
- const seen=[];const context=vm.createContext({String,withRequestReadCache:op=>op(),withMysqlWorkload:(_,op)=>op(),withMysqlInteractiveRead:op=>{seen.push('interactive');return op();},ordersPagedMysql:async()=>seen.push('rows')});
+ const seen=[];const context=vm.createContext({String,createOrderReadDiagnostics,withRequestReadCache:op=>op(),withMysqlWorkload:(_,op)=>op(),withMysqlInteractiveRead:op=>{seen.push('interactive');return op();},ordersPagedMysql:async()=>seen.push('rows')});
  const read=vm.runInContext('('+body+')',context);
  for(const query of [{includeCounts:0},{include_counts:'0',include_rows:1,status:'all'}]){seen.length=0;await read(query);assert.deepEqual(seen,['interactive','rows']);}
  for(const query of [{},{includeCounts:1},{includeRows:0,includeCounts:0},{includeCounts:0,includeInventoryAvailability:1},{includeCounts:0,include_inventory_availability:'1'},...['pending_purchase','purchase_in_transit','purchase_records_missing'].map(status=>({status,includeCounts:0}))]){seen.length=0;await read(query);assert.deepEqual(seen,['rows']);}

@@ -134,12 +134,14 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         ${localBatchScope ? 'FROM local_order_facts local_facts JOIN orders o ON o.id=local_facts.id' : tenantPk === null ? 'FROM orders o' : `FROM shops tenant_shop JOIN orders o ON o.shop_id=tenant_shop.id${tenantScope('tenant_shop.tenant_id')}`}
         JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
         LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1${tenantScope('direct_mapping.tenant_id')}
-        LEFT JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, (
-          SELECT MIN(fallback_mapping.id) FROM sku_mappings fallback_mapping
-          WHERE NOT EXISTS (SELECT 1 FROM shops wb_shop WHERE wb_shop.id=o.shop_id AND wb_shop.platform='wb')
-            AND fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
-            AND fallback_mapping.active = 1${tenantScope('fallback_mapping.tenant_id')}
-        ))${tenantScope('sm.tenant_id')}
+        LEFT JOIN (
+          SELECT fallback_mapping.shop_id, fallback_mapping.ozon_sku, MIN(fallback_mapping.id) AS id
+          FROM sku_mappings fallback_mapping
+          WHERE fallback_mapping.active = 1${tenantScope('fallback_mapping.tenant_id')}
+          GROUP BY fallback_mapping.shop_id, fallback_mapping.ozon_sku
+        ) fallback_mapping ON direct_mapping.id IS NULL AND fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
+          AND NOT EXISTS (SELECT 1 FROM shops wb_shop WHERE wb_shop.id=o.shop_id AND wb_shop.platform='wb')
+        LEFT JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, fallback_mapping.id)${tenantScope('sm.tenant_id')}
         LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1${tenantScope('p.tenant_id')}
         LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id AND recipe.ozon_sku = oi.ozon_sku AND recipe.active = 1 AND recipe.mode = 'combo'
         LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id

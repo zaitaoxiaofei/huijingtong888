@@ -1,8 +1,9 @@
 <script setup>
 import MobileDialog from './MobileDialog.vue';
-import {computed,defineAsyncComponent,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
+import {computed,defineAsyncComponent,onActivated,onDeactivated,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
-import {apiClient,currentApiCacheScope} from '../../utils/api.js';
+import {apiClient,currentApiCacheScope,getAuthToken} from '../../utils/api.js';
+import {createDisplayReadScope} from '../../utils/display-read-scope.js';
 import {useAuthStore} from '../../stores/auth.js';
 import {hasPermission} from '../../../../src/shared/permissions.js';
 import {inventorySearchDefaults,appendInventorySearch} from '../../../../src/shared/inventory-search-fields.js';
@@ -24,6 +25,13 @@ const rows=ref([]),total=ref(null),page=ref(1),pageSize=ref(20),tab=ref(warehous
 const purchase=reactive({visible:false,rows:[]}),receive=reactive({visible:false,id:0,batch:0,name:''}),edit=reactive({row:null,tracking:'',courier:''});let generation=0,disposed=false,controller=null,demandPollTimer=null;
 const demandWaitExceeded=ref(false);
 const stocktake=reactive({visible:false,product:{}}),stockFeedback=ref(''),stockError=ref(false);const stockUpdates=new Map();
+let authorizationPending=false;
+const listReads=createDisplayReadScope({visible:document.visibilityState!=='hidden',onPause:stopListReads,onResume:()=>{void load();}});
+function stopListReads(){window.clearTimeout(demandPollTimer);demandPollTimer=null;++generation;controller?.abort();listReads.release(controller);controller=null;loading.value=false;}
+function canReadLists(){return !authorizationPending&&listReads.canRead()&&Boolean(getAuthToken())&&(canPurchase.value||canReceive.value);}
+function rejectListAccess(reason){if(!listReads.reject(reason))return false;rows.value=[];total.value=null;snapshot.value={};purchaseDays.value=[];selectedDay.value='';selected.value=[];purchaseSelected.value=[];error.value=reason.message;return true;}
+function listVisibilityChanged(){listReads.setVisible(document.visibilityState!=='hidden');}
+function listAuthorityVerified(){const wasReading=listReads.canRead(),pending=authorizationPending;authorizationPending=false;listReads.resetAuthorization();if(pending&&wasReading)void load();}
 const canWrite=computed(()=>hasPermission(auth.user,'inventory.write'));
 const tabs=computed(()=>warehouseMode.value?[['pending','采购收货']]:[['register','登记采购'],['required','必须采购'],['advisory','保障补货'],['pending','采购收货'],['history','采购记录']]);
 const queueFilters=[['pending','全部状态'],['open','待到货'],['reminded','已提醒'],['arrived','待验收']];
@@ -67,24 +75,27 @@ function applyDemandPage(result){
  if(result.page!=null)page.value=Number(result.page);
 }
 function scheduleDemandPoll(endpoint,token,scope,request,remaining=8){
- if(!snapshot.value.refreshing)return;
+ if(!canReadLists()||!snapshot.value.refreshing)return;
  if(!remaining){demandWaitExceeded.value=true;return;}
  demandPollTimer=window.setTimeout(async()=>{
-  if(disposed||token!==generation||scope!==currentApiCacheScope()||request.signal.aborted)return;
+  demandPollTimer=null;
+  if(disposed||!canReadLists()||token!==generation||scope!==currentApiCacheScope()||request.signal.aborted)return;
   const timeout=window.setTimeout(()=>request.abort(),15000);
   try{
    const result=await apiClient.get(endpoint,{noCache:true,signal:request.signal});
-   if(disposed||token!==generation||scope!==currentApiCacheScope()||request.signal.aborted)return;
+   if(disposed||!canReadLists()||token!==generation||scope!==currentApiCacheScope()||request.signal.aborted)return;
    applyDemandPage(result);
    scheduleDemandPoll(endpoint,token,scope,request,remaining-1);
-  }catch{
-   if(!disposed&&token===generation&&scope===currentApiCacheScope())demandWaitExceeded.value=true;
+  }catch(reason){
+   if(!disposed&&canReadLists()&&token===generation&&scope===currentApiCacheScope()&&!rejectListAccess(reason))demandWaitExceeded.value=true;
   }finally{window.clearTimeout(timeout);}
  },8000);
 }
 async function load(reset=false,fresh=false,day=reset?'':selectedDay.value){
+ if(reset)page.value=1;
+ if(disposed||!canReadLists())return;
  window.clearTimeout(demandPollTimer);demandWaitExceeded.value=false;
- selected.value=[];purchaseSelected.value=[];if(reset)page.value=1;controller?.abort();controller=new AbortController();const request=controller,token=++generation,scope=currentApiCacheScope();loading.value=true;error.value='';
+ selected.value=[];purchaseSelected.value=[];controller?.abort();listReads.release(controller);controller=listReads.controller();const request=controller,token=++generation,scope=currentApiCacheScope();loading.value=true;error.value='';
  const timeout=window.setTimeout(()=>request.abort(),15000);
  try {
   const p=filtersUrl();let endpoint;
@@ -95,7 +106,7 @@ async function load(reset=false,fresh=false,day=reset?'':selectedDay.value){
   if(tab.value==='register'){p.set('paged','1');p.set('view','inventory');p.set('includeStock','0');endpoint='/api/products?'+p;}
   else if(demand.value){p.set('view','workspace');p.set('compact','1');p.set('task',tab.value);p.set(fresh?'refresh':'snapshot_only','1');endpoint='/api/inventory-workflow/alerts?'+p;}
   else{p.set('status',tab.value==='history'?'all':tab.value==='received'?'received':queueStatus.value);if(tab.value==='history')p.set('recent','1');else if(pending.value){p.set('day_mode','pending');if(day)p.set('purchase_day',day);}endpoint='/api/inventory-workflow/purchase-arrivals?'+p;}
-  const r=await apiClient.get(endpoint,{noCache:true,signal:request.signal});if(disposed||token!==generation||scope!==currentApiCacheScope())return;
+  const r=await apiClient.get(endpoint,{noCache:true,signal:request.signal});if(disposed||!canReadLists()||request.signal.aborted||token!==generation||scope!==currentApiCacheScope())return;
   if(demand.value){
    applyDemandPage(r);
    const pollParams=new URLSearchParams(endpoint.split('?')[1]);
@@ -107,7 +118,7 @@ async function load(reset=false,fresh=false,day=reset?'':selectedDay.value){
   const raw=tab.value==='register'?(r.rows||[]).map(row=>({...row,product_id:row.id,product_name:row.name})):(r.rows||[]);snapshot.value=r.snapshot||{};rows.value=applyStockUpdates(raw,snapshot.value);total.value=r.total==null?null:Math.max(0,Number(r.total)-raw.length+rows.value.length);
   purchaseDays.value=pending.value?r.days||[]:[];selectedDay.value=pending.value?r.selected_day??day:'';if(r.page!=null)page.value=Number(r.page);
   document.querySelector('.mobile-work-queue .mobile-list-scroll')?.scrollTo(0,0);
- }catch(e){if(token===generation&&scope===currentApiCacheScope())error.value=e.name==='AbortError'?'读取超时，请点击查询重试':e.message;}
+ }catch(e){if(!disposed&&canReadLists()&&token===generation&&scope===currentApiCacheScope()&&!rejectListAccess(e))error.value=e.name==='AbortError'?'读取超时，请点击查询重试':e.message;}
  finally{window.clearTimeout(timeout);if(token===generation)loading.value=false;}
 }
 function changed(){return load(false,demand.value);}
@@ -146,9 +157,12 @@ async function stocktakeSaved(result){
 function openReceive(row){if(!pending.value||!canReceive.value||!selectable(row)||loading.value||busy.value||error.value)return;Object.assign(receive,{visible:true,id:Number(row.product_id),batch:Number(row.id),name:row.product_name});}
 async function saveLogistics(){if(!edit.row||busy.value)return;const row=edit.row,scope=currentApiCacheScope();busy.value=true;try{await apiClient.post('/api/inventory-workflow/purchase-arrivals',{operation:'logistics',id:row.id,expected_updated_at:row.updated_at,expected_courier_company:row.courier_company,expected_tracking_number:row.tracking_number,courier_company:edit.courier,tracking_number:edit.tracking});if(disposed||scope!==currentApiCacheScope())return;edit.row=null;ElMessage.success('采购物流已保存');await load();}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{busy.value=false;}}
 
-function reset(){window.clearTimeout(demandPollTimer);demandWaitExceeded.value=false;for(const entry of stockUpdates.values())entry.controller?.abort();stockUpdates.clear();stocktake.visible=false;stockFeedback.value='';++generation;controller?.abort();rows.value=[];total.value=null;purchase.visible=false;receive.visible=false;batch.visible=false;selected.value=[];purchaseSelected.value=[];purchaseDays.value=[];selectedDay.value='';edit.row=null;error.value='';loading.value=false;busy.value=false;}
-watch(tab,()=>{rows.value=[];purchaseDays.value=[];selectedDay.value='';snapshot.value={};load(true);});watch(queueStatus,()=>{if(pending.value)load(true);});onMounted(()=>{load();window.addEventListener('erp:auth-scope-changed',reset);});onBeforeUnmount(()=>{disposed=true;reset();window.removeEventListener('erp:auth-scope-changed',reset);});
-watch([warehouseMode,canPurchase,canReceive],()=>{if(warehouseMode.value&&!['pending','received'].includes(tab.value))tab.value='pending';if(!canPurchase.value){purchase.visible=false;purchaseSelected.value=[];edit.row=null;}if(!canReceive.value)receive.visible=false;if(batch.visible&&((batch.status==='arrived'&&!canReceive.value)||(batch.status==='remind'&&!canPurchase.value)||!canConfirmArrival.value))batch.visible=false;},{flush:'sync'});
+function reset(){authorizationPending=true;stopListReads();demandWaitExceeded.value=false;for(const entry of stockUpdates.values())entry.controller?.abort();stockUpdates.clear();stocktake.visible=false;stockFeedback.value='';rows.value=[];total.value=null;snapshot.value={};purchase.visible=false;receive.visible=false;batch.visible=false;selected.value=[];purchaseSelected.value=[];purchaseDays.value=[];selectedDay.value='';edit.row=null;error.value='';busy.value=false;}
+watch(tab,()=>{rows.value=[];purchaseDays.value=[];selectedDay.value='';snapshot.value={};load(true);});watch(queueStatus,()=>{if(pending.value)load(true);});
+onMounted(()=>{window.addEventListener('erp:auth-scope-changed',reset);window.addEventListener('erp:auth-verified',listAuthorityVerified);document.addEventListener('visibilitychange',listVisibilityChanged);listReads.activate();});
+onActivated(()=>listReads.activate());onDeactivated(()=>listReads.deactivate());
+onBeforeUnmount(()=>{disposed=true;listReads.dispose();reset();window.removeEventListener('erp:auth-scope-changed',reset);window.removeEventListener('erp:auth-verified',listAuthorityVerified);document.removeEventListener('visibilitychange',listVisibilityChanged);});
+watch([warehouseMode,canPurchase,canReceive],()=>{if(!canPurchase.value&&!canReceive.value){authorizationPending=true;stopListReads();}if(warehouseMode.value&&!['pending','received'].includes(tab.value))tab.value='pending';if(!canPurchase.value){purchase.visible=false;purchaseSelected.value=[];edit.row=null;}if(!canReceive.value)receive.visible=false;if(batch.visible&&((batch.status==='arrived'&&!canReceive.value)||(batch.status==='remind'&&!canPurchase.value)||!canConfirmArrival.value))batch.visible=false;},{flush:'sync'});
 </script>
 <template><div class="mobile-work-queue mobile-list-page"><div class="mobile-list-controls"><nav v-if="!warehouseMode" class="mobile-queue-tabs" aria-label="库存任务"><button v-for="[key,label] in tabs" :key="key" :class="{active:tab===key}" @click="tab=key">{{label}}</button></nav>
  <div v-if="tab==='received'" class="mobile-received-heading"><strong>已入库记录</strong><el-button size="small" :disabled="loading" @click="queueMore('pending')">返回采购收货</el-button></div>

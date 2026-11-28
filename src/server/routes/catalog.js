@@ -1,4 +1,5 @@
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
+import {withMysqlInteractiveRead} from '../../mysql-workload.js';
 
 const PRODUCT_SAVE_BODY_LIMIT_BYTES = 128 * 1024 * 1024;
 
@@ -9,7 +10,10 @@ function readProductSaveJson(readJson, req) {
 export function createCatalogRoutes({ services, readJson }) {
   return {
     "GET /api/inventory-product-requests": (req, url) => services.inventoryProductRequests(Object.fromEntries(url.searchParams.entries()), req._session),
-    "GET /api/products": (req, url) => services.products(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/products": (req, url) => {
+      const params=Object.fromEntries(url.searchParams.entries()),read=()=>services.products(params,tenantIdFromRequest(req));
+      return params.view==='inventory'&&params.includeStock==='0'&&params.paged==='1'?withMysqlInteractiveRead(read):read();
+    },
     "GET /api/products/selection": (req, url) => services.selectionProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
