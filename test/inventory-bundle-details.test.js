@@ -18,10 +18,12 @@ test('bundle conflicts refresh revisions while preserving typed zero quantities 
  assert.equal(sut.items.value[0].revision,'a2');assert.equal(sut.items.value[0].counted_quantity,0);assert.equal(sut.submission.value,null);assert.match(sut.error.value,/整批未保存/);assert.equal(sut.busy.value,false);assert.equal(events.includes('saved'),false);
 });
 test('bundle readonly and changed enterprise responses cannot write or restore prior inventory',async()=>{
- let resolve;const h=await component('components/inventory/InventoryBundleDetails.vue',{get:async()=>new Promise(r=>resolve=r)}),props=reactive({productId:200,editable:false}),sut=h.definition.setup(props,{expose(){},emit(){}});
- h.scope='B';sut.clear();resolve(structuredClone(context));await settle();assert.equal(sut.data.value,null);await sut.save();assert.equal(h.calls.some(c=>c.method==='POST'),false);
+ let resolve;const h=await component('components/inventory/InventoryBundleDetails.vue',{get:async()=>new Promise(r=>resolve=r)}),props=reactive({productId:200,editable:true}),sut=h.definition.setup(props,{expose(){},emit(){}});
+ h.scope='B';sut.clear();resolve(structuredClone(context));await settle();assert.equal(sut.data.value,null);props.editable=false;await sut.save();assert.equal(h.calls.some(c=>c.method==='POST'),false);
 });
 test('mobile scanned bundles expand children automatically and route updates to bundle-only dialog',async()=>{
  const h=await component('views/mobile/MobileInventoryView.vue',{get:async()=>({rows:[{id:200,component_count:2}],total:1})}),sut=h.definition.setup({},{expose(){}});
  await sut.scanned('2-200');assert.equal(sut.scannedBundleId.value,200);sut.openInventory(sut.rows.value[0],false);assert.equal(sut.bundleDialog.visible,true);assert.equal(sut.bundleDialog.id,200);assert.equal(sut.dialog.visible,false);sut.clearScope();assert.equal(sut.bundleDialog.visible,false);assert.equal(sut.scannedBundleId.value,0);
 });
+
+test("readonly bundle details reuse conversion facts without a second stocktake request",async()=>{const h=await component("components/inventory/InventoryBundleDetails.vue"),sut=h.definition.setup({productId:200,editable:false},{expose(){},emit(){}});await settle();assert.equal(h.calls.length,0);sut.conversionLoaded({...context});assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].physical_stock,10);});

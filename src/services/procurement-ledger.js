@@ -451,12 +451,12 @@ export function createProcurementLedgerService(hooks) {
       ORDER BY a.id DESC LIMIT 50`, [productId, productId, productId]);
     return value;
   }
-  async function read(body, tenantId = 'admin', existingConnection = null) {
+  async function read(body, tenantId = 'admin', existingConnection = null, displayQuery = null) {
     if (!existingConnection) await prepare();
     const id = integer(body.product_id || body.productId, '库存商品 ID');
     const run = existingConnection
       ? (sql, args = []) => existingConnection.query(sql, args).then(([rows]) => rows)
-      : query;
+      : displayQuery || query;
     const value = await snapshot(id, run, tenantId);
     value.orders = await withOrderHandlingContext(value.orders, run, await resolveScope(tenantId, run));
     const fbp = hooks.fbpStocks && body.include_fbp !== false && String(body.include_fbp) !== '0' ? await hooks.fbpStocks(id, tenantId) : null;
