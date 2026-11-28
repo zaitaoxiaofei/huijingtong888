@@ -17,11 +17,13 @@ const auth=useAuthStore(),router=useRouter(),route=useRoute();
 const allowed=computed(()=>canAccessPage(auth.user,'/finance/company-statements'));
 const initialMonth=/^20\d{2}-(0[1-9]|1[0-2])$/.test(String(route.query.month||''))?String(route.query.month):shanghaiDateKey().slice(0,7);
 const companies=ref([]),assignments=ref([]),allShops=ref([]),companyId=ref(''),shopId=ref(null),month=ref(initialMonth),period=ref('month');
-const report=ref(null),error=ref(''),loading=ref(false),busy=ref(false),tab=ref(['documents','adjustments','cash'].includes(route.query.tab)?route.query.tab:'summary'),preview=ref(null),editManual=ref(null),review=ref(null),fileInput=ref(null),uploads=ref([]);
+const report=ref(null),error=ref(''),loading=ref(false),busy=ref(false),tab=ref(['documents','adjustments','cash','vouchers'].includes(route.query.tab)?route.query.tab:'summary'),preview=ref(null),editManual=ref(null),review=ref(null),fileInput=ref(null),uploads=ref([]);
 const helpOpen=ref(false),costDetail=ref(null),costSyncOpen=ref(false),costSyncResults=ref([]);
 let costGeneration=0;
 const fileCategory=ref('all'),documentMonth=ref(route.query.tab==='documents'&&route.query.month?initialMonth:'');
 const documentShop=ref(null),documentFolder=ref(''),documentSearch=ref(''),documentPage=ref(1),documentPageSize=ref(20);
+const reviewMonth=ref(route.query.tab==='vouchers'&&route.query.month?initialMonth:''),reviewShop=ref(null);
+const reviewFolder=ref(''),reviewStatus=ref(''),reviewSearch=ref(''),reviewScope=ref('relevant'),reviewPage=ref(1),reviewPageSize=ref(20);
 const cashMonth=ref(''),cashShop=ref(null),archiveUploadOpen=ref(false),cashFileInput=ref(null),cashUploads=ref([]);
 const uploadMonth=ref(''),sourceFolder=ref(''),sourceSection=ref('');
 const shopName=id=>Number(id)?allShops.value.find(s=>Number(s.id)===Number(id))?.name||`店铺 #${id}`:'公司共用';
@@ -57,6 +59,44 @@ const filteredDocuments=computed(()=>{
  ).sort((a,b)=>b.month_key.localeCompare(a.month_key)||documentSource(a).localeCompare(documentSource(b),'zh-CN')||a.original_name.localeCompare(b.original_name,'zh-CN',{numeric:true})||Number(a.id)-Number(b.id));
 });
 const pagedDocuments=computed(()=>filteredDocuments.value.slice((documentPage.value-1)*documentPageSize.value,documentPage.value*documentPageSize.value));
+const reviewSourceKey=d=>financeDocumentLocation(d).folder_id||documentSource(d);
+const annualReviewDocuments=computed(()=>categorizedDocuments.value.filter(d=>d.month_key.startsWith(year.value)));
+const reviewSources=computed(()=>[...new Map(annualReviewDocuments.value.map(d=>{
+ const key=reviewSourceKey(d);
+ return [key,OZON_DOCUMENT_FOLDERS.find(f=>f.id===key)?.name||documentSource(d)];
+}))].sort((a,b)=>a[1].localeCompare(b[1],'zh-CN')));
+const reviewShops=computed(()=>[...new Set(annualReviewDocuments.value.map(d=>Number(d.shop_key||0)))].sort((a,b)=>shopName(a).localeCompare(shopName(b),'zh-CN')));
+function isReviewRelevant(d){
+ const p=d.payload_json,source=p.archive_source||p.source_location;
+ return Boolean(d.review_note||d.review_status&&d.review_status!=='pending'||p.review_history?.length||
+  ['platform-invoice','foreign-invoice','support','manual-expense'].includes(p.kind)||
+  ['support','manual-expense'].includes(p.upload_type)||
+  ['发票','销售登记册','用于提交联邦税务局的文件'].includes(source?.section)||
+  source?.folder_id==='updWithAdditionalServices'||
+  /发票|invoice|сч[её]т[ _-]?фактур|(?:^|[^а-я])(?:сф|упд)(?:[^а-я]|$)/i.test(d.original_name));
+}
+const filteredReviews=computed(()=>{
+ const keyword=reviewSearch.value.trim().toLowerCase();
+ return annualReviewDocuments.value.filter(d=>
+  (reviewScope.value==='all'||isReviewRelevant(d))&&
+  (!reviewMonth.value||d.month_key===reviewMonth.value)&&
+  (reviewShop.value==null||Number(d.shop_key||0)===reviewShop.value)&&
+  (!reviewFolder.value||reviewSourceKey(d)===reviewFolder.value)&&
+  (!reviewStatus.value||(d.review_status||'pending')===reviewStatus.value)&&
+  (!keyword||d.original_name.toLowerCase().includes(keyword))
+ ).sort((a,b)=>b.month_key.localeCompare(a.month_key)||a.original_name.localeCompare(b.original_name,'zh-CN',{numeric:true})||Number(a.id)-Number(b.id));
+});
+const reviewMonthGroups=computed(()=>{
+ const start=(reviewPage.value-1)*reviewPageSize.value;
+ const groups=new Map();
+ for(const row of filteredReviews.value.slice(start,start+reviewPageSize.value)){
+  if(!groups.has(row.month_key))groups.set(row.month_key,[]);
+  groups.get(row.month_key).push(row);
+ }
+ return [...groups];
+});
+const openReview=row=>{review.value={...row,review_status:row.review_status||'pending',review_note:row.review_note||''};};
+const reviewHistory=computed(()=>(review.value?.payload_json.review_history||[]).slice().reverse());
 const cashMatchesAll=computed(()=>report.value?.cash_reconciliation?.matches||[]);
 const cashMatches=computed(()=>cashMatchesAll.value.filter(row=>
  (!cashMonth.value||(row.entry||row.payment).date.startsWith(cashMonth.value))&&
@@ -229,7 +269,7 @@ async function confirm(doc){
 }
 async function saveReview(){
  const scope=currentApiCacheScope();busy.value=true;
- try{await apiClient.post('/api/finance-center/document-import',{action:'review',company_id:companyId.value,document_id:review.value.id,review_status:review.value.review_status,review_note:review.value.review_note});if(scope!==currentApiCacheScope())return;review.value=null;await load();}
+ try{await apiClient.post('/api/finance-center/document-import',{action:'review',company_id:companyId.value,document_id:review.value.id,review_status:review.value.review_status,review_note:review.value.review_note,expected_revision:Number(review.value.revision||0)});if(scope!==currentApiCacheScope())return;review.value=null;ElMessage.success('审核意见已保存');await refreshDocuments();}
  catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{busy.value=false;}
 }
 async function download(p=null){
@@ -241,11 +281,13 @@ function openFile(url){if(/^\/uploads\/team-attachments\/[^/]+$/.test(url||''))w
 watch(()=>[auth.user?.id,auth.user?.tenant?.id,currentApiCacheScope(),allowed.value],setup,{immediate:true});
 watch(()=>route.query.month,value=>{if(/^20\d{2}-(0[1-9]|1[0-2])$/.test(String(value||'')))month.value=String(value);});
 watch(sourceFolder,()=>{sourceSection.value='';});
-watch(companyId,()=>{sourceFolder.value='';sourceSection.value='';uploadMonth.value='';shopId.value=null;documentShop.value=null;cashShop.value=null;cashUploads.value=[];archiveUploadOpen.value=false;});
+watch(companyId,()=>{sourceFolder.value='';sourceSection.value='';uploadMonth.value='';shopId.value=null;documentShop.value=null;reviewShop.value=null;reviewFolder.value='';cashShop.value=null;cashUploads.value=[];archiveUploadOpen.value=false;});
 watch(uploadMonth,()=>{if(!shops.value.some(s=>Number(s.id)===shopId.value))shopId.value=null;});
 watch([documentMonth,documentShop,documentFolder,fileCategory,documentSearch,documentPageSize,query],()=>{documentPage.value=1;});
 watch(()=>filteredDocuments.value.length,total=>{documentPage.value=Math.min(documentPage.value,Math.max(1,Math.ceil(total/documentPageSize.value)));});
-watch(query,()=>{if(documentMonth.value&&documentMonth.value.slice(0,4)!==year.value)documentMonth.value='';if(cashMonth.value&&cashMonth.value.slice(0,4)!==year.value)cashMonth.value='';uploads.value=[];review.value=null;load();});
+watch([reviewMonth,reviewShop,reviewFolder,reviewStatus,reviewSearch,reviewScope,reviewPageSize,query],()=>{reviewPage.value=1;});
+watch(()=>filteredReviews.value.length,total=>{reviewPage.value=Math.min(reviewPage.value,Math.max(1,Math.ceil(total/reviewPageSize.value)));});
+watch(query,()=>{if(reviewMonth.value&&reviewMonth.value.slice(0,4)!==year.value)reviewMonth.value='';if(documentMonth.value&&documentMonth.value.slice(0,4)!==year.value)documentMonth.value='';if(cashMonth.value&&cashMonth.value.slice(0,4)!==year.value)cashMonth.value='';uploads.value=[];review.value=null;load();});
 watch([cashMonth,cashShop,query],()=>{cashPage.value=1;});
 watch(()=>cashTransactions.value.length,total=>{cashPage.value=Math.min(cashPage.value,Math.max(1,Math.ceil(total/cashPageSize)));});
 watch(period,()=>{selection.value=null;});
@@ -258,8 +300,8 @@ onBeforeUnmount(()=>{costGeneration++;generation++;controller?.abort();});
   <div class="toolbar">
    <el-select v-model="companyId" aria-label="公司主体" placeholder="选择公司" :disabled="busy"><el-option v-for="c in companies" :key="c.id" :label="c.name" :value="String(c.id)" /></el-select>
    <el-date-picker v-if="tab!=='reconciliation'" v-model="year" type="year" value-format="YYYY" format="YYYY年" :clearable="false" aria-label="报表年度" :disabled="busy" />
-   <el-radio-group v-if="!['reconciliation','documents','cash'].includes(tab)" v-model="period" :disabled="busy"><el-radio-button value="month">月度</el-radio-button><el-radio-button value="quarter">季度</el-radio-button><el-radio-button value="year">年度</el-radio-button></el-radio-group>
-   <el-button v-if="tab!=='reconciliation'" :disabled="busy||!report" @click="download">导出全年交接包（草稿）</el-button><el-button v-if="tab!=='reconciliation'" :disabled="busy" @click="load">刷新</el-button><el-tooltip content="读取缺少的已结束月份官方逐单凭证，匹配ERP历史成本；不调整订单账簿。"><el-button v-if="tab==='summary'" :disabled="busy||!report" :loading="busy" @click="syncCostSources">同步成本</el-button></el-tooltip>
+   <el-radio-group v-if="!['reconciliation','documents','cash','vouchers'].includes(tab)" v-model="period" :disabled="busy"><el-radio-button value="month">月度</el-radio-button><el-radio-button value="quarter">季度</el-radio-button><el-radio-button value="year">年度</el-radio-button></el-radio-group>
+   <el-button v-if="tab!=='reconciliation'" :disabled="busy||!report" @click="download">导出全年交接包（草稿）</el-button><el-button v-if="tab!=='reconciliation'" :disabled="busy" @click="load">刷新</el-button><el-tooltip v-if="tab==='summary'" content="读取缺少的已结束月份官方逐单凭证，匹配ERP历史成本；不调整订单账簿。"><el-button :disabled="busy||!report" :loading="busy" @click="syncCostSources">同步成本</el-button></el-tooltip>
   </div>
   <el-alert v-if="error" :title="error" type="error" :closable="false" />
   <el-empty v-if="!companies.length&&!error" description="请先在经营总览的公司设置中配置主体及店铺归属" />
@@ -378,7 +420,30 @@ onBeforeUnmount(()=>{costGeneration++;generation++;controller?.abort();});
      <el-tooltip :content="report.cash_reconciliation.note"><span class="help-icon" tabindex="0" aria-label="回款匹配说明">ⓘ</span></el-tooltip><details><summary>文件内部核对</summary><div v-for="d in report.documents.filter(d=>d.parse_status==='confirmed'&&d.payload_json.controls?.length&&(!cashMonth||d.month_key===cashMonth)&&(cashShop==null||Number(d.shop_key)===cashShop))" :key="d.id"><p>{{d.original_name}}</p><div v-for="c in d.payload_json.controls" :key="c.name">{{c.name}}：{{c.amount!=null?money(c.amount):money(c.difference)}} {{c.currency}} {{c.amount==null?'（差额）':''}}</div></div></details>
     </el-tab-pane>
     <el-tab-pane label="发票审核" name="vouchers" lazy>
-     <el-table :data="report.documents"><el-table-column prop="original_name" label="文件" min-width="260"/><el-table-column label="审核状态"><template #default="{row}">{{reviews[row.review_status]}}</template></el-table-column><el-table-column prop="review_note" label="审核意见" min-width="200"/><el-table-column label="操作"><template #default="{row}"><el-button link @click="review={...row}">填写意见</el-button></template></el-table-column></el-table>
+     <div class="toolbar tab-toolbar review-toolbar">
+      <el-date-picker v-model="reviewMonth" :disabled-date="filterMonthOutsideYear" type="month" value-format="YYYY-MM" placeholder="全部月份" aria-label="审核月份筛选"/>
+      <el-select v-model="reviewShop" clearable :value-on-clear="null" placeholder="全部店铺" aria-label="审核店铺筛选"><el-option v-for="id in reviewShops" :key="id" :label="shopName(id)" :value="id"/></el-select>
+      <el-select v-model="reviewFolder" clearable placeholder="全部来源目录" aria-label="审核来源目录筛选"><el-option v-for="[key,label] in reviewSources" :key="key" :value="key" :label="label"/></el-select>
+      <el-select v-model="reviewStatus" clearable placeholder="全部审核状态" aria-label="审核状态筛选"><el-option v-for="(label,value) in reviews" :key="value" :label="label" :value="value"/></el-select>
+      <el-input v-model="reviewSearch" clearable placeholder="搜索原始文件名" aria-label="审核原始文件名"/>
+      <el-select v-model="reviewScope" aria-label="审核凭证范围"><el-option value="relevant" label="发票与审核相关凭证"/><el-option value="all" label="全部历史原件"/></el-select>
+     </div>
+     <el-empty v-if="!filteredReviews.length" description="当前筛选下没有凭证"/>
+     <section v-for="[key,rows] in reviewMonthGroups" :key="key" class="review-month">
+      <h2>{{key.slice(0,4)}} 年 {{Number(key.slice(5))}} 月</h2>
+      <el-table :data="rows" row-key="id">
+       <el-table-column label="来源目录" min-width="230"><template #default="{row}">{{documentSource(row)}}</template></el-table-column>
+       <el-table-column prop="original_name" label="原始文件名" min-width="235"/>
+       <el-table-column label="店铺名称" min-width="125"><template #default="{row}">{{shopName(row.shop_key)}}</template></el-table-column>
+       <el-table-column label="审核状态" min-width="115"><template #default="{row}">{{reviews[row.review_status||'pending']||row.review_status}}</template></el-table-column>
+       <el-table-column prop="review_note" label="当前审核意见" min-width="190" show-overflow-tooltip/>
+       <el-table-column label="操作" min-width="145"><template #default="{row}">
+        <el-button link type="primary" @click="openReview(row)">审核详情</el-button>
+        <el-button v-if="row.attachment_url" link @click="openFile(row.attachment_url)">原件</el-button>
+       </template></el-table-column>
+      </el-table>
+     </section>
+     <el-pagination v-model:current-page="reviewPage" v-model:page-size="reviewPageSize" :page-sizes="[20,50,100]" :total="filteredReviews.length" layout="total, sizes, prev, pager, next"/>
     </el-tab-pane>
     <el-tab-pane label="待补资料" name="gaps" lazy><ul><li v-for="g in report.gaps" :key="g">{{g}}</li></ul><el-button @click="router.push('/profit/monthly-billing')">查看现有订单及采购成本</el-button><el-button @click="router.push('/finance/inventory-capital')">查看库存占用明细</el-button><el-button @click="router.push({path:'/finance/payroll',query:{companyId:companyId,month:month}})">查看工资资料</el-button></el-tab-pane>
    </el-tabs>
@@ -397,11 +462,31 @@ onBeforeUnmount(()=>{costGeneration++;generation++;controller?.abort();});
    <p>原件上限20MB。平台文件选择店铺，共用费用选择公司；工资在工资管理录入。后补发票关联原业务，避免重复计费。</p>
    <p>下载指引用于查找文件；原件目录以插件记录或上传时填写的实际来源为准。</p>
   </el-dialog>
-  <el-dialog v-if="review" :model-value="true" title="会计审核意见" width="min(650px,95vw)" @close="review=null"><p>{{review.original_name}}</p><el-select v-model="review.review_status"><el-option v-for="(label,value) in reviews" :key="value" :label="label" :value="value"/></el-select><el-input v-model="review.review_note" type="textarea" :rows="5" maxlength="1000" show-word-limit placeholder="填写认可依据、需补资料或纳税调整原因"/><template #footer><el-button type="primary" :loading="busy" @click="saveReview">保存审核意见</el-button></template></el-dialog>
+  <el-dialog v-if="review" :model-value="true" title="凭证审核详情" width="min(760px,95vw)" :close-on-click-modal="!busy" :close-on-press-escape="!busy" :show-close="!busy" @close="review=null">
+   <div class="review-file">
+    <strong>{{review.original_name}}</strong>
+    <el-button v-if="review.attachment_url" link type="primary" @click="openFile(review.attachment_url)">打开原件</el-button>
+    <p>{{review.month_key}} · {{shopName(review.shop_key)}} · {{documentSource(review)}}</p>
+   </div>
+   <div class="review-editor">
+    <el-select v-model="review.review_status" aria-label="会计审核状态" :disabled="busy"><el-option v-for="(label,value) in reviews" :key="value" :label="label" :value="value"/></el-select>
+    <el-input v-model="review.review_note" type="textarea" :rows="3" maxlength="1000" show-word-limit aria-label="会计审核意见" placeholder="填写认可依据、需补资料或纳税调整原因" :disabled="busy"/>
+   </div>
+   <h2>历史审核意见</h2>
+   <el-table :data="reviewHistory" empty-text="暂无历史记录，已有意见显示在上方" max-height="290">
+    <el-table-column label="审核时间（北京时间）" min-width="165"><template #default="{row}">{{row.at?shanghaiDateTimeText(row.at):'未记录'}}</template></el-table-column>
+    <el-table-column prop="person_id" label="经办人 ID" width="95"/>
+    <el-table-column label="状态" min-width="115"><template #default="{row}">{{reviews[row.status]||row.status}}</template></el-table-column>
+    <el-table-column prop="note" label="意见" min-width="200"/>
+   </el-table>
+   <template #footer><el-button type="primary" :loading="busy" @click="saveReview">保存审核意见</el-button></template>
+  </el-dialog>
  </div>
 </template>
 
 <style scoped>
+.review-toolbar.tab-toolbar .el-select{width:174px}.review-month{margin-top:16px}.review-file strong{overflow-wrap:anywhere}.review-editor{display:grid;gap:10px}.review-editor .el-select{max-width:210px}
+
 .tab-toolbar .el-select{width:176px}.tab-toolbar :deep(.el-date-editor){width:170px}.tab-toolbar .el-input{width:190px}.tab-upload-button{margin-left:auto}.el-pagination{margin-top:14px}.category-tag{margin:3px}.upload-context{display:grid;gap:12px;padding:18px;border:1px solid var(--el-border-color);border-radius:8px}.upload-context>.el-select{width:min(100%,520px)}.missing,small{color:var(--el-text-color-secondary)}small{display:block;overflow-wrap:anywhere;margin-top:5px}.source-lines{padding:10px 20px}.source-detail{border:1px solid var(--el-border-color);padding:16px;border-radius:8px}.period-matrix{width:100%}.period-matrix :deep(.finance-group-row td){font-weight:600;background:var(--el-fill-color-light)}
 .company-statements,.company-statements>*{min-width:0;max-width:100%}
 .totals{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin:12px 0 20px}.totals>div{display:grid;gap:8px;padding:16px;border:1px solid var(--el-border-color);border-radius:8px}.totals span{color:var(--el-text-color-secondary)}.totals strong{font-size:22px;font-weight:500}
@@ -409,7 +494,11 @@ onBeforeUnmount(()=>{costGeneration++;generation++;controller?.abort();});
 </style>
 
 
-<style scoped>.download-guide{padding:10px 12px;background:var(--el-fill-color-light);border-radius:6px;line-height:1.7;overflow-wrap:anywhere;}.download-guide small{color:var(--el-text-color-secondary);}</style>
+<style scoped>
+.review-toolbar.tab-toolbar .el-select{width:174px}.review-month{margin-top:16px}.review-file strong{overflow-wrap:anywhere}.review-editor{display:grid;gap:10px}.review-editor .el-select{max-width:210px}
+.download-guide{padding:10px 12px;background:var(--el-fill-color-light);border-radius:6px;line-height:1.7;overflow-wrap:anywhere;}.download-guide small{color:var(--el-text-color-secondary);}</style>
 
 
-<style scoped>.help-icon{display:inline-flex;align-items:center;cursor:help;color:var(--el-text-color-secondary);font-size:13px;}</style>
+<style scoped>
+.review-toolbar.tab-toolbar .el-select{width:174px}.review-month{margin-top:16px}.review-file strong{overflow-wrap:anywhere}.review-editor{display:grid;gap:10px}.review-editor .el-select{max-width:210px}
+.help-icon{display:inline-flex;align-items:center;cursor:help;color:var(--el-text-color-secondary);font-size:13px;}</style>

@@ -34,6 +34,13 @@ export const FINANCE_DOCUMENT_SCHEMA=`CREATE TABLE IF NOT EXISTS finance_import_
 const fail=(message,statusCode=400)=>{throw Object.assign(new Error(message),{statusCode});};
 const id=(value,label)=>{const n=Number(value);if(!Number.isSafeInteger(n)||n<=0)fail(`请先选择${label}（${({公司:'company_id',店铺:'shop_id',企业:'tenant_id',单据:'document_id'})[label]||'id'}），在公司设置中补齐归属后重试`);return n;};
 const payload=row=>typeof row.payload_json==='string'?JSON.parse(row.payload_json):row.payload_json;
+function documentReviewHistory(doc,p){
+ const history=[...(p.review_history||[])];
+ const last=history.at(-1),note=String(doc.review_note||'');
+ if(note&&(last?.note!==note||last.status!==doc.review_status))history.push({status:doc.review_status,note});
+ return history;
+}
+
 function range(input){
  const from=validateMonth(input.from||input.month),to=validateMonth(input.to||input.month||from);
  if(to<from||Number(to.slice(0,4))-Number(from.slice(0,4))>1)fail('请选择有效月度、季度或年度范围（from/to）');
@@ -242,7 +249,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
      if(p.kind==='order-sales'&&old.month_key!==month)fail(`逐单原件已在${old.month_key}归档，与正文${month}不符，请先核对原归档记录，不能直接移动已确认凭证`,409);
      const revision=Number(old.revision||0);p.month=old.month_key;
      p.classification_history=[...(previous.classification_history||[]),{payload:previous,review_status:old.review_status,review_note:old.review_note,person_id:ctx.s.personId,at:new Date().toISOString()}];
-     p.review_history=[...(previous.review_history||[])];
+     p.review_history=documentReviewHistory(old,previous);
      if(old.review_status!=='pending')p.review_history.push({person_id:ctx.s.personId,status:'pending',note:'配套原件重新解析，须重新审核',at:new Date().toISOString()});
      const saved=await writePeriod(ctx,old.month_key,db=>db.execute("UPDATE finance_import_documents SET parse_status='preview',payload_json=?,business_key=?,review_status='pending',review_note=NULL,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND revision=?",[JSON.stringify(p),p.business_key||null,old.id,ctx.tenantId,ctx.companyId,revision]));
      if(!saved.affectedRows)fail('原件已被修改，请刷新后重新预览',409);
@@ -254,7 +261,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
      if(old.month_key!==month)fail('手工费用草稿只能在原业务月份修改，请先核对月份');
      const revision=Number(old.revision||0);
      p.preview_history=[...(previous.preview_history||[]),{manual:previous.manual,facts:previous.facts,person_id:ctx.s.personId,at:new Date().toISOString()}];
-     p.review_history=[...(previous.review_history||[])];
+     p.review_history=documentReviewHistory(old,previous);
      if(old.review_status!=='pending')p.review_history.push({person_id:ctx.s.personId,status:'pending',note:'手工草稿已修改，原审核失效，请重新审核',at:new Date().toISOString()});
      const saved=await writePeriod(ctx,month,db=>db.execute("UPDATE finance_import_documents SET payload_json=?,review_status='pending',review_note=NULL,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='preview' AND revision=?",[JSON.stringify(p),old.id,ctx.tenantId,ctx.companyId,revision]));
      if(!saved.affectedRows)fail('草稿已被其他人修改或确认，请刷新后重试',409);
@@ -266,7 +273,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
      const old=existing[0],previous=payload(old),revision=Number(old.revision||0);
      if(!p.archive_source&&previous.archive_source)p.archive_source=previous.archive_source;
      if(!p.source_location&&previous.source_location)p.source_location=previous.source_location;
-     p.previous_errors=[...(previous.previous_errors||[]),...(previous.warnings||[])];p.review_history=[...(previous.review_history||[])];
+     p.previous_errors=[...(previous.previous_errors||[]),...(previous.warnings||[])];p.review_history=documentReviewHistory(old,previous);
      if(old.review_status!=='pending')p.review_history.push({person_id:ctx.s.personId,status:'pending',note:'原件重新解析，须重新审核',at:new Date().toISOString()});
      const saved=await writePeriod(ctx,month,db=>db.execute("UPDATE finance_import_documents SET month_key=?,business_key=?,parse_status='preview',payload_json=?,review_status='pending',review_note=NULL,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='error' AND revision=?",[month,p.business_key||null,JSON.stringify(p),old.id,ctx.tenantId,ctx.companyId,revision]));
      if(!saved.affectedRows)fail('原件已被其他人重新解析或审核，请刷新后重试',409);
@@ -325,8 +332,11 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    if(!statuses.includes(input.review_status)||String(input.review_note||'').length>1000)fail('请选择凭证审核状态，并将意见限制在1000字内');
    if(input.review_status!=='pending'&&!String(input.review_note||'').trim())fail('请填写会计审核依据或补件要求（review_note），不能只修改审核状态');
    const [doc]=await query('SELECT * FROM finance_import_documents WHERE id=? AND tenant_id=? AND company_id=?',[id(input.document_id,'单据'),ctx.tenantId,ctx.companyId]);if(!doc)fail('单据不存在',404);await locked(ctx,doc.month_key);
-   const p=payload(doc);p.review_history=[...(p.review_history||[]),{person_id:ctx.s.personId,status:input.review_status,note:String(input.review_note||''),at:new Date().toISOString()}];
-   const saved=await writePeriod(ctx,doc.month_key,db=>db.execute("UPDATE finance_import_documents SET review_status=?,review_note=?,payload_json=?,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND revision=?",[input.review_status,String(input.review_note||''),JSON.stringify(p),doc.id,ctx.tenantId,ctx.companyId,Number(doc.revision||0)]));
+   const revision=Number(doc.revision||0);
+   if(input.expected_revision!=null&&Number(input.expected_revision)!==revision)fail('审核意见已被其他人修改，请关闭详情并刷新后再填写',409);
+   const p=payload(doc);
+   p.review_history=[...documentReviewHistory(doc,p),{person_id:ctx.s.personId,status:input.review_status,note:String(input.review_note||''),at:new Date().toISOString()}];
+   const saved=await writePeriod(ctx,doc.month_key,db=>db.execute("UPDATE finance_import_documents SET review_status=?,review_note=?,payload_json=?,revision=revision+1 WHERE id=? AND tenant_id=? AND company_id=? AND revision=?",[input.review_status,String(input.review_note||''),JSON.stringify(p),doc.id,ctx.tenantId,ctx.companyId,revision]));
    if(!saved.affectedRows)fail('审核意见已被其他人修改，请刷新后再填写',409);return {ok:true};
   },
   async report(input,session,{costRowsForExport=false}={}){
@@ -398,7 +408,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    addSheet('店铺费用来源',['月份','店铺ID','项目','金额','币种','原件编号','原文件名','提取位置','费用编号','工资明细编号','平台下载目录'],report.lines.map(l=>[l.month,l.shop_id,l.metric,l.amount,l.currency,l.document_id,l.original_name,l.source,l.expense_id,l.payroll_item_id,l.source_location?.path||financeDocumentLocation(l).path]));
    addSheet('凭证审核',['原件编号','月份','原文件名','显示名称','文件分类','上传类型','关联业务编号','导入状态','会计审核','审核意见'],report.documents.map(d=>[d.id,d.month_key,d.original_name,d.payload_json.display_name,(d.categories||[]).map(id=>FINANCE_FILE_CATEGORIES.find(c=>c.id===id)?.name||id).join('、'),d.payload_json.upload_type||'auto',d.payload_json.related_document_id,d.parse_status,d.review_status,d.review_note]));
    addSheet('手工草稿修改历史',['原件编号','修改时间（北京时间）','经办人ID','原项目','原金额CNY','原用途'],report.documents.flatMap(d=>(d.payload_json.preview_history||[]).map(h=>[d.id,new Date(h.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),h.person_id,h.manual?.metric,h.manual?.amount,h.manual?.note])));
-   addSheet('会计审核历史',['原件编号','审核时间（北京时间）','经办人ID','状态','意见'],report.documents.flatMap(d=>(d.payload_json.review_history||[]).map(r=>[d.id,new Date(r.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),r.person_id,r.status,r.note])));
+   addSheet('会计审核历史',['原件编号','审核时间（北京时间）','经办人ID','状态','意见'],report.documents.flatMap(d=>(d.payload_json.review_history||[]).map(r=>[d.id,r.at?new Date(r.at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}):'',r.person_id,r.status,r.note])));
    const adjustments=await reconciler.history(ctx,period);
    addSheet('逐单校准历史',['调整编号','月份','店铺ID','货件号','SKU','校准前CNY','校准后CNY','佣金原值CNY','佣金校准后CNY','确认人ID','确认时间（北京时间）','依据'],adjustments.map(r=>{const before=typeof r.before_json==='string'?JSON.parse(r.before_json):r.before_json,after=typeof r.after_json==='string'?JSON.parse(r.after_json):r.after_json;return [r.id,r.month_key,r.shop_id,r.posting_number,r.sku,before.effective?.net_revenue??before.baseline?.revenue,after.net_revenue,before.effective?.commission_fee??before.baseline?.commission,after.commission_fee,r.created_by,new Date(r.created_at).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}),r.reason];}));
    zip.file(`${base}/逐单校准历史.json`,JSON.stringify(adjustments,null,2));
