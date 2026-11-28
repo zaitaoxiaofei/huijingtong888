@@ -31,6 +31,7 @@ export function normalizeFbpReplenishmentOrder(row = {}, items = []) {
     reviewed_at: row.reviewed_at || "",
     closed_at: row.closed_at || "",
     express_tracking_number: row.express_tracking_number || "",
+    express_tracking_recorded_at: row.express_tracking_recorded_at || (row.express_tracking_number && row.shipment_confirmed_at) || "",
     shipment_confirmed_at: row.shipment_confirmed_at || "",
     items
   };
