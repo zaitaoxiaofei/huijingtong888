@@ -112,6 +112,7 @@ test("FBS and FBP feeds merge the same posting once without reverting the latest
       normalizeSyncDateTimeMysql: () => "", normalizeShanghaiDateBoundaryMysql: () => "2026-10-19T16:00:00Z",
       throwIfAbortedMysql() {}, chinaDateKeyMysql: () => "2026-10-20", markInventoryAlertSkuDailyDirtyMysql: async () => {},
       fetchOzonPostings: async () => ({ postings: [richPosting()], requests: 1 }),
+      fetchOzonFboPostings: async () => ({postings:[],requests:0}),
       fetchOzonFbpPostings: async () => ({ postings: [sparsePosting(status)], requests: 1 }),
       upsertPostingMysql: async (_shop, posting) => { written.push(posting); return { inserted: 0, updated: 1, insertedItems: 0 }; },
       mysqlExecute: async () => {}, invalidateMasterDataCache() {}
@@ -148,6 +149,9 @@ function upsertService(storage, existing, detailLookup = async () => null) {
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); return { insertId: 42 }; },
     orderLifecycleMysql: (posting) => { lifecyclePostings.push(posting); return { syncState: posting.status, finalizedAt: null, note: "synthetic" }; },
     orderCancelLossAppliesMysql: async () => false, normalizeMysqlNullableDateTime: (value) => value || null,
+    mysqlQuery: async () => [],
+    reconcileRemovedPostingItemsMysql: async () => {},
+    prepareOrderProfitFx: async () => null,
     recordOrderStatusHistoryMysql: async (_shop, posting) => { histories.push(posting); },
     resolveOrderStockLocationMysql: (posting) => { stockPostings.push(posting); return { stockLocation: "FBP", stockLocationSource: "ozon" }; },
     accrueDeliveredItemsMysql: async () => {}, isOrderInTransportMysql: () => false,

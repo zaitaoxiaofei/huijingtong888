@@ -799,6 +799,8 @@ const schemas = {
   ], { additionalProperties: false }),
 
   DateRangeSyncRequest: objectOf("Date-range sync payload.", [
+    field("posting_numbers", arrayOf(scalar("string", "Exact posting number for scoped recovery."))),
+    field("dry_run", scalar("boolean", "With posting_numbers: preview only; no order, finance or stock writes.")),
     field("from", scalar("string", "Inclusive start date in YYYY-MM-DD.", { format: "date" })),
     field("to", scalar("string", "Inclusive end date in YYYY-MM-DD.", { format: "date" })),
     field("shop_id", scalar("number", "Optional target shop identifier.")),
@@ -1489,7 +1491,7 @@ const endpoints = [
       query: [...queryFieldsFromSchema("ProfitFiltersQuery"), param("inventory", scalar("string", "Set to 1 for the inventory sales leaderboard (product/sku dimensions)."), false), param("productId", scalar("integer", "Filter inventory leaderboard details by inventory product ID."), false)],
       responses: [response(200, "application/json", arrayOf(scalar("object", "Profit ranking row."), "Ranking rows."))]
     }),
-    endpoint("GET", "/api/finance-center/document-reconciliation", "Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history.", {
+    endpoint("GET", "/api/finance-center/document-reconciliation", "Reconcile confirmed CNY order-sale originals against owned ERP shipment/SKU records and monthly sales controls. Missing values remain unknown. Includes original evidence links, overlap conflicts and append-only calibration history. settlement_links identifies order SKUs absent from this report only when scoped raw order products match quantity and platform financial payout/commission are explicitly zero, with another SKU settled on the same shipment. These are not aliases or new zero-income sales; amounts and costs remain separate and require review. Missing evidence and conflicts remain unmatched.", {
       auth: "authenticated; current-enterprise finance authority",
       query: [param("company_id", scalar("integer", "Owned company ID.")), param("shop_id", scalar("integer", "Shop assigned to the company in the selected month.")), param("month", scalar("string", "Business month YYYY-MM."))],
       responses: [response(200, "application/json", scalar("object", "rows, controls, gaps, history, summary; profit is never inferred from incomplete inputs."))]
@@ -1506,7 +1508,7 @@ const endpoints = [
       requestBody: body(scalar("object", "action: lookup, preview, confirm or review; company_id. lookup requires shop_id, month and archive_source. preview uses attachment_url from voucher-attachments, optional upload_type (auto by default), optional source_location {platform: ozon, folder_id, section}. archive_source: ozon_company_id, months, binding_token, folder_id, section, document_id, document_type, list_date, language (en/ru), sha256. Plugin preview never confirms automatically. Existing confirm/review use document_id and revision fields.")),
       responses: [response(200, "application/json", scalar("object", "lookup/preview: document or null and duplicate; parse_status preview, error or confirmed. Unsupported content is archived without inferred amounts. confirm/review: ok.")), response(409, "application/json", ref("ErrorResponse"))]
     }),
-    endpoint("GET", "/api/finance-center/document-report", "Read scoped company finance originals, registered expenses and historical procurement costs matched by official posting/SKU and sales-report month. Preview originals contribute only to the reference projection; confirmed amounts remain separate. Procurement uses saved item CNY cost, falling back to frozen unit cost; no current catalog price, purchase payment or order-date substitution. Repeated reports deduplicate; conflicts, unmatched orders, missing history and excess quantities remain unknown, not zero. Refunds alone never reverse goods cost into stock. Summaries group cost rows by shop/month; purchase_cost_details=1 returns fifty rows per cost_page, optionally filtered by cost_shop_id. Raw official order_rows are omitted from the listing, retaining order_row_count and the original attachment. No source order, inventory or accounting expense is changed.", {
+    endpoint("GET", "/api/finance-center/document-report", "Read scoped company finance originals, registered expenses and historical procurement costs matched by official posting/SKU and sales-report month. Preview originals contribute only to the reference projection; confirmed amounts remain separate. Procurement uses saved item CNY cost, falling back to frozen unit cost; no current catalog price, purchase payment or order-date substitution. Repeated reports deduplicate; conflicts, unmatched orders, missing history and excess quantities remain unknown, not zero. Refunds alone never reverse goods cost into stock. Summaries group cost rows by shop/month; purchase_cost_details=1 returns fifty rows per cost_page, optionally filtered by cost_shop_id. Unlisted settlement SKUs retain their own identity and unresolved procurement-cost timing rather than being replaced by another SKU or zeroed. Raw official order_rows are omitted from the listing, retaining order_row_count and the original attachment. No source order, inventory or accounting expense is changed.", {
       auth:"authenticated; current-enterprise finance authority",
       query:[param("company_id",scalar("integer","Company owned by the current enterprise."),true),param("from",scalar("string","Start month YYYY-MM.")),param("to",scalar("string","End month YYYY-MM.")),param("purchase_cost_details",scalar("string","1 for paged historical cost evidence.")),param("cost_page",scalar("integer","One-based page; fifty rows.")),param("cost_shop_id",scalar("integer","Optional current-company shop filter."))],
       responses:[response(200,"application/json",objectOf("Company report, collected_summary, purchase_cost coverage/issues and optional details."))]
@@ -2433,7 +2435,7 @@ const endpoints = [
     })
   ]),
   section("Synchronization", [
-    endpoint("POST", "/api/sync/ozon", "Run a full Ozon order synchronization for a requested date window.", {
+    endpoint("POST", "/api/sync/ozon", "Run an enterprise-scoped FBS, FBP and cursor-paged FBO order synchronization. FBO identity/items are imported transactionally and idempotently, preserving platform fulfillment; no local outbound, procurement, profit calculation or finance accrual is created. Missing historical costs remain pending. Exact posting lookup falls back to FBO only for an unknown-posting FBS 404. With posting_numbers, dry_run=true returns a read-only recovery preview before any writes.", {
       auth: "authenticated",
       requestBody: body(ref("DateRangeSyncRequest"), false),
       responses: [response(200, "application/json", scalar("object", "Order sync result summary."))]
