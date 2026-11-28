@@ -754,6 +754,7 @@ async function ensureFbpReplenishmentSchemaMysql() {
       reviewed_at DATETIME NULL,
       closed_at DATETIME NULL,
       express_tracking_number VARCHAR(128) NULL,
+      express_tracking_recorded_at DATETIME NULL,
       shipment_confirmed_at DATETIME NULL,
       UNIQUE KEY uk_fbp_replenishment_order_no (order_no),
       KEY idx_fbp_replenishment_shop_date (shop_id, order_date),
@@ -824,6 +825,7 @@ async function ensureFbpReplenishmentSchemaMysql() {
   const schemaUpdates = [
     "ALTER TABLE fbp_replenishment_orders ADD COLUMN order_date DATE NULL AFTER shop_id",
     "ALTER TABLE fbp_replenishment_orders ADD COLUMN express_tracking_number VARCHAR(128) NULL",
+    "ALTER TABLE fbp_replenishment_orders ADD COLUMN express_tracking_recorded_at DATETIME NULL",
     "ALTER TABLE fbp_replenishment_orders ADD COLUMN shipment_confirmed_at DATETIME NULL",
     "ALTER TABLE fbp_replenishment_orders ADD KEY idx_fbp_replenishment_shop_date (shop_id, order_date)",
     "ALTER TABLE fbp_replenishment_order_items ADD COLUMN fbp_transfer_in_transit_qty INT NOT NULL DEFAULT 0 AFTER fbp_available",
@@ -6618,8 +6620,12 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
   await ensureStockLocationSchemaMysql();
   const id = Number(body.id || body.order_id || body.orderId || 0);
   const status = String(body.status || "").trim();
+  const saveTracking = body.action === "save_tracking";
+  const trackingNumber = String(body.express_tracking_number ?? "").trim();
+  if (saveTracking && !trackingNumber) throw new Error("请填写快递单号后再保存。");
+  if ((saveTracking || status === "sent") && trackingNumber.length > 128) throw new Error("快递单号最多可填写 128 个字符。");
   const allowed = new Set(["draft", "pending_review", "approved", "rejected", "sent", "ozon_created", "completed", "cancelled"]);
-  if (!id || !allowed.has(status)) throw new Error("备货单状态不正确。");
+  if (!id || (!saveTracking && !allowed.has(status))) throw new Error("备货单状态不正确。");
   const note = String(body.note || "").trim();
   const fields = ["status = ?", "updated_at = CURRENT_TIMESTAMP"];
   const params = [status];
@@ -6633,13 +6639,17 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
     params.push(userId || null);
   }
   if (["completed", "cancelled"].includes(status)) fields.push("closed_at = CURRENT_TIMESTAMP");
-  const trackingNumber = String(body.express_tracking_number ?? "").trim();
   if (status === "sent") {
-    if (trackingNumber.length > 128) throw new Error("快递单号最多可填写 128 个字符，请在确认发货窗口核对。");
-    fields.push("express_tracking_number = ?", "shipment_confirmed_at = CURRENT_TIMESTAMP");
-    params.push(trackingNumber || null);
+    fields.push("shipment_confirmed_at = CURRENT_TIMESTAMP");
+    if (trackingNumber) {
+      // Older clients can still submit a number with dispatch. A saved number takes precedence.
+      fields.push("express_tracking_recorded_at = IF(express_tracking_number IS NULL, CURRENT_TIMESTAMP, express_tracking_recorded_at)",
+        "express_tracking_number = COALESCE(express_tracking_number, ?)");
+      params.push(trackingNumber);
+    }
   }
   params.push(id);
+  let trackingResult;
   let approvalResult = { transferCount: 0, outboundQuantity: 0 };
   const shopScope = tenantShopPredicateMysql("s", defaultTenant);
   await withMysqlTransaction(async (connection) => {
@@ -6647,7 +6657,18 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
       JOIN shops s ON s.id = o.shop_id
       WHERE o.id = ? AND s.status != 'deleted' AND ${shopScope} LIMIT 1 FOR UPDATE`, [id, normalizedTenantId]);
     if (!order) throw new Error("备货单不存在或不属于当前企业。");
-    if (String(order.status || "") === "approved" && ["draft", "pending_review", "rejected"].includes(status)) {
+    const currentStatus = String(order.status || "");
+    if (saveTracking) {
+      if (!["approved", "ozon_created"].includes(currentStatus)) throw new Error("只能为待发货的备货单填写快递单号，请刷新后核对。");
+      if (trackingNumber !== order.express_tracking_number) {
+        await connection.execute(`UPDATE fbp_replenishment_orders
+          SET express_tracking_number = ?, express_tracking_recorded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`, [trackingNumber, id]);
+      }
+      trackingResult = { ok: true, id, status: currentStatus, express_tracking_number: trackingNumber };
+      return;
+    }
+    if (currentStatus === "approved" && ["draft", "pending_review", "rejected"].includes(status)) {
       throw new Error("备货单已通过并预留本地库存，不能退回为未审核状态。");
     }
     if (status === "cancelled" && ["sent", "ozon_created", "completed"].includes(String(order.status || ""))) {
@@ -6664,12 +6685,11 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
       if (order.created_by != null) applicantIds.add(Number(order.created_by || 0));
       if (applicantIds.has(Number(userId))) throw new Error("申请人不能审核通过自己的 FBP 备货单，请由其他同事审核。");
     }
-    const currentStatus = String(order.status || "");
     if (status === "sent") {
       if (currentStatus === "sent") return;
       if (!["approved", "ozon_created"].includes(currentStatus)) throw new Error("备货单当前状态无法确认发货，请刷新后核对。");
-      if (!trackingNumber && body.confirm_without_tracking !== true) {
-        throw new Error("未填写快递单号（express_tracking_number）。请在确认发货窗口填写，或确认无单号发货。");
+      if (!order.express_tracking_number && !trackingNumber && body.confirm_without_tracking !== true) {
+        throw new Error("未填写快递单号（express_tracking_number）。请点击“填写快递单号”，或确认无单号发货。");
       }
     }
     if (status === "completed") {
@@ -6693,7 +6713,7 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
     }
   });
   invalidateFbpPlanningCachesMysql();
-  return { ok: true, id, status, ...approvalResult };
+  return trackingResult || { ok: true, id, status, ...approvalResult };
 }
 
 const FBP_TRANSFER_STATUSES = new Set(["draft", "sent", "in_transit", "received", "listed", "exception", "closed", "cancelled"]);

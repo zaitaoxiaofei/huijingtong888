@@ -21,7 +21,7 @@ const dateRange = computed({
 });
 </script>
 <template>
-  <section class="inventory-toolbar inventory-search-toolbar" :class="{'is-compact-search':compactSearch,'has-secondary':!!$slots.secondary}" aria-label="库存搜索">
+  <section class="inventory-toolbar inventory-search-toolbar" :class="{'is-compact-search':compactSearch,'has-secondary':!!$slots.secondary,'has-right':!!$slots.right}" aria-label="库存搜索">
     <el-form label-position="top" class="inventory-search-form" @submit.prevent="emit('search')">
       <div class="inventory-search-fields">
         <slot v-if="compactSearch" />
@@ -55,7 +55,7 @@ const dateRange = computed({
         <slot name="actions" />
       </div>
 
-      <div v-if="compactSearch&&$slots.right" class="inventory-toolbar-right"><slot name="right"/></div>
+      <div v-if="$slots.right" class="inventory-toolbar-right"><slot name="right"/></div>
       <div v-if="$slots.secondary" class="inventory-toolbar-secondary"><slot name="secondary"/></div>
     </el-form>
   </section>
@@ -66,6 +66,7 @@ const dateRange = computed({
 .is-compact-search .inventory-search-fields{flex:0 1 auto;flex-wrap:nowrap}.is-compact-search .inventory-search-fields :deep(.search-keyword){width:190px;flex:none}.is-compact-search .inventory-search-form{align-items:flex-end;flex-wrap:nowrap}.inventory-toolbar-right{display:flex;align-items:center;gap:8px;margin-left:auto;white-space:nowrap}.inventory-precise-fields :deep(.inventory-structured-search){display:flex;flex-wrap:wrap;gap:10px}.inventory-precise-fields :deep(.search-group){display:contents}.inventory-precise-fields :deep(.el-form-item){width:190px}.inventory-precise-fields :deep(.el-select){width:100%}@media(max-width:1250px){.is-compact-search .inventory-search-form{flex-wrap:wrap}.inventory-toolbar-right{flex-wrap:wrap;white-space:normal}}
 .inventory-search-toolbar { position: static; min-width: 0; padding: 12px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-search-form { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.has-right .inventory-search-form { align-items: flex-end; }
 .inventory-search-fields { display: flex; flex: 1 1 650px; flex-wrap: wrap; gap: 8px; min-width: 0; align-items: flex-end; }
 .inventory-search-fields :deep(.el-form-item) { margin: 0; width: 96px; min-width: 0; }
 .inventory-search-fields :deep(.el-form-item__label) { height: auto; margin-bottom: 3px; font-size: 12px; line-height: 16px; }
@@ -84,6 +85,7 @@ const dateRange = computed({
   .inventory-search-fields :deep(.el-form-item) { width: 100%; }
   .inventory-search-fields :deep(.search-keyword), .inventory-search-fields :deep(.search-dates) { grid-column: 1 / -1; width: 100%; max-width: none; }
   .inventory-search-actions { width: 100%; }
+  .has-right .inventory-search-actions { width: auto; }
 }
 @media (min-width: 1200px) {
   .is-compact-search.has-secondary .inventory-search-fields{flex-wrap:nowrap}

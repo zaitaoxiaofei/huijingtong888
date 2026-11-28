@@ -38,11 +38,19 @@ test('real FBS-first allocation, approved FBP demand, shipment protection and co
   });
   await t.test('confirmed bundle dispatch posts physical child consumption, and the next FBP shipment cannot take remaining FBS stock',async()=>{
    await assert.rejects(api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent'},2,2), /未填写快递单号/);
-   await api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent',express_tracking_number:'  SF123456  '},2,2);
+   await api.updateFbpReplenishmentOrderStatusMysql({id:79,action:'save_tracking',express_tracking_number:'  SF123456  '},2,2);
+   const saved=(await api.fbpReplenishmentOrdersMysql({orderId:79},2)).rows[0];
+   assert.equal(saved.status,'approved');
+   assert.equal(saved.express_tracking_number,'SF123456');
+   assert.ok(saved.express_tracking_recorded_at);
+   assert.equal(saved.shipment_confirmed_at,'');
+   assert.equal(await stock(),17);
+   await api.updateFbpReplenishmentOrderStatusMysql({id:79,status:'sent'},2,2);
    assert.equal(await stock(),7);
    const shipment=(await api.fbpReplenishmentOrdersMysql({orderId:79},2)).rows[0];
    assert.equal(shipment.express_tracking_number,'SF123456');
    assert.ok(shipment.shipment_confirmed_at);
+   assert.deepEqual(shipment.express_tracking_recorded_at,saved.express_tracking_recorded_at);
    const sent=await q("SELECT product_id,quantity_delta FROM inventory_movements WHERE source_type='fbp_transfer_outbound'");assert.deepEqual(sent.map(r=>[Number(r.product_id),Number(r.quantity_delta)]),[[200,-10]]);
    const before=await counts();await assert.rejects(api.updateFbpReplenishmentOrderStatusMysql({id:83,status:'sent',confirm_without_tracking:true},2,2),/可发仓 3 件/);assert.deepEqual(await counts(),before);assert.equal((await q('SELECT status FROM fbp_replenishment_orders WHERE id=83'))[0].status,'approved');
    invalidateOrderProcurementCoverage();const [s]=await state();assert.equal(s.supply_plan.required_fbs,0);assert.equal(s.supply_plan.formal_fbp_quantity,5);assert.equal(s.supply_plan.required_fbp,2);assert.equal(s.supply_plan.fbp_in_transit_quantity,10);
