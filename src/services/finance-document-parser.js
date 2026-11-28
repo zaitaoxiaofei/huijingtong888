@@ -67,11 +67,11 @@ function documentMonth(text) {
   if(m)return {from:`${m[3]}-${m[2]}`,to:`${m[3]}-${m[2]}`};
   return null;
 }
-export async function parseFinanceDocument(buffer,name,{month,crossMonthCash=false}={}) {
-  if(!crossMonthCash)validateMonth(month);
+export async function parseFinanceDocument(buffer,name,{month,crossMonthCash=false,inferMonth=false,ozonOnly=false}={}) {
+  if(!crossMonthCash&&!inferMonth)validateMonth(month);
   if(crossMonthCash&&!/\.xlsx$/i.test(name))fail("连连跨月流水请上传原始 XLSX");
   if(!Buffer.isBuffer(buffer)||!buffer.length||buffer.length>20*1024*1024)fail('文件为空或超过20MB，请检查上传原件');
-  if(/\.json$/i.test(name))return parseOrderSalesJson(buffer,{month});
+  if(/\.json$/i.test(name))return parseOrderSalesJson(buffer,{month,inferMonth});
   const {text:original,rows,scanned}=await extract(buffer,name);const text=original.replace(/\u00a0/g,' '),flat=text.replace(/\s+/g,' ');
   const result={version:PARSER_VERSION,sha256:crypto.createHash('sha256').update(buffer).digest('hex'),kind:'support',month,period:documentMonth(flat),currency:null,document_number:null,facts:[],cash:[],warnings:[],controls:[],buyer_tax_number:null};
   result.buyer_tax_number=flat.match(/\b(9[0-9A-Z]{17})\b/)?.[1]||null;
@@ -81,6 +81,7 @@ export async function parseFinanceDocument(buffer,name,{month,crossMonthCash=fal
     result.kind='platform-payments';const header=rows.findIndex(r=>r?.includes('Payment type'));
     for(let i=header+1;i<rows.length;i++){const r=rows[i];if(r?.[3]!=='Paid')continue;const m=String(r[5]).match(/^(\d{2})\.(\d{2})\.(20\d{2})$/);if(!m)fail('平台付款日期格式变化，请核实付款报告');result.cash.push({type:'platform-payment',date:`${m[3]}-${m[2]}-${m[1]}`,currency:'CNY',amount:rounded(amount(r[2])),reference:String(r[7]||''),source:`第${i}行`});}
   }else if(/连连跨境支付(?:入账|提现)记录查询/.test(flat)&&rows.length){
+    if(ozonOnly)throw Object.assign(new Error('连连原件请到结算回款上传'),{statusCode:400,code:'FINANCE_CASH_UPLOAD_ROUTE'});
     result.kind='collection-cash';
     const isEntry=flat.includes('入账记录查询');
     const header=rows.findIndex(r=>r?.includes(isEntry?'创建日期':'批次单号'));if(header<0)fail('连连表格缺少交易明细表头');
@@ -149,6 +150,13 @@ export async function parseFinanceDocument(buffer,name,{month,crossMonthCash=fal
     result.kind='foreign-invoice';result.document_number=flat.match(/ЗВ\s*-\s*\d+/)?.[0]?.replace(/\s/g,'');result.warnings.push('境外发票仅补证；与同号服务书对应，RUB和CNY不得重复累加，汇率及VAT口径待核');
   }
   if(crossMonthCash&&result.kind!=='collection-cash')fail('请选择连连入账或提现原始文件');
+  if(inferMonth&&!month){
+    const paymentMonths=new Set(result.cash.filter(row=>row.type==='platform-payment').map(row=>row.date.slice(0,7)));
+    if(result.period?.from&&result.period.from===result.period.to)month=result.period.from;
+    else if(!result.period&&paymentMonths.size===1)month=[...paymentMonths][0];
+    if(!month)return result;
+    result.month=validateMonth(month);
+  }
   if(result.facts.length&&result.period&&(result.period.from!==month||result.period.to!==month))fail(`文件正文期间为${result.period.from}至${result.period.to}，与所选业务月份${month}不同，请切换正确月份`);
   if(result.facts.length&&!result.period)fail('无法识别正文业务期间（month），请提供完整原始文件，不能只按文件名入账');
   if(!result.document_number&&result.facts.length)fail('无法识别业务单据编号，停止自动入账，避免重复计费');

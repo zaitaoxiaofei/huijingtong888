@@ -174,10 +174,14 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
   async preview(input,session){
    const ctx=await company(input,session),shop=Number(input.shop_id||0);
    const uploadType=String(input.upload_type||'auto'),crossMonthCash=uploadType==='collection-cash'&&!input.month;
-   let month=crossMonthCash?undefined:validateMonth(input.month);
+   const ozonArchive=input.upload_channel==='ozon-archive';
+   const inferMonth=ozonArchive&&!input.month;
+   const sourceLocation=normalizeFinanceSourceLocation(input.source_location);
+   if(ozonArchive&&(!sourceLocation||!shop||uploadType!=='auto'||input.archive_source||input.related_document_id))fail('请选择 Ozon 平台目录和实际店铺');
+   let month=crossMonthCash||inferMonth?undefined:validateMonth(input.month);
    if(crossMonthCash&&(shop||input.related_document_id||input.archive_source))fail('连连跨月流水请选择公司共用并上传独立原件');
    if(!Number.isSafeInteger(shop)||shop<0)fail('店铺shop_id无效，请重新选择店铺或公司共用');
-   if(shop&&!(await shopsFor(ctx,{from:month,to:month})).some(s=>Number(s.id)===shop))fail('所选店铺在该月不属于当前公司，请先检查公司与店铺归属',403);
+   if(shop&&month&&!(await shopsFor(ctx,{from:month,to:month})).some(s=>Number(s.id)===shop))fail('所选店铺在该月不属于当前公司，请先检查公司与店铺归属',403);
    if(month)await locked(ctx,month);await ready();
    await files.owned(input.attachment_url,ctx.s,'finance');const file=await files.read(input.attachment_url,ctx.s);
    const source=await validateSource(input,ctx,crypto.createHash('sha256').update(file.buffer).digest('hex'));
@@ -186,7 +190,6 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    if(!type)fail('请选择有效上传类型（upload_type），再选择对应原件');
    if(type.shop&&!shop)fail('此类平台文件必须选择实际店铺（shop_id），不能归公司共用');
    if(type.shared&&shop)fail('连连流水请选择公司共用（shop_id=0），避免多个店铺重复入账');
-   const sourceLocation=normalizeFinanceSourceLocation(input.source_location);
    const displayName=String(input.display_name||'').trim();if(displayName.length>180)fail('中文显示名称（display_name）不能超过180字');
    let linked=null;
    if(input.related_document_id){
@@ -208,16 +211,23 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
       p.warnings.push('仅记录本次业务一次；后补发票选择“仅归档”并关联本单。采购支出、设备购置、预付押金不直接算费用。');
      }
     }else{
-     p=await parse(file.buffer,file.row.original_name,{month,crossMonthCash});
+     p=await parse(file.buffer,file.row.original_name,{month,crossMonthCash,inferMonth,ozonOnly:ozonArchive});
      if(crossMonthCash)month=validateMonth(p.month);
      if(type.kinds&&!type.kinds.includes(p.kind))fail('所选上传类型与文件正文不匹配，请按预览结果重新选择类型；不按文件名猜测金额');
     }
+    if(ozonArchive&&p.kind==='collection-cash')fail('连连原件请到结算回款上传');
     if(p.kind==='order-sales'&&!ctx.c.tax_number)fail('公司税号尚未配置，请在公司与店铺设置中补齐后上传逐单销售凭证');
     if(p.kind==='collection-cash'&&String(p.account_company_name||'').replace(/\s/g,'')!==String(ctx.c.name||'').replace(/\s/g,''))fail('连连导出抬头与所选公司名称不一致，请选择正确营业主体或核对公司设置');
     if(p.kind==='collection-cash'&&shop)fail('连连流水属于公司共用账户，请选择“公司共用”上传，避免三店重复导入');
     if((p.facts.length||p.kind==='order-sales')&&!shop&&uploadType!=='manual-expense')fail('平台销售与费用需要明确店铺（shop_id），请选择实际店铺后重试');
     if(p.buyer_tax_number&&ctx.c.tax_number&&p.buyer_tax_number!==ctx.c.tax_number)fail('文件购买方税号与所选公司不符，请核对公司主体');
-   }catch(e){if(crossMonthCash)throw e;status='error';p={facts:[],cash:[],controls:[],warnings:[e.message],kind:'unparsed',month};}
+   }catch(e){if(crossMonthCash||inferMonth||e.code==='FINANCE_CASH_UPLOAD_ROUTE'||(ozonArchive&&p?.kind==='collection-cash'))throw e;status='error';p={facts:[],cash:[],controls:[],warnings:[e.message],kind:'unparsed',month};}
+   if(inferMonth){
+    if(!p.month)fail('待确认月份：无法从原件确定唯一业务月份，请选择月份后重试');
+    month=validateMonth(p.month);
+    if(!(await shopsFor(ctx,{from:month,to:month})).some(s=>Number(s.id)===shop))fail('所选店铺在识别出的业务月份不属于当前公司',403);
+    await locked(ctx,month);
+   }
    if(crossMonthCash)ctx.cashMonths=p.cash.map(row=>row.date.slice(0,7));
    if(source)p.archive_source=source;
    if(sourceLocation)p.source_location=sourceLocation;
