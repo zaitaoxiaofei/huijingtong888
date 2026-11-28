@@ -623,7 +623,7 @@ test('order-date bulk backfills allow partial quantities only within same-date s
 test('bundle ledger reads share one fresh coverage projection per group and preserve per-product revisions',async()=>{
  const groups=[];const f=fixture(false,{coverageBatch:async(_run,ids,tenant)=>{groups.push({ids:[...ids],tenant});return new Map();}});
  const rows=await f.service.readMany([10,11],1);
- assert.deepEqual(rows.map(r=>r.product.id),[10,11]);assert.equal(groups.length,1);assert.equal(f.coverageProducts.length,0);
+ assert.deepEqual(rows.map(r=>r.product.id),[10,11]);assert.equal(groups.length,1);assert.equal(f.coverageProducts.length,0);assert.ok(rows.every(r=>!('source_inference' in r)),'conversion stock snapshots skip unused historical suggestion work');
  for(const row of rows)assert.equal(row.revision,(await f.service.read({product_id:row.product.id},1)).revision);
  await f.service.readMany([10,11],1);assert.equal(groups.length,2,'a second request must recompute instead of reusing stale coverage');
 });

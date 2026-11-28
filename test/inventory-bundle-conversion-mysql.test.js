@@ -85,6 +85,7 @@ test('bundle conversion conserves parts, starts at zero, rejects occupied stock 
    await q("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku,active) VALUES(900,2,90,900,'OTHER-KIT',1)");
    await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(900,90,'OTHER-ORDER','awaiting_packaging',UTC_TIMESTAMP())");
    await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(900,900,900,'OTHER-KIT',3,10)");
+   const sibling=await context(202);await legacy.applyInventoryBundleConversionMysql({...input(sibling,'assemble',1),product_id:202},owner);
    const c=await context();const ids=[200,...c.components.map(p=>p.product_id)];
    for(const id of ids){const full=await legacy.procurementLedgerMysql({product_id:id,include_fbp:false},2),part=c.components.find(p=>p.product_id===id);assert.equal(part?part.physical_stock:c.finished_physical,full.physical_estimate);assert.equal(part?part.available_stock:c.finished_available,full.available_estimate);if(part)assert.equal(part.revision,full.revision);}
    const {loadOrderProcurementCoverage}=await import('../src/services/mysql-order-procurement-coverage.js');let demandSql='';
