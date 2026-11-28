@@ -1,3 +1,4 @@
+import { PAYOUT_ATTRIBUTION_SCHEMA, matchFinancePayouts, payoutEvidenceKey, summarizePayoutAttributions } from './finance-payout-attribution.js';
 import {approvedH1Report} from './billing-approved-h1.js';
 import {readCompanyPurchaseCosts,summarizePurchaseCostLines} from './company-purchase-costs.js';
 import {financeDocumentLocation,normalizeFinanceSourceLocation} from '../shared/finance-document-locations.js';
@@ -59,20 +60,19 @@ export function summarizeImportedDocuments(documents,period=null,{includePreview
  }
  const dedup=deduplicateFinanceCash(cash);return {metrics,lines,cash:dedup.cash,cash_duplicates:dedup.duplicates,cash_conflicts:dedup.conflicts};
 }
-export function reconcileImportedCash(documents,{from,to}){
+export function reconcileImportedCash(documents,{from,to},attributions=[]){
  const summary=summarizeImportedDocuments(documents),cash=summary.cash;
  const inPeriod=r=>String(r.date).slice(0,7)>=from&&String(r.date).slice(0,7)<=to;
  const cash_duplicates=summary.cash_duplicates.filter(c=>c.sources.some(inPeriod)),cash_conflicts=summary.cash_conflicts.filter(c=>c.sources.some(inPeriod));
  const rows=cash.filter(r=>['entry','withdrawal'].includes(r.type)&&String(r.date).slice(0,7)>=from&&String(r.date).slice(0,7)<=to);
  const currencies=[...new Set(rows.map(r=>r.currency))];
- const payments=cash.filter(r=>r.type==='platform-payment'&&String(r.date).slice(0,7)>=from&&String(r.date).slice(0,7)<=to);
- const conflictEntries=new Set(cash_conflicts.filter(c=>c.sources.some(s=>s.type==='entry')).map(c=>c.reference));
- const entries=cash.filter(r=>r.type==='entry'&&!conflictEntries.has(r.reference));const used=new Set();
- const matches=payments.map(payment=>{
-  const candidates=entries.filter((entry,i)=>!used.has(i)&&payment.currency==='CNY'&&entry.currency==='CNH'&&Math.abs(entry.amount-payment.amount)<0.005&&Math.abs(Date.parse(String(entry.date).slice(0,10)+'T00:00:00Z')-Date.parse(payment.date+'T00:00:00Z'))<=4*86400000);
-  if(candidates.length!==1)return {payment,status:candidates.length?'ambiguous':'unmatched',entry:null};
-  const entry=candidates[0];used.add(entries.indexOf(entry));return {payment,entry,status:'amount_date_candidate',note:'仅金额和日期候选匹配，需确认账户及店铺归属；不据此认定汇兑为零'};
- });
+ const allPayments=cash.filter(r=>r.type==='platform-payment');
+ const payments=allPayments.filter(inPeriod);
+ const conflictEntries=new Set(summary.cash_conflicts.filter(c=>c.sources.some(s=>s.type==='entry')).map(c=>c.reference));
+ const entries=cash.filter(r=>r.type==='entry'&&!Number(r.shop_id)&&!conflictEntries.has(r.reference));
+ const allMatches=matchFinancePayouts(allPayments,entries,attributions);
+ const matches=allMatches.filter(row=>inPeriod(row.entry||row.payment));
+ const shopEntries=summarizePayoutAttributions(rows,allMatches);
  const monthly=[];
  for(const month of [...new Set(rows.map(row=>row.date.slice(0,7)))].sort()){
   const events=rows.filter(row=>row.date.startsWith(month));
@@ -88,13 +88,13 @@ export function reconcileImportedCash(documents,{from,to}){
  }
  const shopPayments=[];
  for(const shopId of new Set(payments.map(row=>Number(row.shop_id)).filter(Boolean))){
-  const own=matches.filter(row=>Number(row.payment.shop_id)===shopId);
+  const own=allMatches.filter(row=>Number(row.payment.shop_id)===shopId&&inPeriod(row.payment));
   for(const currency of new Set(own.map(row=>row.payment.currency))){
    const selected=own.filter(row=>row.payment.currency===currency);
    shopPayments.push({shop_id:shopId,currency,payment_count:selected.length,amount:rounded(selected.reduce((n,row)=>n+row.payment.amount,0)),candidate_count:selected.filter(row=>row.entry).length});
   }
  }
- return {monthly,shop_payments:shopPayments,matches,duplicates:cash_duplicates,conflicts:cash_conflicts,currencies:currencies.map(currency=>{
+ return {monthly,shop_entries:shopEntries,shop_payments:shopPayments,matches,duplicates:cash_duplicates,conflicts:cash_conflicts,currencies:currencies.map(currency=>{
   const selected=rows.filter(r=>r.currency===currency),entries=selected.filter(r=>r.type==='entry'),withdrawals=selected.filter(r=>r.type==='withdrawal');
   const conflict=cash_conflicts.some(c=>c.sources.some(s=>s.currency===currency));
   const unknownFees=withdrawals.some(r=>r.fee==null);
@@ -103,7 +103,7 @@ export function reconcileImportedCash(documents,{from,to}){
 }
 export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExecute,files=tenantPrivateFiles,authorize=authorizeBusinessTaskSession,parse=parseFinanceDocument,transaction=mysqlTransaction,validateSource=validateArchiveSource,readPurchaseCosts=readCompanyPurchaseCosts,readMonthlyRealization=async(shop,options)=>(await import('../ozonClient.js')).fetchOzonMonthlyRealization(shop,options)}={}){
  let schema;
- async function ready(){if(!schema)schema=execute(FINANCE_DOCUMENT_SCHEMA).catch(e=>{schema=null;throw e;});await schema;}
+ async function ready(){if(!schema)schema=execute(FINANCE_DOCUMENT_SCHEMA).then(()=>execute(PAYOUT_ATTRIBUTION_SCHEMA)).catch(e=>{schema=null;throw e;});await schema;}
  async function actor(session){const s=await authorize(session);assertBusinessTaskPermission(s,'finance');return s;}
  async function company(input,session){
   const s=await actor(session),companyId=id(input.company_id,'公司'),tenantId=id(s.tenant.id,'企业');
@@ -120,6 +120,9 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
   const rows=await reader(`SELECT * FROM finance_import_documents WHERE tenant_id=? AND company_id=? AND ((month_key>=? AND month_key<=?) OR (shop_key=0 AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='collection-cash') OR JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.kind'))='platform-payments')${lock?' FOR SHARE':''}`,[ctx.tenantId,ctx.companyId,period.from,period.to]);
   // Sorting full JSON payloads in MySQL can exhaust sort_buffer_size after source archival.
   return rows.sort((a,b)=>String(a.month_key).localeCompare(String(b.month_key))||Number(a.id)-Number(b.id));
+ }
+ async function payoutAttributions(ctx,reader=query){
+  return reader('SELECT entry_reference,payment_document_id,payment_source,shop_id FROM finance_payout_attributions WHERE tenant_id=? AND company_id=?',[ctx.tenantId,ctx.companyId]);
  }
  async function locked(ctx,month){
   const closed=await query(`SELECT id FROM finance_periods WHERE company_id=? AND month_key=? AND status='closed' AND (tenant_id=? OR (?=1 AND tenant_id IS NULL))`,[ctx.companyId,month,ctx.tenantId,ctx.s.tenant.slug==='default'?1:0]);
@@ -277,6 +280,36 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const saved=await writePeriod(ctx,doc.month_key,db=>db.execute("UPDATE finance_import_documents SET parse_status='confirmed',confirmed_by=?,confirmed_at=UTC_TIMESTAMP() WHERE id=? AND tenant_id=? AND company_id=? AND parse_status='preview' AND revision=?",[ctx.s.personId,doc.id,ctx.tenantId,ctx.companyId,revision]));
    if(!saved.affectedRows&&doc.parse_status==='preview')fail('单据已被修改或确认，请刷新后重新检查',409);return {ok:true};
   },
+  async confirmPayouts(input,session){
+   const ctx=await company(input,session),period=range(input);
+   if(!Array.isArray(input.matches)||!input.matches.length||input.matches.length>500)fail('请选择 1 至 500 笔回款');
+   const requested=new Map();
+   for(const row of input.matches){
+    const reference=row?.entry_reference,source=row?.payment_source;
+    if(typeof reference!=='string'||!reference||reference.length>191||typeof source!=='string'||!source||source.length>80||requested.has(reference))fail('回款交易号或付款凭证明细无效或重复');
+    requested.set(reference,payoutEvidenceKey({document_id:id(row.payment_document_id,'单据'),source}));
+   }
+   await ready();
+   return transaction(async db=>{
+    await db.query('SELECT id FROM finance_companies WHERE id=? FOR UPDATE',[ctx.companyId]);
+    const documents=await getDocs(ctx,period,db.query,true),saved=await payoutAttributions(ctx,db.query);
+    const matches=reconcileImportedCash(documents,period,saved).matches;
+    const eligible=new Map(matches.filter(m=>['confirmed','amount_date_candidate'].includes(m.status))
+     .map(m=>[String(m.entry.reference),m]));
+    const additions=[];
+    for(const [reference,evidence] of requested){
+     const match=eligible.get(reference);
+     if(!match||payoutEvidenceKey(match.payment)!==evidence)fail('回款或付款凭证已变化，或匹配不唯一，请刷新后核对',409);
+     if(match.status==='amount_date_candidate')additions.push([reference,match.payment]);
+    }
+    for(const [reference,payment] of additions){
+     await db.execute(`INSERT INTO finance_payout_attributions
+      (tenant_id,company_id,entry_reference,payment_document_id,payment_source,shop_id,confirmed_by,confirmed_at)
+      VALUES (?,?,?,?,?,?,?,UTC_TIMESTAMP())`,[ctx.tenantId,ctx.companyId,reference,payment.document_id,payment.source,payment.shop_id,ctx.s.personId]);
+    }
+    return {confirmed:additions.length,already_confirmed:requested.size-additions.length};
+   });
+  },
   async review(input,session){
    const ctx=await company(input,session);const statuses=['pending','accepted','needs_info','adjustment'];
    if(!statuses.includes(input.review_status)||String(input.review_note||'').length>1000)fail('请选择凭证审核状态，并将意见限制在1000字内');
@@ -340,7 +373,7 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    const detailRows=purchaseCosts.reference.lines.filter(l=>!input.cost_shop_id||Number(l.shop_id)===Number(input.cost_shop_id)),costPage=Math.max(1,Math.floor(Number(input.cost_page)||1));
    const purchaseCostReport={...purchaseCosts.reference,lines:summarizePurchaseCostLines(purchaseCosts.reference.lines),issues:purchaseCosts.reference.issues.slice(0,100),issue_count:purchaseCosts.reference.issues.length};
    if(input.purchase_cost_details==='1'||costRowsForExport)purchaseCostReport.details={rows:costRowsForExport?detailRows:detailRows.slice((costPage-1)*50,costPage*50),total:detailRows.length,page:costPage};
-   return {purchase_cost:purchaseCostReport,collected_summary:{metrics:collected.metrics,lines:collected.lines,matrix:financeMatrix(collected.lines,year,mode),pending_documents:documents.filter(d=>d.parse_status==='preview'&&(payload(d).facts||[]).length).length,error_documents:documents.filter(d=>d.parse_status==='error').length},matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>{const p=payload(d);return {...d,payload_json:p.kind==='order-sales'?{...p,order_rows:undefined,order_row_count:p.order_rows?.length||0}:p,categories:financeDocumentCategories(d)};}),...summary,cash_reconciliation:reconcileImportedCash(documents,period),coverage:{shops_expected:shops.length,shops_with_sales:parsedCovered.size,shops_with_confirmed_sales:covered.size,company_complete:false},gaps:['参考汇总含已解析待核对资料；已确认金额另列，不与订单利润或月度账单再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
+   return {purchase_cost:purchaseCostReport,collected_summary:{metrics:collected.metrics,lines:collected.lines,matrix:financeMatrix(collected.lines,year,mode),pending_documents:documents.filter(d=>d.parse_status==='preview'&&(payload(d).facts||[]).length).length,error_documents:documents.filter(d=>d.parse_status==='error').length},matrix:financeMatrix(summary.lines,year,mode),company:ctx.c,period,shops,documents:documents.map(d=>{const p=payload(d);return {...d,payload_json:p.kind==='order-sales'?{...p,order_rows:undefined,order_row_count:p.order_rows?.length||0}:p,categories:financeDocumentCategories(d)};}),...summary,cash_reconciliation:reconcileImportedCash(documents,period,await payoutAttributions(ctx)),coverage:{shops_expected:shops.length,shops_with_sales:parsedCovered.size,shops_with_confirmed_sales:covered.size,company_complete:false},gaps:['参考汇总含已解析待核对资料；已确认金额另列，不与订单利润或月度账单再次累计','采购实际成本、库存月末快照和公司共用支出尚待核对','平台转出与收款需匹配，银行到账待补','凭证须经会计审核，未形成最终税前扣除额']};
   },
   async export(input,session){
    const ctx=await company(input,session),period=range(input),report=await this.report(input,ctx.s,{costRowsForExport:true});
@@ -361,7 +394,8 @@ export function createCompanyFinanceDocuments({query=mysqlQuery,execute=mysqlExe
    zip.file(`${base}/逐单校准历史.json`,JSON.stringify(adjustments,null,2));
    addSheet('缺件与限制',['待办'],report.gaps.map(g=>[g]));
    addSheet('收款与提现',['日期','类型','金额','原币','手续费原币','提现表列银行金额','表列银行币种','交易参考','原件编号'],report.cash_reconciliation.rows.map(r=>[r.date,r.type,r.amount,r.currency,r.fee,r.listed_bank_amount,r.listed_bank_currency,r.reference,r.document_id]));
-   addSheet('付款候选匹配',['平台付款日期','平台付款CNY','收款日期','收款CNH','匹配状态'],report.cash_reconciliation.matches.map(r=>[r.payment.date,r.payment.amount,r.entry?.date,r.entry?.amount,r.status]));
+   addSheet('入账归属汇总',['入账月份','店铺','币种','入账笔数','金额'],report.cash_reconciliation.shop_entries.map(r=>[r.month,report.shops.find(s=>Number(s.id)===r.shop_id)?.name||(r.shop_id?String(r.shop_id):'待核'),r.currency,r.count,r.amount]));
+   addSheet('付款候选匹配',['店铺','平台付款日期','平台付款CNY','收款日期','收款CNH','连连交易号','Ozon原件','原件行','匹配状态'],report.cash_reconciliation.matches.map(r=>[report.shops.find(s=>Number(s.id)===Number(r.payment.shop_id))?.name,r.payment.date,r.payment.amount,r.entry?.date,r.entry?.amount,r.entry?.reference,r.payment.original_name,r.payment.source,r.status]));
    addSheet('文件内部核对',['原件编号','核对项目','差额','原币'],report.documents.flatMap(d=>(d.payload_json.controls||[]).map(c=>[d.id,c.name,c.difference??null,c.currency])));
    addSheet('采购成本匹配',['月份','店铺ID','货件号','SKU','销售数量','退回数量','采购成本CNY','状态','依据','原件编号','订单商品行'],report.purchase_cost.details.rows.map(l=>[l.month,l.shop_id,l.posting_number,l.sku,l.sold_quantity,l.returned_quantity,l.amount,l.amount_status,l.source,l.document_id,(l.item_ids||[]).join(',')]));
    zip.file(`${base}/00_公司汇总与明细.xlsx`,await book.xlsx.writeBuffer());
