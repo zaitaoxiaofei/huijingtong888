@@ -29,7 +29,7 @@ async function save(){
  if(!canWrite.value||busy.value||(!submission.value&&!valid.value))return;
  if(!submission.value)submission.value={product_id:props.productId,action:action.value,quantity:quantity.value,batch_id:action.value==='disassemble'?batchId.value:null,revision:data.value.revision,request_key:crypto.randomUUID(),note:note.value,stock_location:'LOCAL'};
  const token=version,scope=currentApiCacheScope();busy.value=true;error.value='';
- try{const result=await apiClient.post('/api/inventory/bundle-conversion',submission.value);if(disposed||token!==version||scope!==currentApiCacheScope())return;submission.value=null;ElMessage.success(result.action==='assemble'?'组装入库完成，已扣减对应散件':'拆包完成，已返还原批次散件');emit('saved',result);await load();}
+ try{const result=await apiClient.post('/api/inventory/bundle-conversion',submission.value);if(disposed||token!==version||scope!==currentApiCacheScope())return;submission.value=null;ElMessage.success(result.action==='assemble'?'组装入库完成，已扣减对应散件':'拆包完成，已返还原批次散件');emit('saved',result);await load();busy.value=false;}
  catch(e){if(token!==version||scope!==currentApiCacheScope())return;if([400,403,404,409].includes(e.status)){submission.value=null;await load();}error.value=e.message||'提交结果未确认，请使用同一记录重试';}
  finally{if(token===version)busy.value=false;}
 }

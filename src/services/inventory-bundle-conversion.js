@@ -1,3 +1,4 @@
+import {mapBundleReads} from './bundle-read-map.js';
 import {mysqlQuery,withMysqlTransaction} from '../mysql-pool.js';
 import {authorizeBusinessTaskSession,assertBusinessTaskPermission} from './business-task-tenant.js';
 import {resolveInventoryTenantScope,assertInventoryRecord,inventoryTenantSql} from './inventory-tenant-scope.js';
@@ -21,10 +22,12 @@ export function createInventoryBundleConversion({ledger,postMovement,reconcile,q
   await assertInventoryRecord(scope,'product',id,q);
   const graph=await loadInventoryComposition(q,scope);
   if(!graph.isBundle(id))throw fail('此商品没有套装组成，请先在商品资料中设置配件和每套数量');
-  const root=await ledger.read({product_id:id,include_fbp:false},scope.id,connection);
+  const parts=graph.components(id);
+  const snapshots=await mapBundleReads([id,...parts.map(p=>p.id)],product_id=>ledger.read({product_id,include_fbp:false},scope.id,connection),connection?1:2);
+  const root=snapshots[0];
   const components=[];
-  for(const part of graph.components(id)){
-   const stock=await ledger.read({product_id:part.id,include_fbp:false},scope.id,connection);
+  for(const [index,part] of parts.entries()){
+   const stock=snapshots[index+1];
    components.push({product_id:Number(part.id),name:part.name,inventory_number:part.inventory_number,stock_unit:part.stock_unit,per_set_quantity:part.per_set_quantity,physical_stock:stock.physical_estimate,available_stock:stock.available_estimate,reserved_for_bundle:stock.orders.filter(o=>o.needs_fulfillment&&o.assembly_required&&Number(o.root_product_id)===id&&o.stock_location!=='FBP').reduce((n,o)=>n+Number(o.stock_quantity||0),0),revision:stock.revision,unit_cost:Number(stock.product.purchase_cost)||0});
   }
   const events=await q("SELECT id,action,detail_json,created_at FROM inventory_flow_events WHERE tenant_id=? AND product_id=? AND action IN ('bundle_assembly','bundle_disassembly') ORDER BY id",[scope.id,id]);
