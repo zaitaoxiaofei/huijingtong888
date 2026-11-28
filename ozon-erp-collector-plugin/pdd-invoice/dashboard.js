@@ -69,7 +69,7 @@ function render() {
   companyPicker.disabled=!a || model.queue?.state === "running";
   const scan = model.scanProgress;
   $("scanStop").hidden = !scan?.running;
-  $("scanOpen").hidden = !scan?.tabId;
+  $("scanOpen").hidden = !scan?.running || !scan?.tabId;
   if(a?.erpSyncProgress?.running){const p=a.erpSyncProgress;notice(`正在同步系统台账 ${p.saved} / ${p.total} 笔 · 最近响应 ${Math.max(0,Math.floor((Date.now()-p.updatedAt)/1000))} 秒前`);}
   if (scan?.running) notice(`${scan.note}${scan.updatedAt ? `（最近响应 ${Math.max(0,Math.floor((Date.now()-scan.updatedAt)/1000))} 秒前）` : ""}；已保留 ${scan.count || 0} 笔${scan.oldest ? `，最早日期 ${scan.oldest}` : "，平台暂未提供下单日期"}`);
   const q = model.queue;
