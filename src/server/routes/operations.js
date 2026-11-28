@@ -1,4 +1,5 @@
 import { productAliasService } from '../../services/product-alias.js';
+import {withMysqlInteractiveRead} from '../../mysql-workload.js';
 import {createHash} from 'node:crypto';
 import {procurementDemandDetails} from '../../services/procurement-demand-details.js';
 import {procurementDemandCancellation} from '../../services/procurement-demand-cancellation.js';
@@ -76,13 +77,14 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/inventory-workflow/product-aliases": async req => productAliasService.save(await readJson(req), req._session),
     "GET /api/inventory-workflow/demand-details":(req,url)=>procurementDemandDetails.details(url.searchParams.get('product_id'),req._session),
     "POST /api/inventory-workflow/local-safety":async req=>procurementDemandDetails.safety(await readJson(req),req._session),
-    "GET /api/inventory-workflow/purchase-arrivals":(req,url)=>procurementArrivals.list(Object.fromEntries(url.searchParams),req._session),
+    "GET /api/inventory-workflow/purchase-arrivals":(req,url)=>withMysqlInteractiveRead(()=>procurementArrivals.list(Object.fromEntries(url.searchParams),req._session)),
     "GET /api/inventory-workflow/purchase-bundle":(req,url)=>services.purchaseBundleContext(Object.fromEntries(url.searchParams),req._session),
     "POST /api/inventory-workflow/purchase-bundle":async req=>services.reviewPurchaseBundle(await readJson(req),req._session),
     "POST /api/inventory-workflow/purchase-arrivals":async req=>procurementArrivals.confirm(await readJson(req),req._session),
     "POST /api/inventory-workflow/demand-request":async req=>procurementDemandRequest(await readJson(req),req._session),
     "POST /api/inventory-workflow/cancel-demand":async req=>procurementDemandCancellation(await readJson(req),req._session),
     "GET /api/inventory-workflow/alerts": async (req,url)=>{
+      const read=async()=>{
       const session=await authorizeBusinessTaskSession(req._session);assertBusinessTaskPermission(session,'inventory.read');
       const params=Object.fromEntries(url.searchParams);
       const base=params.view==='workspace'?await workflow.workspaceProducts(params,session.tenant.id):await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
@@ -106,6 +108,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       const rank={danger:0,warning:1,unknown:2,opportunity:3,success:4};rows.sort((a,b)=>(rank[a.workflow?.overall]??2)-(rank[b.workflow?.overall]??2)||Number(b[sortKey])-Number(a[sortKey]));
       const page=Math.max(1,Number(params.page)||1),pageSize=Math.min(100,Math.max(1,Number(params.pageSize)||20));
       return{rows:rows.slice((page-1)*pageSize,page*pageSize),total:rows.length,page,pageSize,meta:Object.fromEntries(['danger','warning','unknown','opportunity','success'].map(status=>[status,all.filter(row=>row.workflow?.overall===status).length]))};
+      };
+      return url.searchParams.get('view')==='workspace'?withMysqlInteractiveRead(read):read();
     },
     "GET /api/inventory-workflow": async (req, url) => {
       const session=await authorizeBusinessTaskSession(req._session);

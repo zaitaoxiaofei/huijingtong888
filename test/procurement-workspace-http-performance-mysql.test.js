@@ -47,9 +47,10 @@ test('actual procurement workspace HTTP reads persisted demand within one second
     });
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(8788,'127.0.0.1',resolve);});
     const timings=[];
-    const read=async extra=>{
+    const read=async (extra,mobile=false)=>{
       const start=performance.now();
-      const response=await fetch('http://127.0.0.1:8788/api/inventory-workflow/alerts?task=required&scope=all&page=1&pageSize=50&view=workspace&compact=1'+extra,{signal:AbortSignal.timeout(6000)});
+      const query=mobile?'task=required&page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&view=workspace&compact=1&snapshot_only=1':'task=required&scope=all&page=1&pageSize=50&view=workspace&compact=1';
+      const response=await fetch('http://127.0.0.1:8788/api/inventory-workflow/alerts?'+query+extra,{signal:AbortSignal.timeout(6000)});
       const payload=await response.json(),ms=performance.now()-start;
       timings.push(Math.round(ms));return{response,payload,ms};
     };
@@ -66,6 +67,12 @@ test('actual procurement workspace HTTP reads persisted demand within one second
         assert.deepEqual(payload.rows.map(r=>r.product_id),Array.from({length:size},(_,i)=>start-i));
         assert.ok(payload.rows.every(r=>r.product_id<=1000&&r.workflow.supply_plan.required_purchase===1));
         assert.ok(ms<1000,`Complete local HTTP response took ${ms.toFixed(1)}ms`);
+      }
+      for(const [suffix,size,start] of [['',20,1000],['&page=2',20,980],['&pageSize=50',50,1000],['&pageSize=100',100,1000]]){
+        const {response,payload,ms}=await read(suffix,true);
+        assert.equal(response.status,200);assert.equal(payload.snapshot.available,true);assert.equal(payload.total,1000);
+        assert.equal(payload.rows.length,size);assert.deepEqual(payload.rows.map(r=>r.product_id),Array.from({length:size},(_,i)=>start-i));
+        assert.ok(ms<1000,`Complete mobile HTTP response took ${ms.toFixed(1)}ms`);
       }
       const {response,payload}=await read('&product_id=1029');
       assert.equal(response.status,200);assert.deepEqual(payload.rows,[]);assert.equal(payload.total,0);

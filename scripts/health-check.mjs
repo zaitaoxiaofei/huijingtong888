@@ -62,6 +62,12 @@ const endpoints = [
   ["/api/outbound-records?paged=1&page=1&pageSize=30&dateFrom=&dateTo=&shopId=all&status=all&query=", "outbound_records_paged"],
   ["/api/procurement/requests?grouped=1&paged=1&page=1&pageSize=30", "procurement_grouped_paged"],
   ["/api/inventory-workflow/alerts?task=required&scope=all&page=1&pageSize=50&view=workspace&compact=1", "procurement_workspace_paged"],
+  ["/api/products?page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&paged=1&view=inventory&includeStock=0", "mobile_procurement_register_paged"],
+  ["/api/inventory-workflow/alerts?page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&view=workspace&compact=1&task=required&snapshot_only=1", "mobile_procurement_required_paged"],
+  ["/api/inventory-workflow/alerts?page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&view=workspace&compact=1&task=advisory&snapshot_only=1", "mobile_procurement_advisory_paged"],
+  ["/api/inventory-workflow/purchase-arrivals?page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&status=pending&day_mode=pending", "mobile_procurement_pending_paged"],
+  ["/api/inventory-workflow/purchase-arrivals?page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&status=all&recent=1", "mobile_procurement_history_paged"],
+  ["/api/inventory-workflow/purchase-arrivals?page=1&pageSize=20&query=&inventoryType=all&searchMode=inventory_id&status=received", "mobile_procurement_received_paged"],
   ["/api/procurement/purchase-orders?paged=1&page=1&pageSize=30", "purchase_orders_paged"],
   ["/api/orders?paged=1&page=1&pageSize=30&status=all&shopId=all&dateFrom=&dateTo=&searchType=order&searchQuery=&markFilter=all&printFilter=all&printView=all&sortMode=ordered", "orders_paged"],
   ["/api/profit-ranking?dimension=sku&page=1&pageSize=10", "profit_ranking_sku"],
@@ -150,7 +156,8 @@ async function checkEndpoint(path, label, token) {
   const expectsPaged = label.endsWith("_paged") || path.includes("paged=1");
   const contractOk = !expectsPaged || summary.kind === "paged" || summary.kind === "profit_ranking";
   const durationOk = !durationBudgetMs || elapsedMs <= durationBudgetMs;
-  const snapshotOk = !requireFreshSnapshot || label !== "procurement_workspace_paged"
+  const needsSnapshot=label === 'procurement_workspace_paged'||['mobile_procurement_required_paged','mobile_procurement_advisory_paged'].includes(label);
+  const snapshotOk = !requireFreshSnapshot || !needsSnapshot
     || (summary.snapshot?.available === true && !summary.snapshot.stale && !summary.snapshot.refreshing && summary.snapshot.status === "ready");
 
   return {
@@ -194,4 +201,4 @@ console.log(JSON.stringify({
   results
 }, null, 2));
 
-if (failed.length) process.exit(1);
+if (failed.length) process.exitCode = 1;

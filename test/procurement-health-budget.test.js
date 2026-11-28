@@ -26,10 +26,18 @@ test('procurement SLA check rejects warming or slow results and checks the real 
       assert.equal(report.results[0].label,'procurement_workspace_paged');assert.equal(report.results[0].summary.total,1);
       assert.deepEqual(paths.splice(0),['/api/auth/login','/api/inventory-workflow/alerts']);
     });
+    await t.test('all six mobile lists have fixed endpoint labels and independent one second checks',async()=>{
+      const labels=['register','required','advisory','pending','history','received'].map(tab=>`mobile_procurement_${tab}_paged`);
+      const result=await check({HEALTH_CHECK_LABELS:labels.join(',')});assert.equal(result.code,0,result.stderr);
+      const report=JSON.parse(result.stdout);assert.equal(report.failedCount,0);assert.deepEqual(report.results.map(r=>r.label),labels);
+      assert.deepEqual(paths.splice(0),['/api/auth/login','/api/products','/api/inventory-workflow/alerts','/api/inventory-workflow/alerts',...Array(3).fill('/api/inventory-workflow/purchase-arrivals')]);
+    });
     await t.test('a fast warming empty response cannot pass the SLA check',async()=>{
       mode='warming';const result=await check();assert.equal(result.code,1);
       const report=JSON.parse(result.stdout);assert.equal(report.failedCount,1);assert.equal(report.results[0].summary.total,null);
       assert.match(report.results[0].error,/fresh ready snapshot/);
+      const mobile=await check({HEALTH_CHECK_LABELS:'mobile_procurement_required_paged,mobile_procurement_advisory_paged'});
+      assert.equal(mobile.code,1,mobile.stderr||mobile.stdout);assert.equal(JSON.parse(mobile.stdout).failedCount,2,'Mobile demand pages also require completed snapshots');
     });
     await t.test('a complete ready response over the chosen budget fails',async()=>{
       mode='slow';const result=await check({HEALTH_CHECK_MAX_DURATION_MS:'20'});assert.equal(result.code,1);

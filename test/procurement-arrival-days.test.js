@@ -25,6 +25,7 @@ test('day indexes use all pending rows before selected-day filtering or paginati
   calls.push({sql,args});
   if(sql.includes('JOIN tenant_members tm ON tm.tenant_id = t.id'))return[{id:2,slug:'a',tenant_role:'member',business_roles_json:['procurement']}];
   if(sql.includes('SELECT id, slug FROM tenants'))return[{id:2,slug:'a'}];
+  if(sql.includes('SELECT reminders.inbound_id'))return[];
   if(sql.includes('SELECT p.id,p.name'))return[{id:200,name:'Physical stock'},{id:201,name:'Unreviewed bundle'}];
   if(sql.includes('SELECT c.product_id,c.component_product_id'))return[{product_id:201,component_product_id:200,quantity:3}];
   if(sql.includes("action='purchase_bundle_review'"))return[];
