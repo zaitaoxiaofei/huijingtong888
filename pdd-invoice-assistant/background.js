@@ -12,6 +12,7 @@ const boot = (async () => {
   await chrome.storage.local.setAccessLevel({accessLevel: "TRUSTED_CONTEXTS"});
   store = (await chrome.storage.local.get(KEY))[KEY] || {accounts: [], active: "", queue: null};
   C.recoverQueue(store.queue);
+  if (store.queue) await closeQueueTabs(store.queue);
   for(const a of store.accounts) a.erpUploading=false;
   if (store.lastScanProgress?.running) Object.assign(store.lastScanProgress, {running: false, complete: false, note: "上次读取中断，已保存记录；请重新同步继续读取"});
   if (store.queue) syncQueueRows();
@@ -155,6 +156,28 @@ function refreshError(error) {
   if (/message channel closed|message port closed|asynchronous response|Receiving end does not exist|Could not establish connection/i.test(note)) return "拼多多页面通信中断，自动恢复后仍未读到本单；已保留原状态，其他订单继续查询";
   return note;
 }
+async function closeOwnedTab(tabId) {
+  try { await deadline(chrome.tabs.remove(tabId),10000,"关闭处理页面超时，请检查浏览器后继续"); }
+  catch(error) { if (!/No tab|Invalid tab/i.test(error.message)) throw error; }
+}
+async function closeProcessingTab(q, tabId) {
+  if (!q.tabIds?.includes(tabId)) return;
+  await closeOwnedTab(tabId);
+  q.tabIds = q.tabIds.filter(id=>id!==tabId);
+  if (q.tabId === tabId) q.tabId = q.tabIds[0] || null;
+  for (const item of q.items) if (item.tabId === tabId) item.tabId = null;
+}
+async function closeQueueTabs(q) {
+  const results = await Promise.allSettled((q.tabIds || []).map(id=>closeProcessingTab(q,id)));
+  const failed = results.find(r=>r.status === "rejected");
+  if (failed) { q.state="paused";q.note=`临时页面清理失败：${failed.reason.message}`; }
+}
+async function createProcessingTab(q, item) {
+  const tab = await chrome.tabs.create({url:C.ORIGIN+"/orders.html",active:false});
+  q.tabIds ||= [];q.tabIds.push(tab.id);q.tabId ||= tab.id;item.tabId=tab.id;
+  await save();
+  return tab.id;
+}
 async function refreshOrder(q, a, item, tabId) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -168,10 +191,8 @@ async function refreshOrder(q, a, item, tabId) {
       if (refreshBlocked(error.message)) throw error;
       if (attempt) throw error;
       // State reads are repeatable. Applications and downloads never use this retry.
-      const replacement = await chrome.tabs.create({url:C.ORIGIN + "/orders.html",active:false});
-      q.tabIds = [...q.tabIds.filter(id=>id!==tabId),replacement.id];
-      if (q.tabId === tabId) q.tabId = replacement.id;
-      tabId = replacement.id; item.tabId = tabId;
+      await closeProcessingTab(q,tabId);
+      tabId = await createProcessingTab(q,item);
       q.note = `正在自动恢复查询窗口：${item.id}`;q.heartbeatAt=Date.now();await save();
     }
   }
@@ -285,7 +306,7 @@ async function startQueue(message) {
     return {id: row.id, url: row.url, status: skip || downloaded ? "skipped" : "pending",
       note: skip ? "该订单不是待申请状态，请先打开订单核对" : downloaded ? "该订单已有下载记录，请先在 Chrome 下载记录核对，本次跳过" : ""};
   });
-  const concurrency = Math.max(1, Math.min(8, Math.floor(Number(message.concurrency)||2)));
+  const concurrency = Math.max(1, Math.min(10, Math.floor(Number(message.concurrency)||10)));
   store.queue = {companyId:a.titleCompanyId||null, concurrency, destination:message.destination === "system" ? "system" : "local", id: crypto.randomUUID(), accountId: a.id, fingerprint: a.fingerprint, kind: message.kind,
     title, items, state: "running", created: Date.now(), tabId: null, note: "正在准备处理窗口"};
   syncQueueRows();
@@ -303,16 +324,16 @@ async function runQueue() {
     const a = account(q.accountId);
     await assertSession(a, q.fingerprint);
     const lanes = Math.min(q.concurrency || 1, q.items.filter(i=>i.status === "pending").length);
+    await closeQueueTabs(q);
+    if (q.tabIds?.length) throw new Error(q.note);
     q.tabIds = [];q.tabId=null;
     const laneResults = await Promise.allSettled(Array.from({length:lanes}, async () => {
-      let tab;
-      try{tab=await chrome.tabs.create({url:C.ORIGIN+"/orders.html",active:false});}catch(error){q.state="paused";q.note=`创建处理窗口失败：${error.message}`;throw error;}
-      let tabId=tab.id; q.tabIds.push(tabId); q.tabId ||= tabId;
       while(q.state === "running") {
         const item=q.items.find(i=>i.status === "pending");
         if(!item) break;
-        item.status="processing"; item.tabId=tabId;
+        item.status="processing";
         try {
+          let tabId = await createProcessingTab(q,item);
           await assertSession(a, q.fingerprint);
 
           item.updated = Date.now();q.heartbeatAt=Date.now();q.currentStartedAt=Date.now();
@@ -414,9 +435,13 @@ async function runQueue() {
           item.updated = Date.now();q.heartbeatAt=Date.now();
           syncQueueRows();
           await save();
-          if (q.state === "running") await new Promise(resolve => setTimeout(resolve, 750));
-
         } catch(error) { item.status="review";item.note=error.message;q.state="paused";q.note=error.message;syncQueueRows();await save(); }
+        finally {
+          try { await closeProcessingTab(q,item.tabId); }
+          catch(error) { q.state="paused";q.note=`临时页面清理失败：${error.message}`; }
+          await save();
+        }
+        if (q.state === "running") await new Promise(resolve => setTimeout(resolve, 750));
       }
     }));
     const rejectedLane=laneResults.find(r=>r.status === "rejected");
@@ -428,6 +453,7 @@ async function runQueue() {
     }
   } catch (error) { q.state = "paused"; q.note = error.message; }
   finally {
+    await closeQueueTabs(q);
     runner = false;
     autoSync(account(q.accountId));
     syncQueueRows();
@@ -568,27 +594,30 @@ async function handle(message, sender) {
       // Read the purchase list first: invoice history often omits purchase dates,
       // shop names and paid amounts. Merge official records by exact order ID.
       const purchase = await chrome.tabs.create({url: C.ORIGIN + "/orders.html", active: false});
-      const loaded = await scan({...message, tabId: purchase.id, history: false, purchase: true, loadMore: true});
-      if (loaded.scan.note.startsWith("已停止")) return loaded;
-      account(message.accountId).purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
-      await save();
-      await visit(purchase.id, C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3");
-      const tab = purchase;
-      const invoices = await scan({...message, tabId: tab.id, history: true, loadMore: true});
-      const a = account(message.accountId);
-      a.purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
-      store.lastScanProgress = {...invoices.scanProgress, running: false, purchaseComplete: Boolean(loaded.scan.complete),
-        note: `采购订单 ${loaded.scan.count} 笔，${loaded.scan.complete ? "已读到实际最早记录" : "本次尚未确认全部读完"}；${invoices.scan.note}`};
-      await save();
-      autoSync(a);
-      return {...await state(), scanProgress: store.lastScanProgress, scan: {count: loaded.scan.count, note: store.lastScanProgress.note}};
+      try {
+        const loaded = await scan({...message, tabId: purchase.id, history: false, purchase: true, loadMore: true});
+        if (loaded.scan.note.startsWith("已停止")) return loaded;
+        account(message.accountId).purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
+        await save();
+        await visit(purchase.id, C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant&active_tab=3");
+        const tab = purchase;
+        const invoices = await scan({...message, tabId: tab.id, history: true, loadMore: true});
+        const a = account(message.accountId);
+        a.purchaseHistory = {...loaded.scanProgress, count: loaded.scan.count, checkedAt: Date.now()};
+        store.lastScanProgress = {...invoices.scanProgress, running: false, purchaseComplete: Boolean(loaded.scan.complete),
+          note: `采购订单 ${loaded.scan.count} 笔，${loaded.scan.complete ? "已读到实际最早记录" : "本次尚未确认全部读完"}；${invoices.scan.note}`};
+        await save();
+        autoSync(a);
+        return {...await state(), scanProgress: store.lastScanProgress, scan: {count: loaded.scan.count, note: store.lastScanProgress.note}};
+      } finally { await closeOwnedTab(purchase.id); }
     }
     case "SCAN": return scan(message);
     case "IMPORT_INVOICES": {
       idleOnly();
       await assertSession(account(message.accountId));
       const tab = await chrome.tabs.create({url: C.ORIGIN + "/commercial_pre_orders.html?_t_module_name=psnl_invoice_assistant", active: false});
-      return scan({accountId: message.accountId, tabId: tab.id, loadMore: true});
+      try { return await scan({accountId: message.accountId, tabId: tab.id, loadMore: true}); }
+      finally { await closeOwnedTab(tab.id); }
     }
     case "START": return startQueue(message);
     case "PAUSE": if (store.queue) { store.queue.state = "paused"; store.queue.note = "已暂停；当前已提交的操作仍会记录结果"; await save(); } return state();
@@ -639,8 +668,8 @@ async function handle(message, sender) {
       await chrome.tabs.create({url: C.invoiceUrl(row.id)}); return {};
     }
     case "OPEN_TASK": {
-      const q=store.queue;if(!q?.tabId)throw new Error("暂无处理窗口，请先点击更新开票进度");
-      try {await chrome.tabs.update(q.tabId,{active:true});}
+      const q=store.queue;if(!q?.items?.length)throw new Error("暂无处理窗口，请先点击更新开票进度");
+      try {if(!q.tabId)throw new Error("No tab");await chrome.tabs.update(q.tabId,{active:true});}
       catch(error){
         if(!/No tab|Invalid tab/i.test(error.message))throw error;
         const item=q.items.find(i=>["processing","review","failed","pending"].includes(i.status))||q.items[0];

@@ -38,11 +38,12 @@ async function harness(saved, processResult) {
     tabs: {
       get: async id => { if (!tabs.has(id)) throw new Error("No tab"); return tabs.get(id); },
       query: async () => [...tabs.values()],
+      remove: async id => { if (!tabs.has(id)) throw new Error("No tab"); tabs.delete(id); },
       create: async options => { const tab = {id: ++tabId, status: "complete", ...options}; tabs.set(tab.id, tab); return tab; },
       update: async (id, options) => { Object.assign(tabs.get(id), options); return tabs.get(id); },
       sendMessage: async (id, message) => {
         messages.push(message);
-        if (message.type === "PDD_INVOICE_SCAN") return {ok: true, rows: [{id: firstId, url: orderUrl(firstId)}]};
+        if (message.type === "PDD_INVOICE_SCAN") return {ok: true, rows: [{id: firstId, url: orderUrl(firstId)}], note:"已读完", complete:true, count:1};
         return processResult ? processResult(message, id) : {ok: true, status: "submitted", note: "已确认"};
       }
     },
@@ -311,8 +312,9 @@ test("batch application navigates directly to the matched official merchant appl
   const h = await harness(); const id = await bound(h);
   const url = C.invoiceUrl(firstId, "apply", "123");
   await h.eval(`store.accounts[0].orders[0].applicationUrl=${JSON.stringify(url)}`);
+  const visits=[];const update=h.chrome.tabs.update;h.chrome.tabs.update=async(id,options)=>{visits.push(options.url);return update(id,options);};
   await h.send("START", {accountId:id, ids:[firstId], kind:"apply"}); await h.done();
-  assert.equal([...await h.chrome.tabs.query()].at(-1).url, url);
+  assert.ok(visits.includes(url));
   assert.equal(h.data().accounts[0].orders[0].status, "submitted");
 });
 
@@ -382,7 +384,7 @@ test("mixed selection applies only pending rows, preserving issued and submitted
  await h.send("START",{accountId:id,ids:[firstId,secondId],kind:"apply",concurrency:8});await h.done();
  assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,1);assert.equal(h.data().accounts[0].orders.find(r=>r.id===secondId).status,'issued');assert.equal(h.data().queue.items.find(r=>r.id===secondId).status,'skipped');
 });
-test("parallel queue uses separate tabs, caps concurrency at eight and processes each order once",async()=>{
+test("parallel queue uses separate tabs, caps concurrency at ten and processes each order once",async()=>{
  let current=0,peak=0;const calls=new Map();
  const h=await harness(undefined,async(message,tabId)=>{
   if(message.type!=='PDD_INVOICE_PROCESS')return {ok:true};
@@ -391,7 +393,7 @@ test("parallel queue uses separate tabs, caps concurrency at eight and processes
  });const id=await bound(h);const ids=Array.from({length:20},(_,i)=>'261118-'+String(123456789012345+i));
  await h.eval(`store.accounts[0].orders=${JSON.stringify(ids.map(id=>({id,url:orderUrl(id),status:'pending'})))}`);
  await h.send('START',{accountId:id,ids,kind:'apply',concurrency:1000});await h.done();
- assert.ok(peak>1);assert.ok(peak<=8);assert.equal(calls.size,20);assert.ok([...calls.values()].every(n=>n===1));assert.equal(h.data().queue.tabIds.length,8);assert.equal(h.data().queue.state,'done');
+ assert.ok(peak>1);assert.ok(peak<=10);assert.equal(calls.size,20);assert.ok([...calls.values()].every(n=>n===1));assert.equal(h.data().queue.concurrency,10);assert.equal(h.data().queue.tabIds.length,0);assert.equal((await h.chrome.tabs.query()).length,1);assert.equal(h.data().queue.state,'done');
 });
 test("parallel submission authorization rejects a different lane's tab",async()=>{
  const h=await harness();const id=await bound(h);
@@ -493,7 +495,7 @@ test('refresh recreates a closed processing tab and finishes with read-only insp
  const h=await harness(undefined,async()=>({ok:true,status:'issued',facts:{issuedAt:'2026-11-28',invoiceAmountCents:1200}}));const id=await bound(h);const update=h.chrome.tabs.update;let closed=false;
  h.chrome.tabs.update=async(tabId,options)=>{if(!closed){closed=true;throw Error('No tab with id: '+tabId);}return update(tabId,options);};
  await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();
- assert.equal(h.data().queue.state,'done');assert.equal(h.data().accounts[0].orders[0].status,'issued');assert.equal(h.data().queue.items[0].tabId,12);assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,0);
+ assert.equal(h.data().queue.state,'done');assert.equal(h.data().accounts[0].orders[0].status,'issued');assert.equal(h.data().queue.items[0].tabId,null);assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,0);
 });
 test('refresh retries a lost message channel once in a new tab without submitting',async()=>{
  let calls=0;const visited=[];const h=await harness(undefined,async(m,tab)=>{assert.equal(m.type,'PDD_INVOICE_INSPECT');visited.push(tab);if(++calls===1)throw Error('A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received');return{ok:true,status:'submitted'};});const id=await bound(h);
@@ -543,4 +545,41 @@ test('refresh never reactivates a previously skipped or uncertain invoice as eli
  const h=await harness(undefined,async()=>({ok:true,status:'pending',facts:{platformCheckedAt:Date.now()}}));const id=await bound(h);await h.eval(`account(${JSON.stringify(id)}).orders[0].status='review'`);
  await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(h.data().accounts[0].orders[0].status,'review');assert.equal(h.data().queue.state,'done');
  await h.eval(`account(${JSON.stringify(id)}).orders[0].status='skipped'`);await h.send('START',{accountId:id,ids:[firstId],kind:'refresh'});await h.done();assert.equal(h.data().accounts[0].orders[0].status,'skipped');
+});
+
+
+test('default concurrency is ten and each completed order closes its own page',async()=>{
+ const h=await harness();const id=await bound(h);const ids=Array.from({length:25},(_,i)=>'261118-'+String(223456789012345+i));
+ await h.eval(`store.accounts[0].orders=${JSON.stringify(ids.map(id=>({id,url:orderUrl(id),status:'pending'})))}`);
+ const create=h.chrome.tabs.create,remove=h.chrome.tabs.remove;let open=0,peak=0,created=0,closed=0;
+ h.chrome.tabs.create=async options=>{const t=await create(options);created++;peak=Math.max(peak,++open);return t;};
+ h.chrome.tabs.remove=async id=>{await remove(id);closed++;open--;};
+ await h.send('START',{accountId:id,ids,kind:'apply'});await h.done();
+ assert.equal(h.data().queue.concurrency,10);assert.ok(peak<=10);assert.equal(created,25);assert.equal(closed,25);assert.equal(open,0);
+ assert.deepEqual((await h.chrome.tabs.query()).map(t=>t.id),[1]);assert.equal(h.data().queue.tabId,null);
+});
+test('paused uncertain applications close their page without replaying or losing evidence',async()=>{
+ const h=await harness(undefined,async()=>({ok:true,status:'review',note:'提交结果不明确',block:true}));const id=await bound(h);
+ await h.send('START',{accountId:id,ids:[firstId],kind:'apply'});await h.done();
+ assert.equal(h.data().queue.state,'paused');assert.equal(h.data().queue.items[0].status,'review');assert.equal((await h.chrome.tabs.query()).length,1);
+ assert.equal(h.messages.filter(m=>m.type==='PDD_INVOICE_PROCESS').length,1);await assert.rejects(h.send('RESUME'),/先打开待核对/);
+});
+test('read retry closes the old page before replacement, and cleans up both attempts',async()=>{
+ let calls=0;const h=await harness(undefined,async()=>{if(++calls===1)throw Error('message channel closed');return{ok:true,status:'submitted'};});const id=await bound(h);
+ const create=h.chrome.tabs.create;let peak=0;h.chrome.tabs.create=async options=>{const t=await create(options);peak=Math.max(peak,(await h.chrome.tabs.query()).length-1);return t;};
+ await h.send('START',{accountId:id,ids:[firstId],kind:'refresh',concurrency:1});await h.done();
+ assert.equal(calls,2);assert.equal(peak,1);assert.equal((await h.chrome.tabs.query()).length,1);assert.deepEqual(h.data().queue.tabIds,[]);
+});
+test('restart cleans up only persisted worker pages while preserving user pages and uncertain status',async()=>{
+ const h=await harness();const id=await bound(h);const saved=h.data();saved.queue={id:'old',accountId:id,kind:'apply',state:'running',tabIds:[1],tabId:1,items:[{id:firstId,status:'processing',stage:'authorized',tabId:1}]};
+ const restarted=await harness(saved);assert.equal((await restarted.chrome.tabs.query()).length,0);assert.equal(restarted.data().queue.state,'paused');assert.equal(restarted.data().queue.items[0].status,'review');
+});
+
+
+test('automatic history and invoice imports close their own tabs while external scans leave user tabs open',async()=>{
+ const h=await harness();const id=await bound(h);
+ await h.send('SCAN_HISTORY',{accountId:id});assert.deepEqual((await h.chrome.tabs.query()).map(t=>t.id),[1]);
+ await h.send('IMPORT_INVOICES',{accountId:id});assert.deepEqual((await h.chrome.tabs.query()).map(t=>t.id),[1]);
+ h.chrome.tabs.sendMessage=async()=>{throw Error('读取失败');};
+ await assert.rejects(h.send('IMPORT_INVOICES',{accountId:id}),/读取失败/);assert.deepEqual((await h.chrome.tabs.query()).map(t=>t.id),[1]);
 });
