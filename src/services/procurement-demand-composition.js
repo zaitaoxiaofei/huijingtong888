@@ -38,3 +38,13 @@ export function procurementDemandAncestorIds(ids, edges) {
   }
   return [...result];
 }
+
+// Finished-kit allocation needs sibling/ancestor stocks that share a BOM, but
+// unrelated product families do not compete for those finished or loose units.
+export function procurementDemandRelatedIds(ids,edges){
+ const adjacent=new Map();
+ for(const edge of edges){const a=Number(edge.product_id),b=Number(edge.component_product_id);for(const [from,to] of [[a,b],[b,a]]){if(!adjacent.has(from))adjacent.set(from,[]);adjacent.get(from).push(to);}}
+ const result=new Set(ids.map(Number)),pending=[...result];
+ for(let i=0;i<pending.length;i++)for(const id of adjacent.get(pending[i])||[])if(!result.has(id)){result.add(id);pending.push(id);}
+ return [...result];
+}

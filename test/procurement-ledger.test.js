@@ -627,3 +627,10 @@ test('bundle ledger reads share one fresh coverage projection per group and pres
  for(const row of rows)assert.equal(row.revision,(await f.service.read({product_id:row.product.id},1)).revision);
  await f.service.readMany([10,11],1);assert.equal(groups.length,2,'a second request must recompute instead of reusing stale coverage');
 });
+
+test('equivalent order enumeration keeps the same ledger revision without changing presentation order',async()=>{
+ const order=id=>({order_id:id,stock_location:'LOCAL',items:[{order_item_id:id,product_id:10,quantity:1,stock_quantity:0}]});
+ const a=await fixture(false,{coverage:new Map([[2,order(2)],[1,order(1)]])}).service.read({product_id:10});
+ const b=await fixture(false,{coverage:new Map([[1,order(1)],[2,order(2)]])}).service.read({product_id:10});
+ assert.equal(a.revision,b.revision);assert.deepEqual(a.orders.map(o=>o.order_id),[2,1]);assert.deepEqual(b.orders.map(o=>o.order_id),[1,2]);
+});
