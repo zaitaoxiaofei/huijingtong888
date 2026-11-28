@@ -1,3 +1,4 @@
+import {procurementDemandCandidates} from './procurement-demand-candidates.js';
 import {remainingAssemblyBatches} from '../shared/bundle-finished-stock.js';
 import {loadBundleFinishedStocks,allocateBundleFinishedDemands} from './bundle-finished-stock.js';
 import { loadInventoryComposition } from './inventory-composition.js';
@@ -39,7 +40,7 @@ const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
 export function invalidateOrderProcurementCoverage(change) { invalidateInventoryWorkflow(change); generation += 1; cached = null; pending = null; }
 
-export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false, queuesOnly = false } = {}) {
+export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false, queuesOnly = false, targetedDemands = false } = {}) {
   if (includeTrace) fresh = true;
   if (productId !== null && (!Number.isSafeInteger(Number(productId)) || Number(productId) <= 0)) throw new Error('库存商品 ID 无效');
   const ownerScope = await resolveInventoryTenantScope(tenantId ?? 'admin', query);
@@ -118,6 +119,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   ) ` : '';
   const demandQuery=localBatchScope?sql=>query(localOrderFactsSql+sql,[utc(start),utc(end)]):localStateOnly?sql=>query(`SELECT local_demands.* FROM (${sql}) local_demands WHERE local_demands.needs_fulfillment=1 OR (local_demands.entered_transport=1 AND local_demands.transport_at>=? AND local_demands.transport_at<?)`,[utc(start),utc(end)]):query;
 
+  const candidates=targetedDemands&&requestedIds.length&&!localBatchScope?procurementDemandCandidates({demandIds:demandIdSql,stockIds:scopedIdSql,tenantScope}):null;
   const version = generation;
   const work = (async () => {
     const [demands, stocks, allocations, inbounds, requests, marks, deductions, sources, stockSources, fbpReservations, priorities, transportRows, dispatchRows] = await Promise.all([
@@ -131,8 +133,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         ${localBatchScope ? 'local_facts.local_needs_fulfillment' : needsFulfillmentSql} AS needs_fulfillment,
         ${localBatchScope ? 'local_facts.local_entered_transport' : enteredTransportSql} AS entered_transport,
         COALESCE(raw.query_procurement_location,'LOCAL') AS stock_location
-        ${localBatchScope ? 'FROM local_order_facts local_facts JOIN orders o ON o.id=local_facts.id' : tenantPk === null ? 'FROM orders o' : `FROM shops tenant_shop JOIN orders o ON o.shop_id=tenant_shop.id${tenantScope('tenant_shop.tenant_id')}`}
-        JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
+        ${candidates?`FROM (${candidates}) candidate_items JOIN order_items oi ON oi.id=candidate_items.id AND oi.quantity>0 JOIN orders o ON o.id=oi.order_id JOIN shops tenant_shop ON tenant_shop.id=o.shop_id${tenantScope('tenant_shop.tenant_id')}`:localBatchScope ? 'FROM local_order_facts local_facts JOIN orders o ON o.id=local_facts.id' : tenantPk === null ? 'FROM orders o' : `FROM shops tenant_shop JOIN orders o ON o.shop_id=tenant_shop.id${tenantScope('tenant_shop.tenant_id')}`}
+        ${candidates?'':'JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0'}
         LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1${tenantScope('direct_mapping.tenant_id')}
         LEFT JOIN (
           SELECT fallback_mapping.shop_id, fallback_mapping.ozon_sku, MIN(fallback_mapping.id) AS id

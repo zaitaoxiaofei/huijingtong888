@@ -35815,6 +35815,7 @@ export async function deleteSkuMappingMysql(id, tenantId = "admin") {
 
 
 const procurementLedgerService = createProcurementLedgerService({
+  coverageBatch: async (query,productIds,tenantId)=>loadOrderProcurementCoverage(query,'',{fresh:true,productIds,includeTrace:true,tenantId,targetedDemands:true}),
   query: mysqlQuery, transaction: withMysqlTransaction,
   fbpStocks: async (productId, tenantId) => loadProductFbpStocks(mysqlQuery, productId, await resolveInventoryTenantScope(tenantId)),
   coverage: async (query, productId, tenantId) => {
